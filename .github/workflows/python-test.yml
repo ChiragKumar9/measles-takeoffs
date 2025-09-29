@@ -1,0 +1,30 @@
+name: Python Test
+
+on:
+  push:
+  pull_request:
+    branches: [main]
+
+jobs:
+  python-install-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: setup python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: "pyproject.toml"
+
+      - name: install the project
+        run: uv sync --group test
+
+      - name: run poetry tests
+        run: |
+          uv run pytest
