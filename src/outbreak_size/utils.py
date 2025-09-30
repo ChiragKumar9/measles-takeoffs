@@ -100,7 +100,16 @@ class CensusQuery:
         )
         pop_data = [
             self.census.acs5.state_county(
-                fields=["B01001_004E", "B01001_028E"],
+                fields=[
+                    "B01001_004E",
+                    "B01001_028E",
+                    "B14003_005E",
+                    "B14003_014E",
+                    "B14003_033E",
+                    "B14003_023E",
+                    "B14003_051E",
+                    "B14003_042E",
+                ],
                 state_fips=fip[:2],
                 county_fips=fip[2:],
                 year=y,
@@ -110,11 +119,20 @@ class CensusQuery:
         pop_df = [pl.DataFrame(pop_datum) for pop_datum in pop_data]
         pop_df = pl.concat(pop_df)
         pop_df = pop_df.with_columns(
-            (pl.col("state") + pl.col("county")).alias("fips"),
-            (pl.col("B01001_004E") + pl.col("B01001_028E"))
-            .cast(pl.Int64, strict=False)
-            .alias("pop_5_9"),
-        ).select(["fips", "pop_5_9"])
+            fips=pl.col("state") + pl.col("county"),
+            pop_5_9=pl.col("B01001_004E") + pl.col("B01001_028E"),
+            public_schooled_5_9=pl.col("B14003_005E") + pl.col("B14003_033E"),
+            private_schooled_5_9=pl.col("B14003_014E") + pl.col("B14003_042E"),
+            not_enrolled_5_9=pl.col("B14003_023E") + pl.col("B14003_051E"),
+        ).select(
+            [
+                "fips",
+                "pop_5_9",
+                "public_schooled_5_9",
+                "private_schooled_5_9",
+                "not_enrolled_5_9",
+            ]
+        )
         return pop_df
 
     def query_land_size(self, fips: list[str]) -> pl.DataFrame:
@@ -124,11 +142,11 @@ class CensusQuery:
 
         land_df = self.land_size
         land_df = land_df.with_columns(
-            pl.col("GEOID").alias("fips"),
+            fips=pl.col("GEOID"),
             # land area is in square meters, convert to square km
-            (
+            land_size_sq_km=(
                 pl.col("ALAND").cast(pl.Float64, strict=False) / (1000 * 1000)
-            ).alias("land_size_sq_km"),
+            ),
         ).select(["fips", "land_size_sq_km"])
         land_df = land_df.filter(pl.col("fips").is_in(fips))
         return land_df
