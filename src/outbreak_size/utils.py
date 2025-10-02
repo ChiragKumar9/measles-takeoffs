@@ -91,39 +91,126 @@ class CensusQuery:
     def __init__(self, key: str):
         self.census = Census(key)
         self.land_size = None
+        # sourced from here
+        # https://www.minneapolisfed.org/about-us/monetary-policy/inflation-calculator/consumer-price-index-1913-
+        # https://www.bls.gov/cpi/tables/supplemental-files/historical-cpi-u-202308.pdf
+        self.cpi_inflation = {
+            2010: 0.016,
+            2011: 0.032,
+            2012: 0.021,
+            2013: 0.015,
+            2014: 0.016,
+            2015: 0.001,
+            2016: 0.013,
+            2017: 0.021,
+            2018: 0.024,
+            2019: 0.018,
+            2020: 0.012,
+            2021: 0.047,
+            2022: 0.08,
+            2023: 0.041,
+            2024: 0.029,
+        }
 
     def query_5_9_pop(self, year: list[int], fips: list[str]) -> pl.DataFrame:
-        """Get population of children aged 5-9 for given FIPS codes and year."""
+        """Get population of children aged 5-9 and their school type for given
+        FIPS codes and year."""
 
         assert len(fips) == len(year), (
             "FIPS and year lists must be the same length."
         )
-        pop_data = [
-            self.census.acs5.state_county(
-                fields=[
-                    "B01001_004E",
-                    "B01001_028E",
-                    "B14003_005E",
-                    "B14003_014E",
-                    "B14003_033E",
-                    "B14003_023E",
-                    "B14003_051E",
-                    "B14003_042E",
-                ],
-                state_fips=fip[:2],
-                county_fips=fip[2:],
-                year=y,
-            )
-            for fip, y in tqdm(zip(fips, year), total=len(fips))
-        ]
+        pop_data = list()
+        # query census for each fips/year combo
+        for fip, y in tqdm(zip(fips, year), total=len(fips)):
+            # education data were not gathered pre 2012
+            if y >= 2012:
+                pop_data.append(
+                    self.census.acs5.state_county(
+                        fields=[
+                            "B01001_004E",
+                            "B01001_028E",
+                            "B14003_005E",
+                            "B14003_014E",
+                            "B14003_033E",
+                            "B14003_023E",
+                            "B14003_051E",
+                            "B14003_042E",
+                            "B19019_001E",
+                            "B15003_023E",
+                            "B15003_024E",
+                            "B15003_025E",
+                            "B15003_001E",
+                            "B02001_001E",
+                            "B02001_002E",
+                        ],
+                        state_fips=fip[:2],
+                        county_fips=fip[2:],
+                        year=y,
+                    )[
+                        0
+                    ]  # need the 0th element because census returns a list of dicts
+                )
+            else:
+                # gather variables normally except education for 2012
+                income_schooling = self.census.acs5.state_county(
+                    fields=[
+                        "B01001_004E",
+                        "B01001_028E",
+                        "B14003_005E",
+                        "B14003_014E",
+                        "B14003_033E",
+                        "B14003_023E",
+                        "B14003_051E",
+                        "B14003_042E",
+                        "B19019_001E",
+                        "B02001_001E",
+                        "B02001_002E",
+                    ],
+                    state_fips=fip[:2],
+                    county_fips=fip[2:],
+                    year=y,
+                )
+                education = self.census.acs5.state_county(
+                    fields=[
+                        "B15003_023E",
+                        "B15003_024E",
+                        "B15003_025E",
+                        "B15003_001E",
+                    ],
+                    state_fips=fip[:2],
+                    county_fips=fip[2:],
+                    year=2012,
+                )
+                # merge the two queries
+                # need the 0th element because census returns a list of dicts
+                pop_data.append({**income_schooling[0], **education[0]})
         pop_df = [pl.DataFrame(pop_datum) for pop_datum in pop_data]
-        pop_df = pl.concat(pop_df)
+        # make a median household income column for inflation adjusting below
+        pop_df = [
+            df.with_columns(median_household_income=pl.col("B19019_001E"))
+            for df in pop_df
+        ]
+        # inflation adjust median household income to 2024 dollars
+        for idx, y in enumerate(year):
+            for yy in range(y + 1, 2024 + 1):
+                pop_df[idx] = pop_df[idx].with_columns(
+                    median_household_income=pl.col("median_household_income")
+                    * (1 + self.cpi_inflation[yy])
+                )
+        pop_df = pl.concat(pop_df, how="diagonal_relaxed")
         pop_df = pop_df.with_columns(
             fips=pl.col("state") + pl.col("county"),
             pop_5_9=pl.col("B01001_004E") + pl.col("B01001_028E"),
             public_schooled_5_9=pl.col("B14003_005E") + pl.col("B14003_033E"),
             private_schooled_5_9=pl.col("B14003_014E") + pl.col("B14003_042E"),
             not_enrolled_5_9=pl.col("B14003_023E") + pl.col("B14003_051E"),
+            fraction_graduate_degree=(
+                pl.col("B15003_023E")
+                + pl.col("B15003_024E")
+                + pl.col("B15003_025E")
+            )
+            / pl.col("B15003_001E"),
+            fraction_white=pl.col("B02001_002E") / pl.col("B02001_001E"),
         ).select(
             [
                 "fips",
@@ -131,6 +218,9 @@ class CensusQuery:
                 "public_schooled_5_9",
                 "private_schooled_5_9",
                 "not_enrolled_5_9",
+                "median_household_income",
+                "fraction_graduate_degree",
+                "fraction_white",
             ]
         )
         return pop_df
