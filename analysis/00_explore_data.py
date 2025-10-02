@@ -766,6 +766,40 @@ if __name__ == "__main__":
     )
     plt.show()
 
+    # income-exemptions correlation?
+    fig, ax, scatter = pairplot(
+        merged_df["median_household_income"],
+        merged_df["nonmed_exempt_pct"],
+        xlabel="Median household income (2024 USD)",
+        ylabel="Nonmedical vaccination exemptions (%)",
+        log=False,
+        c=np.log10(merged_df["cases_outbreak"] + 1),
+        cmap="viridis",
+    )
+    fig.colorbar(scatter, ax=ax, label="Log10(Outbreak cases + 1)")
+    plt.show()
+
+    # income-exemptions interaction?
+    merged_df = merged_df.with_columns(
+        income_exempt_interaction=pl.col("median_household_income")
+        * (100.0 - pl.col("nonmed_exempt_pct"))
+    )
+    fig, ax = compare_distributions(
+        merged_df.filter(pl.col("cases_outbreak") == 0)[
+            "income_exempt_interaction"
+        ],
+        merged_df.filter(pl.col("cases_outbreak") >= 3)[
+            "income_exempt_interaction"
+        ],
+        xlabel="Income * Nonmedical exemptions interaction",
+        label1="No outbreak",
+        label2="Outbreak (Cases >= 3)",
+        bins=np.arange(4000000, 18000000, 10000),
+        density=True,
+        cumulative=True,
+    )
+    plt.show()
+
     # %% EDUCATION AND OUTBREAK SIZE
     fig, ax = compare_distributions(
         merged_df.filter(pl.col("cases_outbreak") == 0)[
