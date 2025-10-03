@@ -185,8 +185,8 @@ def add_pop_variables(
     census_query = utils.CensusQuery(census_key)
     fips = merged_df["fips"].to_list()
     # make sure years are capped at 2023 since census data isn't available beyond that
-    years = merged_df["year"].clip(upper_bound=2023).to_list()
-    pop_df = census_query.query_5_9_pop(years, fips)
+    years_census = merged_df["year"].clip(upper_bound=2023).to_list()
+    pop_df = census_query.query_5_9_pop(years_census, fips)
     merged_df = merged_df.with_columns(
         pop_df[
             [
@@ -203,7 +203,10 @@ def add_pop_variables(
     # add a land size variable
     land_df = census_query.query_land_size(fips)
     merged_df = merged_df.join(land_df, on="fips", how="left")
-    mobility_df = census_query.query_within_county_mobility(years, fips)
+    years_mobility = merged_df["year"].to_list()
+    mobility_df = census_query.query_within_county_mobility(
+        years_mobility, fips
+    )
     merged_df = merged_df.with_columns(
         year_mobility=pl.col("year").clip(lower_bound=2019)
     )

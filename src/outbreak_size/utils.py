@@ -262,12 +262,12 @@ class CensusQuery:
             year=pl.col("Date"), fips=pl.col("County FIPS")
         )
         mobility = mobility.join(year_fips, on=["year", "fips"], how="inner")
+
         mobility = mobility.with_columns(
             within_county_estimate=pl.col("Number of Trips <1")
             + pl.col("Number of Trips 1-3")
             + pl.col("Number of Trips 3-5")
             + pl.col("Number of Trips 5-10")
-            + pl.col("Number of Trips 10-25")
         )
         mobility = mobility.select(["year", "fips", "within_county_estimate"])
         return mobility
