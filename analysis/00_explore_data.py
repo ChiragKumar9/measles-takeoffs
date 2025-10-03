@@ -203,12 +203,24 @@ def add_pop_variables(
     # add a land size variable
     land_df = census_query.query_land_size(fips)
     merged_df = merged_df.join(land_df, on="fips", how="left")
+    mobility_df = census_query.query_within_county_mobility(years, fips)
+    merged_df = merged_df.with_columns(
+        year_mobility=pl.col("year").clip(lower_bound=2019)
+    )
+    merged_df = merged_df.join(
+        mobility_df,
+        left_on=["year_mobility", "fips"],
+        right_on=["year", "fips"],
+        how="left",
+    )
     merged_df = merged_df.with_columns(
         pop_density_5_9=(pl.col("pop_5_9") / pl.col("land_size_sq_km")),
         fraction_public=(pl.col("public_schooled_5_9") / pl.col("pop_5_9")),
         fraction_private=(pl.col("private_schooled_5_9") / pl.col("pop_5_9")),
         # I previously checked by hand that public+private+not_enrolled = total pop 5-9
         fraction_not_enrolled=(pl.col("not_enrolled_5_9") / pl.col("pop_5_9")),
+        within_county_mobility_proxy=pl.col("within_county_estimate")
+        / pl.mean("within_county_estimate"),
     )
     return merged_df
 
@@ -853,6 +865,52 @@ if __name__ == "__main__":
         c=np.log10(merged_df["cases_outbreak"] + 1),
         cmap="viridis",
     )
+    fig.colorbar(scatter, ax=ax, label="Log10(Outbreak cases + 1)")
+    plt.show()
+
+    # %% MOBILITY AND OUTBREAK SIZE
+    fig, ax = compare_distributions(
+        merged_df.filter(pl.col("cases_outbreak") == 0)[
+            "within_county_mobility_proxy"
+        ],
+        merged_df.filter(pl.col("cases_outbreak") >= 3)[
+            "within_county_mobility_proxy"
+        ],
+        xlabel="Within-county mobility proxy",
+        label1="No outbreak",
+        label2="Outbreak (Cases >= 3)",
+        bins=np.arange(0, 6.7, 0.01),
+        density=True,
+        cumulative=True,
+    )
+    plt.show()
+
+    # Mobility, coverage, and cases
+    fig, ax, scatter = pairplot(
+        merged_df["within_county_mobility_proxy"],
+        merged_df["estimated_mmr_cov"],
+        xlabel="Within-county mobility proxy",
+        ylabel="Estimated MMR vaccination coverage (%)",
+        log=False,
+        c=np.log10(merged_df["cases_outbreak"] + 1),
+        cmap="viridis",
+    )
+    ax.set_xscale("log")
+    fig.colorbar(scatter, ax=ax, label="Log10(Outbreak cases + 1)")
+    plt.show()
+
+    # Mobility * coverage, and cases
+    fig, ax, scatter = pairplot(
+        merged_df["within_county_mobility_proxy"]
+        * merged_df["estimated_mmr_cov"],
+        merged_df["total_exempt_pct"],
+        xlabel="Within-county mobility proxy * coverage interaction",
+        ylabel="Total vaccine exemptions (%)",
+        log=False,
+        c=np.log10(merged_df["cases_outbreak"] + 1),
+        cmap="viridis",
+    )
+    ax.set_xscale("log")
     fig.colorbar(scatter, ax=ax, label="Log10(Outbreak cases + 1)")
     plt.show()
 

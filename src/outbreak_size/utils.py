@@ -1,3 +1,4 @@
+import os
 import zipfile
 from io import BytesIO
 
@@ -111,6 +112,7 @@ class CensusQuery:
             2023: 0.041,
             2024: 0.029,
         }
+        self.within_county_mobility = None
 
     def query_5_9_pop(self, year: list[int], fips: list[str]) -> pl.DataFrame:
         """Get population of children aged 5-9 and their school type for given
@@ -240,3 +242,32 @@ class CensusQuery:
         ).select(["fips", "land_size_sq_km"])
         land_df = land_df.filter(pl.col("fips").is_in(fips))
         return land_df
+
+    def query_within_county_mobility(
+        self, year: list[int], fips: list[str]
+    ) -> pl.DataFrame:
+        """Get within-county mobility for given FIPS codes and year."""
+        assert len(fips) == len(year), (
+            "FIPS and year lists must be the same length."
+        )
+        if self.within_county_mobility is None:
+            mobility = pl.read_csv(
+                os.path.join("data", "bts_mobility_statistics.csv"),
+                schema_overrides={"County FIPS": pl.String},
+            )
+            self.within_county_mobility = mobility
+        mobility = self.within_county_mobility
+        year_fips = pl.DataFrame({"year": year, "fips": fips})
+        mobility = mobility.with_columns(
+            year=pl.col("Date"), fips=pl.col("County FIPS")
+        )
+        mobility = mobility.join(year_fips, on=["year", "fips"], how="inner")
+        mobility = mobility.with_columns(
+            within_county_estimate=pl.col("Number of Trips <1")
+            + pl.col("Number of Trips 1-3")
+            + pl.col("Number of Trips 3-5")
+            + pl.col("Number of Trips 5-10")
+            + pl.col("Number of Trips 10-25")
+        )
+        mobility = mobility.select(["year", "fips", "within_county_estimate"])
+        return mobility
