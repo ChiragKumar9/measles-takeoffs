@@ -1,8 +1,8 @@
 import os
 
 import matplotlib.pyplot as plt
+import numpy as np
 import polars as pl
-import statsmodels.api as sm
 import yaml
 from dotenv import load_dotenv
 from matplotlib import rc
@@ -88,21 +88,16 @@ def process_outbreaks_df(outbreaks_df: pl.DataFrame) -> pl.DataFrame:
         )
         .group_by(["year", "state", "county"])
         .agg(
-            [
-                # If all values in group are null, keep null; otherwise sum
-                pl.when(pl.col("cases").is_null().all())
-                .then(None)
-                .otherwise(pl.col("cases").sum())
-                .alias("cases"),
-                pl.when(pl.col("indigenous").is_null().all())
-                .then(None)
-                .otherwise(pl.col("indigenous").sum())
-                .alias("indigenous"),
-                pl.when(pl.col("imported").is_null().all())
-                .then(None)
-                .otherwise(pl.col("imported").sum())
-                .alias("imported"),
-            ]
+            # If all values in group are null, keep null; otherwise sum
+            cases=pl.when(pl.col("cases").is_null().all())
+            .then(None)
+            .otherwise(pl.col("cases").sum()),
+            indigenous=pl.when(pl.col("indigenous").is_null().all())
+            .then(None)
+            .otherwise(pl.col("indigenous").sum()),
+            imported=pl.when(pl.col("imported").is_null().all())
+            .then(None)
+            .otherwise(pl.col("imported").sum()),
         )
     )
 
@@ -138,34 +133,28 @@ def read_vaccinations(data_dir=data_dir) -> pl.DataFrame:
 def process_vaccinations_df(vaccinations_df: pl.DataFrame) -> pl.DataFrame:
     # when we don't have mmr coverage, use all coverage
     vaccinations_df = vaccinations_df.with_columns(
-        [
-            pl.when(pl.col("mmr_cov").is_null())
-            .then(pl.col("all_vacc_cov"))
-            .otherwise(pl.col("mmr_cov"))
-            .alias("estimated_mmr_cov")
-        ]
+        estimated_mmr_cov=pl.when(pl.col("mmr_cov").is_null())
+        .then(pl.col("all_vacc_cov"))
+        .otherwise(pl.col("mmr_cov"))
     )
     # for baltimore city in 2019, mmr coverage is 0%, but other years have data
     # so we average the surroundings years together to get an estimate
     vaccinations_df = vaccinations_df.with_columns(
-        [
-            pl.when(
-                (pl.col("state") == "Maryland")
-                & (pl.col("county") == "Baltimore City")
-                & (pl.col("year") == 2019)
+        estimated_mmr_cov=pl.when(
+            (pl.col("state") == "Maryland")
+            & (pl.col("county") == "Baltimore City")
+            & (pl.col("year") == 2019)
+        )
+        .then(
+            pl.lit(
+                vaccinations_df.filter(
+                    (pl.col("state") == "Maryland")
+                    & (pl.col("county") == "Baltimore City")
+                    & ((pl.col("year") == 2018) | (pl.col("year") == 2020))
+                )["estimated_mmr_cov"].mean()
             )
-            .then(
-                pl.lit(
-                    vaccinations_df.filter(
-                        (pl.col("state") == "Maryland")
-                        & (pl.col("county") == "Baltimore City")
-                        & ((pl.col("year") == 2018) | (pl.col("year") == 2020))
-                    )["estimated_mmr_cov"].mean()
-                )
-            )
-            .otherwise(pl.col("estimated_mmr_cov"))
-            .alias("estimated_mmr_cov")
-        ]
+        )
+        .otherwise(pl.col("estimated_mmr_cov"))
     )
 
     # align namings of places
@@ -198,14 +187,40 @@ def add_pop_variables(
     # make sure years are capped at 2023 since census data isn't available beyond that
     years = merged_df["year"].clip(upper_bound=2023).to_list()
     pop_df = census_query.query_5_9_pop(years, fips)
-    merged_df = merged_df.with_columns(pop_df["pop_5_9"])
+    merged_df = merged_df.with_columns(
+        pop_df[
+            [
+                "pop_5_9",
+                "public_schooled_5_9",
+                "private_schooled_5_9",
+                "not_enrolled_5_9",
+                "median_household_income",
+                "fraction_graduate_degree",
+                "fraction_white",
+            ]
+        ]
+    )
     # add a land size variable
     land_df = census_query.query_land_size(fips)
     merged_df = merged_df.join(land_df, on="fips", how="left")
+    mobility_df = census_query.query_within_county_mobility(years, fips)
     merged_df = merged_df.with_columns(
-        (pl.col("pop_5_9") / pl.col("land_size_sq_km")).alias(
-            "pop_density_5_9"
-        )
+        year_mobility=pl.col("year").clip(lower_bound=2019)
+    )
+    merged_df = merged_df.join(
+        mobility_df,
+        left_on=["year_mobility", "fips"],
+        right_on=["year", "fips"],
+        how="left",
+    )
+    merged_df = merged_df.with_columns(
+        pop_density_5_9=(pl.col("pop_5_9") / pl.col("land_size_sq_km")),
+        fraction_public=(pl.col("public_schooled_5_9") / pl.col("pop_5_9")),
+        fraction_private=(pl.col("private_schooled_5_9") / pl.col("pop_5_9")),
+        # I previously checked by hand that public+private+not_enrolled = total pop 5-9
+        fraction_not_enrolled=(pl.col("not_enrolled_5_9") / pl.col("pop_5_9")),
+        within_county_mobility_proxy=pl.col("within_county_estimate")
+        / pl.mean("within_county_estimate"),
     )
     return merged_df
 
@@ -215,42 +230,20 @@ def add_hoc_merged_df_adjustments(merged_df: pl.DataFrame) -> pl.DataFrame:
     # it looks to me like this just fairfax county, VA (fips 51059), so truncate
     # just for now while playing around
     merged_df = merged_df.with_columns(
-        [
-            pl.when(pl.col("fips") == "510591")
-            .then(pl.lit("51059"))
-            .otherwise(pl.col("fips"))
-            .alias("fips")
-        ]
+        fips=pl.when(pl.col("fips") == "510591")
+        .then(pl.lit("51059"))
+        .otherwise(pl.col("fips"))
     )
     return merged_df
 
 
 def require_vaccine_data(merged_df: pl.DataFrame) -> pl.DataFrame:
-    merged_df = merged_df.filter(pl.col("estimated_mmr_cov").is_not_null())
+    merged_df = merged_df.filter(
+        pl.col("estimated_mmr_cov").is_not_null()
+        & pl.col("nonmed_exempt_pct").is_not_null()
+        & pl.col("med_exempt_pct").is_not_null()
+    )
     return merged_df
-
-
-def plot_outbreak_sizes(sizes: pl.Series):
-    fig, ax = plt.subplots(1, 1)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    ax.get_xaxis().tick_bottom()
-    ax.get_yaxis().tick_left()
-    ax.tick_params(axis="x", direction="out")
-    ax.tick_params(axis="y", direction="out")
-    # offset the spines
-    for spine in ax.spines.values():
-        spine.set_position(("outward", 5))
-    # put the grid behind
-    ax.set_axisbelow(True)
-
-    # plot outbreak sizes
-    ax.hist(sizes, bins=range(0, sizes.max() + 1), color="blue", alpha=0.7)  # type: ignore
-    ax.set_xlabel("Outbreak Size (Number of Cases)")
-    ax.set_ylabel("Number of Outbreaks")
-    ax.set_yscale("log")
-
-    return fig, ax
 
 
 def compare_distributions(
@@ -261,6 +254,8 @@ def compare_distributions(
     label2: str,
     log_scale: bool = False,
     bins=None,
+    density=False,
+    cumulative=False,
 ):
     fig, ax = plt.subplots(1, 1)
     ax.spines["top"].set_visible(False)
@@ -281,10 +276,35 @@ def compare_distributions(
             min(data1.min(), data2.min()),  # type: ignore
             max(data1.max(), data2.max()) + 1,  # type: ignore
         )
-    ax.hist(data1, bins=bins, color="blue", alpha=0.7, label=label1)
-    ax.hist(data2, bins=bins, color="red", alpha=0.7, label=label2)
+    ax.hist(
+        data1,
+        bins=bins,
+        color="blue",
+        alpha=0.7,
+        label=label1,
+        density=density,
+        cumulative=cumulative,
+    )
+    ax.hist(
+        data2,
+        bins=bins,
+        color="red",
+        alpha=0.7,
+        label=label2,
+        density=density,
+        cumulative=cumulative,
+    )
     ax.set_xlabel(xlabel)
-    ax.set_ylabel("Number of Outbreaks")
+    if density:
+        if cumulative:
+            ax.set_ylabel("Cumulative probability density")
+        else:
+            ax.set_ylabel("Probability density")
+    else:
+        if cumulative:
+            ax.set_ylabel("Cumulative number of outbreaks")
+        else:
+            ax.set_ylabel("Number of outbreaks")
     if log_scale:
         ax.set_yscale("log")
     ax.legend()
@@ -292,7 +312,14 @@ def compare_distributions(
     return fig, ax
 
 
-def plot_cases_vaccinations(cases: pl.Series, vaccinations: pl.Series, ylabel):
+def pairplot(
+    x: pl.Series,
+    y: pl.Series,
+    ylabel,
+    xlabel="MMR vaccination coverage (%)",
+    log=True,
+    **kwargs,
+):
     fig, ax = plt.subplots(1, 1)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
@@ -307,23 +334,30 @@ def plot_cases_vaccinations(cases: pl.Series, vaccinations: pl.Series, ylabel):
     ax.set_axisbelow(True)
 
     # plot cases and vaccinations
-    ax.scatter(vaccinations, cases, c="blue")
-    ax.set_xlabel("MMR Vaccination Coverage (%)")
+    if "c" not in kwargs:
+        kwargs["c"] = "blue"
+    scatter = ax.scatter(x, y, **kwargs)
+    ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
-    if cases.min() > 0:  # type: ignore
-        ax.set_yscale("log")
-    else:
-        ax.set_yscale("symlog")
+    if log:
+        if y.min() > 0:  # type: ignore
+            ax.set_yscale("log")
+        else:
+            ax.set_yscale("symlog")
 
-    return fig, ax
+    return fig, ax, scatter
 
 
 def assemble_analysis_dataset(
     merged_df: pl.DataFrame, params: dict = params
 ) -> pl.DataFrame:
+    # keep county-years with 1 case -- no transmission, just an import
+    include = pl.col("cases") == 1
     # keep county-years where imports equal observed cases
-    include = pl.col("imported") == pl.col("cases")
+    # these are also years with no transmission
+    include = include | (pl.col("imported") == pl.col("cases"))
     # keep county-years where the number of known importations is less than cases
+    # (with the above requirement, this condenses to cases where imports are known)
     include = include | (pl.col("imported") < pl.col("cases"))
     # keep county-years above the inclusion threshold
     include = include | (pl.col("cases") >= params["inclusion_threshold"])
@@ -332,14 +366,12 @@ def assemble_analysis_dataset(
     # Now make a new column of cases that is the number of cases generated in the
     # outbreak -- basically excluding the imports
     merged_df = merged_df.with_columns(
-        [
-            pl.when(pl.col("imported").is_null())
-            .then(
-                pl.col("cases") - 1
-            )  # if we don't know imports, assume 1 import
-            .otherwise(pl.col("cases") - pl.col("imported"))
-            .alias("cases_outbreak")
-        ]
+        cases_outbreak=pl.when(pl.col("imported").is_null())
+        .then(pl.col("cases") - 1)  # if we don't know imports, assume 1 import
+        .otherwise(pl.col("cases") - pl.col("imported")),
+        # Since we'll need it, make a total pct exempt
+        total_exempt_pct=pl.col("nonmed_exempt_pct")
+        + pl.col("med_exempt_pct"),
     )
 
     return merged_df
@@ -347,29 +379,32 @@ def assemble_analysis_dataset(
 
 if __name__ == "__main__":
     load_dotenv()
+
+    # %% LOAD DATA
     census_key = os.getenv("CENSUS_API_KEY")
 
     outbreaks_df = read_outbreaks(data_dir)
     outbreaks_df = process_outbreaks_df(outbreaks_df)
 
-    # outbreak sizes
-    fig, ax = plot_outbreak_sizes(outbreaks_df["cases"])
-    plt.show()
-
     vaccinations_df = read_vaccinations(data_dir)
     vaccinations_df = process_vaccinations_df(vaccinations_df)
+    # Merge and make ad hoc adjustments
     raw_merged_df = merge_outbreaks_vaccinations(outbreaks_df, vaccinations_df)
     raw_merged_df = add_hoc_merged_df_adjustments(raw_merged_df)
-
-    # Compare distributions of outbreak sizes with and without vaccination data
+    # Subset data to require vaccinations
     merged_df = require_vaccine_data(raw_merged_df)
+    # Assemble analysis dataset by estimating a "cases_outbreak" variable
+    # that is the number of cases in the outbreak excluding importations
+    merged_df = assemble_analysis_dataset(merged_df, params)
 
+    # %% HOW DO THE EXCLUSION CRITERIA LIMIT THE DATA
+    # Compare distribution of outbreak sizes with and without vaccination data
     fig, ax = compare_distributions(
         raw_merged_df["cases"],
         merged_df["cases"],
         xlabel="Cases",
-        label1="Without Vaccination Data",
-        label2="With Vaccination Data",
+        label1="Without vaccination data",
+        label2="With vaccination data",
         log_scale=True,
         bins=[1, 2, 3, 4, 5, 10, 20, 50, 750],
     )
@@ -379,66 +414,508 @@ if __name__ == "__main__":
     fig, ax = compare_distributions(
         raw_merged_df["year"],
         merged_df["year"],
-        xlabel="Year of Outbreak",
-        label1="Without Vaccination Data",
-        label2="With Vaccination Data",
+        xlabel="Year",
+        label1="Without vaccination data",
+        label2="With vaccination data",
         log_scale=False,
     )
     plt.show()
 
-    # subset to at least 3 cases
-    # merged_df = merged_df.filter(pl.col("cases") >= params['inclusion_threshold'])
-    merged_df = assemble_analysis_dataset(merged_df, params)
-
-    # plot cases vs vaccination coverage
-    fig, ax = plot_cases_vaccinations(
-        merged_df["cases_outbreak"],
-        merged_df["estimated_mmr_cov"],
-        ylabel="Cases",
-    )
-    plt.show()
-    # linear regression between the two
-    exog = sm.add_constant(merged_df["estimated_mmr_cov"].to_numpy())
-    model = sm.OLS(merged_df["cases_outbreak"].log().to_numpy(), exog).fit()
-    print(model.summary())
-
+    # %% VACCINATION COVERAGE AND OUTBREAK SIZE
+    # add population variables to make it easy to consider population-dependent
+    # variables in the exploration
     # add a population variable to plot incidence
     assert census_key is not None, (
         "A Census API key is required to run this analysis."
     )
     merged_df = add_pop_variables(merged_df, census_key)
 
-    fig, ax = plot_cases_vaccinations(
-        merged_df["cases_outbreak"] / merged_df["pop_5_9"],
-        merged_df["estimated_mmr_cov"],
-        ylabel="Incidence (Cases per 5-9 year olds)",
+    # MMR vaccination coverage
+    fig, ax = compare_distributions(
+        merged_df.filter(pl.col("cases_outbreak") == 0)["estimated_mmr_cov"],
+        merged_df.filter(pl.col("cases_outbreak") >= 3)["estimated_mmr_cov"],
+        xlabel="Estimated MMR vaccination coverage (%)",
+        label1="No outbreak",
+        label2="Outbreak (Cases >= 3)",
+        log_scale=False,
+        bins=np.arange(75, 100, 0.01),
+        density=True,
+        cumulative=True,
     )
     plt.show()
-    # linear regression between the two
-    exog = sm.add_constant(merged_df["estimated_mmr_cov"].to_numpy())
-    model = sm.OLS(
-        (merged_df["cases_outbreak"] / merged_df["pop_5_9"]).log().to_numpy(),
-        exog,
-    ).fit()
-    print(model.summary())
 
-    # plot cases vs vaccination coverage with incidence by density
-    fig, ax = plot_cases_vaccinations(
-        merged_df["cases_outbreak"] / merged_df["pop_density_5_9"],
-        merged_df["estimated_mmr_cov"],
-        ylabel=r"Incidence per km$^2$",
+    # 5 year MMR vaccination coverage
+    merged_df = merged_df.with_columns(
+        estimated_mmr_cov_5yr=pl.col("estimated_mmr_cov")
+        .rolling_mean(window_size=5, min_samples=1)
+        .over("fips")
+    )
+    fig, ax = compare_distributions(
+        merged_df.filter(pl.col("cases_outbreak") == 0)[
+            "estimated_mmr_cov_5yr"
+        ],
+        merged_df.filter(pl.col("cases_outbreak") >= 3)[
+            "estimated_mmr_cov_5yr"
+        ],
+        xlabel="Estimated 5 yr MMR vaccination coverage (%)",
+        label1="No outbreak",
+        label2="Outbreak (Cases >= 3)",
+        log_scale=False,
+        bins=np.arange(75, 100, 0.01),
+        density=True,
+        cumulative=True,
     )
     plt.show()
-    # linear regression between the two
-    exog = sm.add_constant(merged_df["estimated_mmr_cov"].to_numpy())
-    model = sm.OLS(
-        (merged_df["cases_outbreak"] / merged_df["pop_density_5_9"])
-        .log()
-        .to_numpy(),
-        exog,
-    ).fit()
-    print(model.summary())
 
+    # %% NONMEDICAL VACCINATION EXEMPTIONS AND OUTBREAK SIZE
+    # Nonmedical vaccination exemptions
+    fig, ax = compare_distributions(
+        merged_df.filter(pl.col("cases_outbreak") == 0)["nonmed_exempt_pct"],
+        merged_df.filter(pl.col("cases_outbreak") >= 3)["nonmed_exempt_pct"],
+        xlabel="Nonmedical vaccination exemptions (%)",
+        label1="No outbreak",
+        label2="Outbreak (Cases >= 3)",
+        log_scale=False,
+        bins=np.arange(0, 20, 0.01),
+        density=True,
+        cumulative=True,
+    )
+    plt.show()
+
+    # 5 year nonmedical vaccination exemptions
+    merged_df = merged_df.with_columns(
+        nonmed_exempt_pct_5yr=pl.col("nonmed_exempt_pct")
+        .rolling_mean(window_size=5, min_samples=1)
+        .over("fips")
+    )
+    fig, ax = compare_distributions(
+        merged_df.filter(pl.col("cases_outbreak") == 0)[
+            "nonmed_exempt_pct_5yr"
+        ],
+        merged_df.filter(pl.col("cases_outbreak") >= 3)[
+            "nonmed_exempt_pct_5yr"
+        ],
+        xlabel="Estimated 5 yr nonmedical vaccination exemptions (%)",
+        label1="No outbreak",
+        label2="Outbreak (Cases >= 3)",
+        log_scale=False,
+        bins=np.arange(0, 20, 0.01),
+        density=True,
+        cumulative=True,
+    )
+    plt.show()
+
+    # %% TOTAL VACCINATION EXEMPTIONS AND OUTBREAK SIZE
+    # Total vaccination exemptions
+    fig, ax = compare_distributions(
+        merged_df.filter(pl.col("cases_outbreak") == 0)["total_exempt_pct"],
+        merged_df.filter(pl.col("cases_outbreak") >= 3)["total_exempt_pct"],
+        xlabel="Total vaccination exemptions (%)",
+        label1="No outbreak",
+        label2="Outbreak (Cases >= 3)",
+        log_scale=False,
+        bins=np.arange(0, 20, 0.01),
+        density=True,
+        cumulative=True,
+    )
+    plt.show()
+
+    # 5 year total vaccination exemptions
+    merged_df = merged_df.with_columns(
+        total_exempt_pct_5yr=pl.col("total_exempt_pct")
+        .rolling_mean(window_size=5, min_samples=1)
+        .over("fips")
+    )
+    fig, ax = compare_distributions(
+        merged_df.filter(pl.col("cases_outbreak") == 0)[
+            "total_exempt_pct_5yr"
+        ],
+        merged_df.filter(pl.col("cases_outbreak") >= 3)[
+            "total_exempt_pct_5yr"
+        ],
+        xlabel="Estimated 5 yr total vaccination exemptions (%)",
+        label1="No outbreak",
+        label2="Outbreak (Cases >= 3)",
+        log_scale=False,
+        bins=np.arange(0, 20, 0.01),
+        density=True,
+        cumulative=True,
+    )
+    plt.show()
+
+    # %% POPULATION SIZE AND OUTBREAK SIZE
+    fig, ax = compare_distributions(
+        merged_df.filter(pl.col("cases_outbreak") == 0)["pop_5_9"],
+        merged_df.filter(pl.col("cases_outbreak") >= 3)["pop_5_9"],
+        xlabel="Population size (ages 5-9)",
+        label1="No outbreak",
+        label2="Outbreak (Cases >= 3)",
+        log_scale=False,
+        bins=np.arange(100, 650000, 100),
+        density=True,
+        cumulative=True,
+    )
+    plt.show()
+
+    # %% POPULATION DENSITY AND OUTBREAK SIZE
+    fig, ax = compare_distributions(
+        merged_df.filter(pl.col("cases_outbreak") == 0)["pop_density_5_9"],
+        merged_df.filter(pl.col("cases_outbreak") >= 3)["pop_density_5_9"],
+        xlabel=r"Population density (ages 5-9 / km$^2$)",
+        label1="No outbreak",
+        label2="Outbreak (Cases >= 3)",
+        log_scale=False,
+        bins=np.arange(0.1, 1000, 0.1),
+        density=True,
+        cumulative=True,
+    )
+    plt.show()
+
+    # %% FRACTION PUBLIC SCHOOL AND OUTBREAK SIZE
+    fig, ax = compare_distributions(
+        merged_df.filter(pl.col("cases_outbreak") == 0)["fraction_public"],
+        merged_df.filter(pl.col("cases_outbreak") >= 3)["fraction_public"],
+        xlabel="Fraction of students in public schools",
+        label1="No outbreak",
+        label2="Outbreak (Cases >= 3)",
+        log_scale=False,
+        bins=np.arange(0.45, 1.0, 0.001),
+        density=True,
+        cumulative=True,
+    )
+    plt.show()
+
+    # %% FRACTION PRIVATE SCHOOL AND OUTBREAK SIZE
+    fig, ax = compare_distributions(
+        merged_df.filter(pl.col("cases_outbreak") == 0)["fraction_private"],
+        merged_df.filter(pl.col("cases_outbreak") >= 3)["fraction_private"],
+        xlabel="Fraction of students in private schools",
+        label1="No outbreak",
+        label2="Outbreak (Cases >= 3)",
+        log_scale=False,
+        bins=np.arange(0.0, 0.5, 0.001),
+        density=True,
+        cumulative=True,
+    )
+    plt.show()
+
+    # %% FRACTION NOT ENROLLED AND OUTBREAK SIZE
+    fig, ax = compare_distributions(
+        merged_df.filter(pl.col("cases_outbreak") == 0)[
+            "fraction_not_enrolled"
+        ],
+        merged_df.filter(pl.col("cases_outbreak") >= 3)[
+            "fraction_not_enrolled"
+        ],
+        xlabel="Fraction of students not in public/private school",
+        label1="No outbreak",
+        label2="Outbreak (Cases >= 3)",
+        log_scale=False,
+        bins=np.arange(0.0, 0.15, 0.001),
+        density=True,
+        cumulative=True,
+    )
+    plt.show()
+
+    # %% INTERACTION BETWEEN VACCINATION COVERAGE AND PUBLIC SCHOOL
+    merged_df = merged_df.with_columns(
+        vaccine_coverage_school_interaction=pl.col("estimated_mmr_cov")
+        * pl.col("fraction_public")
+    )
+    fig, ax = compare_distributions(
+        merged_df.filter(pl.col("cases_outbreak") == 0)[
+            "vaccine_coverage_school_interaction"
+        ],
+        merged_df.filter(pl.col("cases_outbreak") >= 3)[
+            "vaccine_coverage_school_interaction"
+        ],
+        xlabel="Vaccination coverage * fraction public school",
+        label1="No outbreak",
+        label2="Outbreak (Cases >= 3)",
+        log_scale=False,
+        bins=np.arange(45, 100, 0.01),
+        density=True,
+        cumulative=True,
+    )
+    plt.show()
+
+    # five year version
+    merged_df = merged_df.with_columns(
+        vaccine_coverage_school_interaction_5yr=pl.col(
+            "vaccine_coverage_school_interaction"
+        )
+        .rolling_mean(window_size=5, min_samples=1)
+        .over("fips")
+    )
+    fig, ax = compare_distributions(
+        merged_df.filter(pl.col("cases_outbreak") == 0)[
+            "vaccine_coverage_school_interaction_5yr"
+        ],
+        merged_df.filter(pl.col("cases_outbreak") >= 3)[
+            "vaccine_coverage_school_interaction_5yr"
+        ],
+        xlabel="5 yr average vaccination coverage * fraction public school",
+        label1="No outbreak",
+        label2="Outbreak (Cases >= 3)",
+        log_scale=False,
+        bins=np.arange(45, 100, 0.01),
+        density=True,
+        cumulative=True,
+    )
+    plt.show()
+
+    # %% INTERACTION BETWEEN VACCINATION EXEMPTIONS AND PUBLIC SCHOOL
+    merged_df = merged_df.with_columns(
+        exempt_school_interaction=pl.col("total_exempt_pct")
+        * pl.col("fraction_private")
+    )
+    fig, ax = compare_distributions(
+        merged_df.filter(pl.col("cases_outbreak") == 0)[
+            "exempt_school_interaction"
+        ],
+        merged_df.filter(pl.col("cases_outbreak") >= 3)[
+            "exempt_school_interaction"
+        ],
+        xlabel="Vaccination exemptions * fraction private school",
+        label1="No outbreak",
+        label2="Outbreak (Cases >= 3)",
+        log_scale=False,
+        bins=np.arange(0, 3, 0.01),
+        density=True,
+        cumulative=True,
+    )
+    plt.show()
+
+    # %% EXEMPTIONS VS COVERAGE
+    fig, ax, scatter = pairplot(
+        merged_df["estimated_mmr_cov"],
+        100.0 - merged_df["total_exempt_pct"],
+        xlabel="Estimated MMR vaccination coverage (%)",
+        ylabel="Not vaccine exempt (%)",
+        log=False,
+        c=np.log10(merged_df["cases_outbreak"] + 1),
+        cmap="viridis",
+    )
+    ax.plot(np.arange(75, 101), np.arange(75, 101), c="black", ls="--", lw=2)
+    fig.colorbar(scatter, ax=ax, label="Log10(Outbreak cases + 1)")
+    plt.show()
+
+    # %% COVERAGE VS FRACTION PUBLIC SCHOOL
+    fig, ax, scatter = pairplot(
+        merged_df["estimated_mmr_cov"],
+        merged_df["fraction_public"] * 100.0,
+        xlabel="Estimated MMR vaccination coverage (%)",
+        ylabel="Public school enrollment (%)",
+        log=False,
+        c=np.log10(merged_df["cases_outbreak"] + 1),
+        cmap="viridis",
+    )
+    fig.colorbar(scatter, ax=ax, label="Log10(Outbreak cases + 1)")
+    plt.show()
+
+    # %% EXEMPTIONS VS FRACTION PUBLIC SCHOOL
+    fig, ax, scatter = pairplot(
+        merged_df["total_exempt_pct"],
+        merged_df["fraction_public"] * 100.0,
+        xlabel="Total vaccination exemptions (%)",
+        ylabel="Public school enrollment (%)",
+        log=False,
+        c=np.log10(merged_df["cases_outbreak"] + 1),
+        cmap="viridis",
+    )
+    fig.colorbar(scatter, ax=ax, label="Log10(Outbreak cases + 1)")
+    plt.show()
+
+    # %% COVERAGE*PUBLIC SCHOOL INTERACTION VS CASES
+    fig, ax, scatter = pairplot(
+        merged_df["vaccine_coverage_school_interaction"],
+        merged_df["total_exempt_pct"],
+        xlabel="Vaccination coverage * fraction public school",
+        ylabel="Total vaccination exemptions (%)",
+        log=False,
+        c=np.log10(merged_df["cases_outbreak"] + 1),
+        cmap="viridis",
+    )
+    fig.colorbar(scatter, ax=ax, label="Log10(Outbreak cases + 1)")
+    plt.show()
+
+    # %% INCOME AND OUTBREAK SIZE
+    fig, ax = compare_distributions(
+        merged_df.filter(pl.col("cases_outbreak") == 0)[
+            "median_household_income"
+        ],
+        merged_df.filter(pl.col("cases_outbreak") >= 3)[
+            "median_household_income"
+        ],
+        xlabel="Median household income (2024 USD)",
+        label1="No outbreak",
+        label2="Outbreak (Cases >= 3)",
+        bins=np.arange(40000, 185000, 100),
+        density=True,
+        cumulative=True,
+    )
+    plt.show()
+
+    merged_df = merged_df.with_columns(
+        median_household_income_5yr=pl.col("median_household_income")
+        .rolling_mean(window_size=5, min_samples=1)
+        .over("fips")
+    )
+
+    fig, ax = compare_distributions(
+        merged_df.filter(pl.col("cases_outbreak") == 0)[
+            "median_household_income_5yr"
+        ],
+        merged_df.filter(pl.col("cases_outbreak") >= 3)[
+            "median_household_income_5yr"
+        ],
+        xlabel="5 yr median household income (2024 USD)",
+        label1="No outbreak",
+        label2="Outbreak (Cases >= 3)",
+        bins=np.arange(40000, 185000, 100),
+        density=True,
+        cumulative=True,
+    )
+    plt.show()
+
+    # income-exemptions correlation?
+    fig, ax, scatter = pairplot(
+        merged_df["median_household_income"],
+        merged_df["nonmed_exempt_pct"],
+        xlabel="Median household income (2024 USD)",
+        ylabel="Nonmedical vaccination exemptions (%)",
+        log=False,
+        c=np.log10(merged_df["cases_outbreak"] + 1),
+        cmap="viridis",
+    )
+    fig.colorbar(scatter, ax=ax, label="Log10(Outbreak cases + 1)")
+    plt.show()
+
+    # income-exemptions interaction?
+    merged_df = merged_df.with_columns(
+        income_exempt_interaction=pl.col("median_household_income")
+        * (100.0 - pl.col("nonmed_exempt_pct"))
+    )
+    fig, ax = compare_distributions(
+        merged_df.filter(pl.col("cases_outbreak") == 0)[
+            "income_exempt_interaction"
+        ],
+        merged_df.filter(pl.col("cases_outbreak") >= 3)[
+            "income_exempt_interaction"
+        ],
+        xlabel="Income * Nonmedical exemptions interaction",
+        label1="No outbreak",
+        label2="Outbreak (Cases >= 3)",
+        bins=np.arange(4000000, 18000000, 10000),
+        density=True,
+        cumulative=True,
+    )
+    plt.show()
+
+    # %% EDUCATION AND OUTBREAK SIZE
+    fig, ax = compare_distributions(
+        merged_df.filter(pl.col("cases_outbreak") == 0)[
+            "fraction_graduate_degree"
+        ],
+        merged_df.filter(pl.col("cases_outbreak") >= 3)[
+            "fraction_graduate_degree"
+        ],
+        xlabel="Fraction with graduate degree",
+        label1="No outbreak",
+        label2="Outbreak (Cases >= 3)",
+        bins=np.arange(0, 0.33, 0.001),
+        density=True,
+        cumulative=True,
+    )
+    plt.show()
+
+    # %% EDUCATION-EXEMPTIONS AND OUTBREAK SIZE
+    fig, ax, scatter = pairplot(
+        merged_df["fraction_graduate_degree"],
+        merged_df["nonmed_exempt_pct"],
+        xlabel="Fraction with a graduate degree",
+        ylabel="Nonmedical vaccination exemptions (%)",
+        log=False,
+        c=np.log10(merged_df["cases_outbreak"] + 1),
+        cmap="viridis",
+    )
+    fig.colorbar(scatter, ax=ax, label="Log10(Outbreak cases + 1)")
+    plt.show()
+
+    # %% RACE AND OUTBREAK SIZE
+    fig, ax = compare_distributions(
+        merged_df.filter(pl.col("cases_outbreak") == 0)["fraction_white"],
+        merged_df.filter(pl.col("cases_outbreak") >= 3)["fraction_white"],
+        xlabel="Fraction white",
+        label1="No outbreak",
+        label2="Outbreak (Cases >= 3)",
+        bins=np.arange(0.18, 1.0, 0.001),
+        density=True,
+        cumulative=True,
+    )
+    plt.show()
+
+    # %% RACE-EXEMPTIONS AND OUTBREAK SIZE
+    fig, ax, scatter = pairplot(
+        merged_df["fraction_white"],
+        merged_df["nonmed_exempt_pct"],
+        xlabel="Fraction white",
+        ylabel="Nonmedical vaccination exemptions (%)",
+        log=False,
+        c=np.log10(merged_df["cases_outbreak"] + 1),
+        cmap="viridis",
+    )
+    fig.colorbar(scatter, ax=ax, label="Log10(Outbreak cases + 1)")
+    plt.show()
+
+    # %% MOBILITY AND OUTBREAK SIZE
+    fig, ax = compare_distributions(
+        merged_df.filter(pl.col("cases_outbreak") == 0)[
+            "within_county_mobility_proxy"
+        ],
+        merged_df.filter(pl.col("cases_outbreak") >= 3)[
+            "within_county_mobility_proxy"
+        ],
+        xlabel="Within-county mobility proxy",
+        label1="No outbreak",
+        label2="Outbreak (Cases >= 3)",
+        bins=np.arange(0, 6.7, 0.01),
+        density=True,
+        cumulative=True,
+    )
+    plt.show()
+
+    # Mobility, coverage, and cases
+    fig, ax, scatter = pairplot(
+        merged_df["within_county_mobility_proxy"],
+        merged_df["estimated_mmr_cov"],
+        xlabel="Within-county mobility proxy",
+        ylabel="Estimated MMR vaccination coverage (%)",
+        log=False,
+        c=np.log10(merged_df["cases_outbreak"] + 1),
+        cmap="viridis",
+    )
+    ax.set_xscale("log")
+    fig.colorbar(scatter, ax=ax, label="Log10(Outbreak cases + 1)")
+    plt.show()
+
+    # Mobility * coverage, and cases
+    fig, ax, scatter = pairplot(
+        merged_df["within_county_mobility_proxy"]
+        * merged_df["estimated_mmr_cov"],
+        merged_df["total_exempt_pct"],
+        xlabel="Within-county mobility proxy * coverage interaction",
+        ylabel="Total vaccine exemptions (%)",
+        log=False,
+        c=np.log10(merged_df["cases_outbreak"] + 1),
+        cmap="viridis",
+    )
+    ax.set_xscale("log")
+    fig.colorbar(scatter, ax=ax, label="Log10(Outbreak cases + 1)")
+    plt.show()
+
+    # %% EXPORT DATA FOR DOWNSTREAM ANALYSIS
+    # save the cleaned dataset
     merged_df.write_csv(
         os.path.join(data_dir, "outbreaks_vaccinations_cleaned.csv")
     )

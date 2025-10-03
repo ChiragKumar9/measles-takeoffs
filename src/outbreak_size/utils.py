@@ -1,3 +1,4 @@
+import os
 import zipfile
 from io import BytesIO
 
@@ -91,30 +92,139 @@ class CensusQuery:
     def __init__(self, key: str):
         self.census = Census(key)
         self.land_size = None
+        # sourced from here
+        # https://www.minneapolisfed.org/about-us/monetary-policy/inflation-calculator/consumer-price-index-1913-
+        # https://www.bls.gov/cpi/tables/supplemental-files/historical-cpi-u-202308.pdf
+        self.cpi_inflation = {
+            2010: 0.016,
+            2011: 0.032,
+            2012: 0.021,
+            2013: 0.015,
+            2014: 0.016,
+            2015: 0.001,
+            2016: 0.013,
+            2017: 0.021,
+            2018: 0.024,
+            2019: 0.018,
+            2020: 0.012,
+            2021: 0.047,
+            2022: 0.08,
+            2023: 0.041,
+            2024: 0.029,
+        }
+        self.within_county_mobility = None
 
     def query_5_9_pop(self, year: list[int], fips: list[str]) -> pl.DataFrame:
-        """Get population of children aged 5-9 for given FIPS codes and year."""
+        """Get population of children aged 5-9 and their school type for given
+        FIPS codes and year."""
 
         assert len(fips) == len(year), (
             "FIPS and year lists must be the same length."
         )
-        pop_data = [
-            self.census.acs5.state_county(
-                fields=["B01001_004E", "B01001_028E"],
-                state_fips=fip[:2],
-                county_fips=fip[2:],
-                year=y,
-            )
-            for fip, y in tqdm(zip(fips, year), total=len(fips))
-        ]
+        pop_data = list()
+        # query census for each fips/year combo
+        for fip, y in tqdm(zip(fips, year), total=len(fips)):
+            # education data were not gathered pre 2012
+            if y >= 2012:
+                pop_data.append(
+                    self.census.acs5.state_county(
+                        fields=[
+                            "B01001_004E",
+                            "B01001_028E",
+                            "B14003_005E",
+                            "B14003_014E",
+                            "B14003_033E",
+                            "B14003_023E",
+                            "B14003_051E",
+                            "B14003_042E",
+                            "B19019_001E",
+                            "B15003_023E",
+                            "B15003_024E",
+                            "B15003_025E",
+                            "B15003_001E",
+                            "B02001_001E",
+                            "B02001_002E",
+                        ],
+                        state_fips=fip[:2],
+                        county_fips=fip[2:],
+                        year=y,
+                    )[
+                        0
+                    ]  # need the 0th element because census returns a list of dicts
+                )
+            else:
+                # gather variables normally except education for 2012
+                income_schooling = self.census.acs5.state_county(
+                    fields=[
+                        "B01001_004E",
+                        "B01001_028E",
+                        "B14003_005E",
+                        "B14003_014E",
+                        "B14003_033E",
+                        "B14003_023E",
+                        "B14003_051E",
+                        "B14003_042E",
+                        "B19019_001E",
+                        "B02001_001E",
+                        "B02001_002E",
+                    ],
+                    state_fips=fip[:2],
+                    county_fips=fip[2:],
+                    year=y,
+                )
+                education = self.census.acs5.state_county(
+                    fields=[
+                        "B15003_023E",
+                        "B15003_024E",
+                        "B15003_025E",
+                        "B15003_001E",
+                    ],
+                    state_fips=fip[:2],
+                    county_fips=fip[2:],
+                    year=2012,
+                )
+                # merge the two queries
+                # need the 0th element because census returns a list of dicts
+                pop_data.append({**income_schooling[0], **education[0]})
         pop_df = [pl.DataFrame(pop_datum) for pop_datum in pop_data]
-        pop_df = pl.concat(pop_df)
+        # make a median household income column for inflation adjusting below
+        pop_df = [
+            df.with_columns(median_household_income=pl.col("B19019_001E"))
+            for df in pop_df
+        ]
+        # inflation adjust median household income to 2024 dollars
+        for idx, y in enumerate(year):
+            for yy in range(y + 1, 2024 + 1):
+                pop_df[idx] = pop_df[idx].with_columns(
+                    median_household_income=pl.col("median_household_income")
+                    * (1 + self.cpi_inflation[yy])
+                )
+        pop_df = pl.concat(pop_df, how="diagonal_relaxed")
         pop_df = pop_df.with_columns(
-            (pl.col("state") + pl.col("county")).alias("fips"),
-            (pl.col("B01001_004E") + pl.col("B01001_028E"))
-            .cast(pl.Int64, strict=False)
-            .alias("pop_5_9"),
-        ).select(["fips", "pop_5_9"])
+            fips=pl.col("state") + pl.col("county"),
+            pop_5_9=pl.col("B01001_004E") + pl.col("B01001_028E"),
+            public_schooled_5_9=pl.col("B14003_005E") + pl.col("B14003_033E"),
+            private_schooled_5_9=pl.col("B14003_014E") + pl.col("B14003_042E"),
+            not_enrolled_5_9=pl.col("B14003_023E") + pl.col("B14003_051E"),
+            fraction_graduate_degree=(
+                pl.col("B15003_023E")
+                + pl.col("B15003_024E")
+                + pl.col("B15003_025E")
+            )
+            / pl.col("B15003_001E"),
+            fraction_white=pl.col("B02001_002E") / pl.col("B02001_001E"),
+        ).select(
+            [
+                "fips",
+                "pop_5_9",
+                "public_schooled_5_9",
+                "private_schooled_5_9",
+                "not_enrolled_5_9",
+                "median_household_income",
+                "fraction_graduate_degree",
+                "fraction_white",
+            ]
+        )
         return pop_df
 
     def query_land_size(self, fips: list[str]) -> pl.DataFrame:
@@ -124,11 +234,40 @@ class CensusQuery:
 
         land_df = self.land_size
         land_df = land_df.with_columns(
-            pl.col("GEOID").alias("fips"),
+            fips=pl.col("GEOID"),
             # land area is in square meters, convert to square km
-            (
+            land_size_sq_km=(
                 pl.col("ALAND").cast(pl.Float64, strict=False) / (1000 * 1000)
-            ).alias("land_size_sq_km"),
+            ),
         ).select(["fips", "land_size_sq_km"])
         land_df = land_df.filter(pl.col("fips").is_in(fips))
         return land_df
+
+    def query_within_county_mobility(
+        self, year: list[int], fips: list[str]
+    ) -> pl.DataFrame:
+        """Get within-county mobility for given FIPS codes and year."""
+        assert len(fips) == len(year), (
+            "FIPS and year lists must be the same length."
+        )
+        if self.within_county_mobility is None:
+            mobility = pl.read_csv(
+                os.path.join("data", "bts_mobility_statistics.csv"),
+                schema_overrides={"County FIPS": pl.String},
+            )
+            self.within_county_mobility = mobility
+        mobility = self.within_county_mobility
+        year_fips = pl.DataFrame({"year": year, "fips": fips})
+        mobility = mobility.with_columns(
+            year=pl.col("Date"), fips=pl.col("County FIPS")
+        )
+        mobility = mobility.join(year_fips, on=["year", "fips"], how="inner")
+        mobility = mobility.with_columns(
+            within_county_estimate=pl.col("Number of Trips <1")
+            + pl.col("Number of Trips 1-3")
+            + pl.col("Number of Trips 3-5")
+            + pl.col("Number of Trips 5-10")
+            + pl.col("Number of Trips 10-25")
+        )
+        mobility = mobility.select(["year", "fips", "within_county_estimate"])
+        return mobility
