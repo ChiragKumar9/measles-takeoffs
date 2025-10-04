@@ -54,8 +54,8 @@ class PartialPooledPoisson:
         mu = (
             baseline
             + covariate_effect
-            + vaccine_coverage_effect[self.counties] * self.iv
-        )  # type: ignore
+            + vaccine_coverage_effect[self.counties] * self.iv  # type: ignore
+        )
         mu = jnp.exp(mu)
         mu = jnp.clip(mu, min=jnp.finfo(jnp.float64).tiny)
 
