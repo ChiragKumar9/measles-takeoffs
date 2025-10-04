@@ -1,1 +1,4 @@
 inclusion_threshold: 3
+seed: 108
+mcmc_warmup: 8000
+mcmc_samples: 4000
