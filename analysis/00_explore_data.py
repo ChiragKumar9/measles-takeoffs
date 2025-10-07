@@ -436,10 +436,12 @@ if __name__ == "__main__":
     # MMR vaccination coverage
     fig, ax = compare_distributions(
         merged_df.filter(pl.col("cases_outbreak") == 0)["estimated_mmr_cov"],
-        merged_df.filter(pl.col("cases_outbreak") >= 3)["estimated_mmr_cov"],
+        merged_df.filter(
+            pl.col("cases_outbreak") >= params["inclusion_threshold"]
+        )["estimated_mmr_cov"],
         xlabel="Estimated MMR vaccination coverage (%)",
         label1="No outbreak",
-        label2="Outbreak (Cases >= 3)",
+        label2=f"Outbreak (Cases >= {params['inclusion_threshold']})",
         log_scale=False,
         bins=np.arange(75, 100, 0.01),
         density=True,
@@ -485,12 +487,12 @@ if __name__ == "__main__":
         merged_df.filter(pl.col("cases_outbreak") == 0)[
             "estimated_mmr_cov_5yr"
         ],
-        merged_df.filter(pl.col("cases_outbreak") >= 3)[
-            "estimated_mmr_cov_5yr"
-        ],
+        merged_df.filter(
+            pl.col("cases_outbreak") >= params["inclusion_threshold"]
+        )["estimated_mmr_cov_5yr"],
         xlabel="Estimated 5 yr MMR vaccination coverage (%)",
         label1="No outbreak",
-        label2="Outbreak (Cases >= 3)",
+        label2=f"Outbreak (Cases >= {params['inclusion_threshold']})",
         log_scale=False,
         bins=np.arange(75, 100, 0.01),
         density=True,
@@ -555,10 +557,12 @@ if __name__ == "__main__":
     # Nonmedical vaccination exemptions
     fig, ax = compare_distributions(
         merged_df.filter(pl.col("cases_outbreak") == 0)["nonmed_exempt_pct"],
-        merged_df.filter(pl.col("cases_outbreak") >= 3)["nonmed_exempt_pct"],
+        merged_df.filter(
+            pl.col("cases_outbreak") >= params["inclusion_threshold"]
+        )["nonmed_exempt_pct"],
         xlabel="Nonmedical vaccination exemptions (%)",
         label1="No outbreak",
-        label2="Outbreak (Cases >= 3)",
+        label2=f"Outbreak (Cases >= {params['inclusion_threshold']})",
         log_scale=False,
         bins=np.arange(0, 20, 0.01),
         density=True,
@@ -576,12 +580,12 @@ if __name__ == "__main__":
         merged_df.filter(pl.col("cases_outbreak") == 0)[
             "nonmed_exempt_pct_5yr"
         ],
-        merged_df.filter(pl.col("cases_outbreak") >= 3)[
-            "nonmed_exempt_pct_5yr"
-        ],
+        merged_df.filter(
+            pl.col("cases_outbreak") >= params["inclusion_threshold"]
+        )["nonmed_exempt_pct_5yr"],
         xlabel="Estimated 5 yr nonmedical vaccination exemptions (%)",
         label1="No outbreak",
-        label2="Outbreak (Cases >= 3)",
+        label2=f"Outbreak (Cases >= {params['inclusion_threshold']})",
         log_scale=False,
         bins=np.arange(0, 20, 0.01),
         density=True,
@@ -593,10 +597,12 @@ if __name__ == "__main__":
     # Total vaccination exemptions
     fig, ax = compare_distributions(
         merged_df.filter(pl.col("cases_outbreak") == 0)["total_exempt_pct"],
-        merged_df.filter(pl.col("cases_outbreak") >= 3)["total_exempt_pct"],
+        merged_df.filter(
+            pl.col("cases_outbreak") >= params["inclusion_threshold"]
+        )["total_exempt_pct"],
         xlabel="Total vaccination exemptions (%)",
         label1="No outbreak",
-        label2="Outbreak (Cases >= 3)",
+        label2=f"Outbreak (Cases >= {params['inclusion_threshold']})",
         log_scale=False,
         bins=np.arange(0, 20, 0.01),
         density=True,
@@ -614,12 +620,12 @@ if __name__ == "__main__":
         merged_df.filter(pl.col("cases_outbreak") == 0)[
             "total_exempt_pct_5yr"
         ],
-        merged_df.filter(pl.col("cases_outbreak") >= 3)[
-            "total_exempt_pct_5yr"
-        ],
+        merged_df.filter(
+            pl.col("cases_outbreak") >= params["inclusion_threshold"]
+        )["total_exempt_pct_5yr"],
         xlabel="Estimated 5 yr total vaccination exemptions (%)",
         label1="No outbreak",
-        label2="Outbreak (Cases >= 3)",
+        label2=f"Outbreak (Cases >= {params['inclusion_threshold']})",
         log_scale=False,
         bins=np.arange(0, 20, 0.01),
         density=True,
@@ -630,10 +636,12 @@ if __name__ == "__main__":
     # %% POPULATION SIZE AND OUTBREAK SIZE
     fig, ax = compare_distributions(
         merged_df.filter(pl.col("cases_outbreak") == 0)["pop_5_9"],
-        merged_df.filter(pl.col("cases_outbreak") >= 3)["pop_5_9"],
+        merged_df.filter(
+            pl.col("cases_outbreak") >= params["inclusion_threshold"]
+        )["pop_5_9"],
         xlabel="Population size (ages 5-9)",
         label1="No outbreak",
-        label2="Outbreak (Cases >= 3)",
+        label2=f"Outbreak (Cases >= {params['inclusion_threshold']})",
         log_scale=False,
         bins=np.arange(100, 650000, 100),
         density=True,
@@ -644,10 +652,12 @@ if __name__ == "__main__":
     # %% POPULATION DENSITY AND OUTBREAK SIZE
     fig, ax = compare_distributions(
         merged_df.filter(pl.col("cases_outbreak") == 0)["pop_density_5_9"],
-        merged_df.filter(pl.col("cases_outbreak") >= 3)["pop_density_5_9"],
+        merged_df.filter(
+            pl.col("cases_outbreak") >= params["inclusion_threshold"]
+        )["pop_density_5_9"],
         xlabel=r"Population density (ages 5-9 / km$^2$)",
         label1="No outbreak",
-        label2="Outbreak (Cases >= 3)",
+        label2=f"Outbreak (Cases >= {params['inclusion_threshold']})",
         log_scale=False,
         bins=np.arange(0.1, 1000, 0.1),
         density=True,
@@ -658,10 +668,12 @@ if __name__ == "__main__":
     # %% FRACTION PUBLIC SCHOOL AND OUTBREAK SIZE
     fig, ax = compare_distributions(
         merged_df.filter(pl.col("cases_outbreak") == 0)["fraction_public"],
-        merged_df.filter(pl.col("cases_outbreak") >= 3)["fraction_public"],
+        merged_df.filter(
+            pl.col("cases_outbreak") >= params["inclusion_threshold"]
+        )["fraction_public"],
         xlabel="Fraction of students in public schools",
         label1="No outbreak",
-        label2="Outbreak (Cases >= 3)",
+        label2=f"Outbreak (Cases >= {params['inclusion_threshold']})",
         log_scale=False,
         bins=np.arange(0.45, 1.0, 0.001),
         density=True,
@@ -672,10 +684,12 @@ if __name__ == "__main__":
     # %% FRACTION PRIVATE SCHOOL AND OUTBREAK SIZE
     fig, ax = compare_distributions(
         merged_df.filter(pl.col("cases_outbreak") == 0)["fraction_private"],
-        merged_df.filter(pl.col("cases_outbreak") >= 3)["fraction_private"],
+        merged_df.filter(
+            pl.col("cases_outbreak") >= params["inclusion_threshold"]
+        )["fraction_private"],
         xlabel="Fraction of students in private schools",
         label1="No outbreak",
-        label2="Outbreak (Cases >= 3)",
+        label2=f"Outbreak (Cases >= {params['inclusion_threshold']})",
         log_scale=False,
         bins=np.arange(0.0, 0.5, 0.001),
         density=True,
@@ -688,12 +702,12 @@ if __name__ == "__main__":
         merged_df.filter(pl.col("cases_outbreak") == 0)[
             "fraction_not_enrolled"
         ],
-        merged_df.filter(pl.col("cases_outbreak") >= 3)[
-            "fraction_not_enrolled"
-        ],
+        merged_df.filter(
+            pl.col("cases_outbreak") >= params["inclusion_threshold"]
+        )["fraction_not_enrolled"],
         xlabel="Fraction of students not in public/private school",
         label1="No outbreak",
-        label2="Outbreak (Cases >= 3)",
+        label2=f"Outbreak (Cases >= {params['inclusion_threshold']})",
         log_scale=False,
         bins=np.arange(0.0, 0.15, 0.001),
         density=True,
@@ -710,12 +724,12 @@ if __name__ == "__main__":
         merged_df.filter(pl.col("cases_outbreak") == 0)[
             "vaccine_coverage_school_interaction"
         ],
-        merged_df.filter(pl.col("cases_outbreak") >= 3)[
-            "vaccine_coverage_school_interaction"
-        ],
+        merged_df.filter(
+            pl.col("cases_outbreak") >= params["inclusion_threshold"]
+        )["vaccine_coverage_school_interaction"],
         xlabel="Vaccination coverage * fraction public school",
         label1="No outbreak",
-        label2="Outbreak (Cases >= 3)",
+        label2=f"Outbreak (Cases >= {params['inclusion_threshold']})",
         log_scale=False,
         bins=np.arange(45, 100, 0.01),
         density=True,
@@ -735,12 +749,12 @@ if __name__ == "__main__":
         merged_df.filter(pl.col("cases_outbreak") == 0)[
             "vaccine_coverage_school_interaction_5yr"
         ],
-        merged_df.filter(pl.col("cases_outbreak") >= 3)[
-            "vaccine_coverage_school_interaction_5yr"
-        ],
+        merged_df.filter(
+            pl.col("cases_outbreak") >= params["inclusion_threshold"]
+        )["vaccine_coverage_school_interaction_5yr"],
         xlabel="5 yr average vaccination coverage * fraction public school",
         label1="No outbreak",
-        label2="Outbreak (Cases >= 3)",
+        label2=f"Outbreak (Cases >= {params['inclusion_threshold']})",
         log_scale=False,
         bins=np.arange(45, 100, 0.01),
         density=True,
@@ -757,12 +771,12 @@ if __name__ == "__main__":
         merged_df.filter(pl.col("cases_outbreak") == 0)[
             "exempt_school_interaction"
         ],
-        merged_df.filter(pl.col("cases_outbreak") >= 3)[
-            "exempt_school_interaction"
-        ],
+        merged_df.filter(
+            pl.col("cases_outbreak") >= params["inclusion_threshold"]
+        )["exempt_school_interaction"],
         xlabel="Vaccination exemptions * fraction private school",
         label1="No outbreak",
-        label2="Outbreak (Cases >= 3)",
+        label2=f"Outbreak (Cases >= {params['inclusion_threshold']})",
         log_scale=False,
         bins=np.arange(0, 3, 0.01),
         density=True,
@@ -828,12 +842,12 @@ if __name__ == "__main__":
         merged_df.filter(pl.col("cases_outbreak") == 0)[
             "median_household_income"
         ],
-        merged_df.filter(pl.col("cases_outbreak") >= 3)[
-            "median_household_income"
-        ],
+        merged_df.filter(
+            pl.col("cases_outbreak") >= params["inclusion_threshold"]
+        )["median_household_income"],
         xlabel="Median household income (2024 USD)",
         label1="No outbreak",
-        label2="Outbreak (Cases >= 3)",
+        label2=f"Outbreak (Cases >= {params['inclusion_threshold']})",
         bins=np.arange(40000, 185000, 100),
         density=True,
         cumulative=True,
@@ -850,12 +864,12 @@ if __name__ == "__main__":
         merged_df.filter(pl.col("cases_outbreak") == 0)[
             "median_household_income_5yr"
         ],
-        merged_df.filter(pl.col("cases_outbreak") >= 3)[
-            "median_household_income_5yr"
-        ],
+        merged_df.filter(
+            pl.col("cases_outbreak") >= params["inclusion_threshold"]
+        )["median_household_income_5yr"],
         xlabel="5 yr median household income (2024 USD)",
         label1="No outbreak",
-        label2="Outbreak (Cases >= 3)",
+        label2=f"Outbreak (Cases >= {params['inclusion_threshold']})",
         bins=np.arange(40000, 185000, 100),
         density=True,
         cumulative=True,
@@ -884,12 +898,12 @@ if __name__ == "__main__":
         merged_df.filter(pl.col("cases_outbreak") == 0)[
             "income_exempt_interaction"
         ],
-        merged_df.filter(pl.col("cases_outbreak") >= 3)[
-            "income_exempt_interaction"
-        ],
+        merged_df.filter(
+            pl.col("cases_outbreak") >= params["inclusion_threshold"]
+        )["income_exempt_interaction"],
         xlabel="Income * Nonmedical exemptions interaction",
         label1="No outbreak",
-        label2="Outbreak (Cases >= 3)",
+        label2=f"Outbreak (Cases >= {params['inclusion_threshold']})",
         bins=np.arange(4000000, 18000000, 10000),
         density=True,
         cumulative=True,
@@ -901,12 +915,12 @@ if __name__ == "__main__":
         merged_df.filter(pl.col("cases_outbreak") == 0)[
             "fraction_graduate_degree"
         ],
-        merged_df.filter(pl.col("cases_outbreak") >= 3)[
-            "fraction_graduate_degree"
-        ],
+        merged_df.filter(
+            pl.col("cases_outbreak") >= params["inclusion_threshold"]
+        )["fraction_graduate_degree"],
         xlabel="Fraction with graduate degree",
         label1="No outbreak",
-        label2="Outbreak (Cases >= 3)",
+        label2=f"Outbreak (Cases >= {params['inclusion_threshold']})",
         bins=np.arange(0, 0.33, 0.001),
         density=True,
         cumulative=True,
@@ -929,10 +943,12 @@ if __name__ == "__main__":
     # %% RACE AND OUTBREAK SIZE
     fig, ax = compare_distributions(
         merged_df.filter(pl.col("cases_outbreak") == 0)["fraction_white"],
-        merged_df.filter(pl.col("cases_outbreak") >= 3)["fraction_white"],
+        merged_df.filter(
+            pl.col("cases_outbreak") >= params["inclusion_threshold"]
+        )["fraction_white"],
         xlabel="Fraction white",
         label1="No outbreak",
-        label2="Outbreak (Cases >= 3)",
+        label2=f"Outbreak (Cases >= {params['inclusion_threshold']})",
         bins=np.arange(0.18, 1.0, 0.001),
         density=True,
         cumulative=True,
@@ -957,12 +973,12 @@ if __name__ == "__main__":
         merged_df.filter(pl.col("cases_outbreak") == 0)[
             "within_county_mobility_proxy"
         ],
-        merged_df.filter(pl.col("cases_outbreak") >= 3)[
-            "within_county_mobility_proxy"
-        ],
+        merged_df.filter(
+            pl.col("cases_outbreak") >= params["inclusion_threshold"]
+        )["within_county_mobility_proxy"],
         xlabel="Within-county mobility proxy",
         label1="No outbreak",
-        label2="Outbreak (Cases >= 3)",
+        label2=f"Outbreak (Cases >= {params['inclusion_threshold']})",
         bins=np.arange(0, 6.7, 0.01),
         density=True,
         cumulative=True,
