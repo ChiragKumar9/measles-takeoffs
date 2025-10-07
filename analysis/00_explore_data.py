@@ -917,6 +917,45 @@ if __name__ == "__main__":
     fig.colorbar(scatter, ax=ax, label="Log10(Outbreak cases + 1)")
     plt.show()
 
+    # medical vs nonmedical exemptions
+    fig, ax, scatter = pairplot(
+        merged_df["med_exempt_pct"],
+        merged_df["nonmed_exempt_pct"],
+        xlabel="Medical vaccination exemptions (%)",
+        ylabel="Nonmedical vaccination exemptions (%)",
+        log=False,
+        c=np.log10(merged_df["cases_outbreak"] + 1),
+        cmap="viridis",
+    )
+    fig.colorbar(scatter, ax=ax, label="Log10(Outbreak cases + 1)")
+    plt.show()
+
+    # histogram of county counts
+    fig, ax = compare_distributions(
+        merged_df.group_by("fips").agg(pl.len())["len"],
+        pl.Series(dtype=pl.Int64),
+        xlabel="Number of years with data",
+        label1="",
+        label2="",
+        log_scale=False,
+        bins=range(1, 11),
+    )
+    plt.show()
+
+    # histogram of variances of county case counts
+    fig, ax = compare_distributions(
+        merged_df.group_by("fips").agg(pl.col("cases_outbreak").std())[
+            "cases_outbreak"
+        ],
+        pl.Series(dtype=pl.Float64),
+        xlabel="Standard deviation of outbreak case counts",
+        label1="",
+        label2="",
+        log_scale=True,
+        bins=np.arange(0, 225, 1),
+    )
+    plt.show()
+
     # %% EXPORT DATA FOR DOWNSTREAM ANALYSIS
     # save the cleaned dataset
     merged_df.write_csv(

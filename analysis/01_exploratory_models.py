@@ -20,14 +20,13 @@ if __name__ == "__main__":
 
     # Logistic regression
     df = df.with_columns(
-        pl.when(pl.col("cases_outbreak") >= 3)
+        outbreak_occurred=pl.when(pl.col("cases_outbreak") >= 3)
         .then(1)
         .otherwise(
             pl.when(pl.col("cases_outbreak") == 0)
             .then(0)
             .otherwise(pl.lit(None))
         )
-        .alias("outbreak_occurred")
     )
 
     df = df.filter(pl.col("outbreak_occurred").is_not_null())
