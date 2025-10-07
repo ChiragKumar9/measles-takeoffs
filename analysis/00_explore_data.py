@@ -447,6 +447,34 @@ if __name__ == "__main__":
     )
     plt.show()
 
+    # MMR vaccination coverage
+    fig, ax = compare_distributions(
+        merged_df.filter(pl.col("cases_outbreak") == 0)["estimated_mmr_cov"],
+        merged_df.filter(pl.col("cases_outbreak") >= 5)["estimated_mmr_cov"],
+        xlabel="Estimated MMR vaccination coverage (%)",
+        label1="No outbreak",
+        label2="Outbreak (Cases >= 5)",
+        log_scale=False,
+        bins=np.arange(75, 100, 0.01),
+        density=True,
+        cumulative=True,
+    )
+    plt.show()
+
+    # MMR vaccination coverage
+    fig, ax = compare_distributions(
+        merged_df.filter(pl.col("cases_outbreak") == 0)["estimated_mmr_cov"],
+        merged_df.filter(pl.col("cases_outbreak") >= 10)["estimated_mmr_cov"],
+        xlabel="Estimated MMR vaccination coverage (%)",
+        label1="No outbreak",
+        label2="Outbreak (Cases >= 10)",
+        log_scale=False,
+        bins=np.arange(75, 100, 0.01),
+        density=True,
+        cumulative=True,
+    )
+    plt.show()
+
     # 5 year MMR vaccination coverage
     merged_df = merged_df.with_columns(
         estimated_mmr_cov_5yr=pl.col("estimated_mmr_cov")
@@ -467,6 +495,59 @@ if __name__ == "__main__":
         bins=np.arange(75, 100, 0.01),
         density=True,
         cumulative=True,
+    )
+    plt.show()
+
+    fig, ax = compare_distributions(
+        merged_df.filter(pl.col("cases_outbreak") == 0)[
+            "estimated_mmr_cov_5yr"
+        ],
+        merged_df.filter(pl.col("cases_outbreak") >= 5)[
+            "estimated_mmr_cov_5yr"
+        ],
+        xlabel="Estimated 5 yr MMR vaccination coverage (%)",
+        label1="No outbreak",
+        label2="Outbreak (Cases >= 5)",
+        log_scale=False,
+        bins=np.arange(75, 100, 0.01),
+        density=True,
+        cumulative=True,
+    )
+    plt.show()
+
+    fig, ax = compare_distributions(
+        merged_df.filter(pl.col("cases_outbreak") == 0)[
+            "estimated_mmr_cov_5yr"
+        ],
+        merged_df.filter(pl.col("cases_outbreak") >= 10)[
+            "estimated_mmr_cov_5yr"
+        ],
+        xlabel="Estimated 5 yr MMR vaccination coverage (%)",
+        label1="No outbreak",
+        label2="Outbreak (Cases >= 10)",
+        log_scale=False,
+        bins=np.arange(75, 100, 0.01),
+        density=True,
+        cumulative=True,
+    )
+    plt.show()
+
+    fig, ax, _ = pairplot(
+        merged_df["estimated_mmr_cov"],
+        merged_df["cases_outbreak"],
+        ylabel="Outbreak size (cases)",
+        alpha=0.5,
+        log=True,
+    )
+    plt.show()
+
+    fig, ax, _ = pairplot(
+        merged_df["estimated_mmr_cov_5yr"],
+        merged_df["cases_outbreak"],
+        xlabel="Estimated 5 yr MMR vaccination coverage (%)",
+        ylabel="Outbreak size (cases)",
+        alpha=0.5,
+        log=True,
     )
     plt.show()
 
