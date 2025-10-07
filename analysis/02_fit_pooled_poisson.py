@@ -1,6 +1,7 @@
 import os
 import pickle
 
+import jax.numpy as jnp
 import polars as pl
 import yaml
 from jax.random import PRNGKey
@@ -24,7 +25,9 @@ with open("params.yml", "r") as f:
 if __name__ == "__main__":
     # Load dataset
     df = pl.read_csv(
-        os.path.join(data_dir, "outbreaks_vaccinations_cleaned.csv")
+        os.path.join(data_dir, "outbreaks_vaccinations_cleaned.csv"),
+        # make sure we read fips codes as strings
+        schema_overrides={"fips": pl.String},
     )
 
     # make log of reasonably log scaled covariates
@@ -38,9 +41,21 @@ if __name__ == "__main__":
     df = df.to_dummies(columns="year", separator="_", drop_first=True)
     years = [y for y in df.columns if y.startswith("year_")]
 
+    # make new variables
+    df = df.with_columns(
+        fraction_nonmed_exempt=pl.col("nonmed_exempt_pct")
+        / (pl.col("nonmed_exempt_pct") + pl.col("med_exempt_pct")),
+    )
+    df = df.with_columns(
+        fraction_nonmed_exempt=pl.col("fraction_nonmed_exempt").fill_nan(0.0)
+    )
+
     # set up model
+    iv = df[
+        ["estimated_mmr_cov", "total_exempt_pct", "fraction_nonmed_exempt"]
+    ].to_jax()
     model = poisson.PartialPooledPoisson(
-        iv=df["estimated_mmr_cov"].to_jax(),
+        iv=iv,
         covariates=df.select(
             [
                 "fraction_public",
@@ -52,7 +67,7 @@ if __name__ == "__main__":
                 *years,
             ]
         ).to_jax(),
-        counties=df["county"],
+        counties=df["fips"],
     )
 
     # fit model
