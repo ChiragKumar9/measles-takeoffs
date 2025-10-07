@@ -65,5 +65,14 @@ class PartialPooledPoisson:
         mu = jnp.exp(mu)
         mu = jnp.clip(mu, min=jnp.finfo(jnp.float64).tiny)
 
-        numpyro.sample("cases", dist.Poisson(mu), obs=cases)
+        gate = 0.0  # placeholder for now
+        gate = jnp.clip(
+            gate, jnp.finfo(jnp.float64).tiny, 1.0 - jnp.finfo(jnp.float64).eps
+        )
+
+        numpyro.sample(
+            "cases",
+            dist.ZeroInflatedPoisson(gate, mu),  # type: ignore
+            obs=cases,
+        )
         return self
