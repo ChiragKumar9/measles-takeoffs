@@ -67,7 +67,8 @@ if __name__ == "__main__":
                 *years,
             ]
         ).to_jax(),
-        counties=df["fips"],
+        groups=df["state"],
+        group_fixed_effect=True,
     )
 
     # fit model
@@ -93,3 +94,24 @@ if __name__ == "__main__":
         "wb",
     ) as file:
         pickle.dump(posterior_samples, file)
+
+    predictive = Predictive(model.fit, posterior_samples)
+    predictive_samples = predictive(PRNGKey(params["seed"]), cases=None)
+
+    # save the predictive samples
+    with open(
+        os.path.join(
+            output_dir,
+            "predictive_partial_pooled_poisson_just_controls.pkl",
+        ),
+        "wb",
+    ) as file:
+        pickle.dump(predictive_samples, file)
+
+    # save the analysis dataset
+    df.write_csv(
+        os.path.join(
+            data_dir,
+            "analysis_dataset.csv",
+        )
+    )

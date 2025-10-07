@@ -9,24 +9,33 @@ class PartialPooledPoisson:
         self,
         iv: jnp.ndarray,
         covariates: jnp.ndarray,
-        counties: pl.Series,
+        groups: pl.Series,
         baseline=None,
         priors=None,
+        group_fixed_effect=True,
     ):
         self.iv = iv
         self.num_ivs = iv.shape[1]
         self.covariates = covariates
         self.num_covariates = covariates.shape[1]
-        # turn counties into an index
-        self.counties = counties.cast(pl.Categorical).to_physical()
-        self.num_counties = max(self.counties) + 1
-        self.counties = self.counties.to_jax()
+        # turn groups into an index
+        self.groups = groups.cast(pl.Categorical).to_physical()
+        self.num_groups = max(self.groups) + 1
+        self.groups = self.groups.to_jax()
+        if group_fixed_effect:
+            self.num_covariates += self.num_groups
+            self.covariates = jnp.hstack(
+                [
+                    self.covariates,
+                    jnp.eye(self.num_groups)[self.groups],
+                ]
+            )
         if priors is None:
-            self.betas = dist.Normal(0, 1)
+            self.betas = dist.Laplace(0, 1)
         else:
             self.betas = priors
         if baseline is None:
-            self.baseline = dist.Normal(0, 1)
+            self.baseline = dist.Laplace(0, 1)
         else:
             self.baseline = baseline
 
@@ -37,21 +46,21 @@ class PartialPooledPoisson:
         covariate_effect = jnp.dot(self.covariates, betas)
 
         with numpyro.plate("iv", self.num_ivs):
-            iv_global = numpyro.sample("iv_global", dist.Normal(0, 1))
-            iv_variabilities = numpyro.sample(
-                "iv_variabilities", dist.HalfNormal(0.25)
+            iv_global = numpyro.sample("iv_global", dist.Laplace(0, 1))
+            iv_group_variabilities = numpyro.sample(
+                "iv_group_variabilities", dist.HalfNormal(0.25)
             )
-            with numpyro.plate("counties", self.num_counties):
-                iv_county_offsets = numpyro.sample(
-                    "iv_county_offsets", dist.Normal(0, 1)
+            with numpyro.plate("groups", self.num_groups):
+                iv_group_offsets = numpyro.sample(
+                    "iv_group_offsets", dist.Laplace(0, 1)
                 )
 
-        iv_effect = iv_variabilities * iv_county_offsets + iv_global
+        iv_effect = iv_group_variabilities * iv_group_offsets + iv_global
 
         mu = (
             baseline
             + covariate_effect
-            + jnp.sum(iv_effect[self.counties] * self.iv, axis=1)  # type: ignore
+            + jnp.sum(iv_effect[self.groups] * self.iv, axis=1)  # type: ignore
         )
         mu = jnp.exp(mu)
         mu = jnp.clip(mu, min=jnp.finfo(jnp.float64).tiny)
