@@ -1,6 +1,7 @@
 import os
 
 import matplotlib.pyplot as plt
+import numpy as np
 import polars as pl
 import statsmodels.api as sm
 from matplotlib import rc
@@ -19,14 +20,13 @@ if __name__ == "__main__":
 
     # Logistic regression
     df = df.with_columns(
-        pl.when(pl.col("cases_outbreak") >= 3)
+        outbreak_occurred=pl.when(pl.col("cases_outbreak") >= 3)
         .then(1)
         .otherwise(
             pl.when(pl.col("cases_outbreak") == 0)
             .then(0)
             .otherwise(pl.lit(None))
         )
-        .alias("outbreak_occurred")
     )
 
     df = df.filter(pl.col("outbreak_occurred").is_not_null())
@@ -86,6 +86,7 @@ if __name__ == "__main__":
     print(fit.summary())
 
     fit = fit.get_prediction(exog).summary_frame(alpha=0.05)
+    fit = np.round(fit)
     mean_fitted = fit["mean"]
     lower_ci = fit["mean_ci_lower"]
     upper_ci = fit["mean_ci_upper"]
@@ -117,8 +118,8 @@ if __name__ == "__main__":
     ax.set_xscale("symlog")
     ax.set_yscale("symlog")
     ax.plot(
-        [0, max(df["cases_outbreak"].max(), mean_fitted.max())],
-        [0, max(df["cases_outbreak"].max(), mean_fitted.max())],
+        [0, max(df["cases_outbreak"].max(), mean_fitted.max())],  # type: ignore
+        [0, max(df["cases_outbreak"].max(), mean_fitted.max())],  # type: ignore
         ls="--",
         c="black",
     )
