@@ -1,7 +1,9 @@
+import jax
 import jax.numpy as jnp
 import numpyro
 import numpyro.distributions as dist
 import polars as pl
+from jax.scipy.optimize import minimize
 from jax.scipy.special import expit
 
 
@@ -11,6 +13,8 @@ class PartialPooledPoisson:
         iv: jnp.ndarray,
         regression_covariates: jnp.ndarray,
         classification_covariates: jnp.ndarray,
+        population: jnp.ndarray,
+        coverage: jnp.ndarray,
         groups: pl.Series,
         baseline=None,
         priors=None,
@@ -22,6 +26,8 @@ class PartialPooledPoisson:
         self.num_regression_covariates = regression_covariates.shape[1]
         self.classification_covariates = classification_covariates
         self.num_classification_covariates = classification_covariates.shape[1]
+        self.population = population
+        self.coverage = coverage
         # turn groups into an index
         self.groups = groups.cast(pl.Categorical).to_physical()
         self.num_groups = max(self.groups) + 1
@@ -88,8 +94,87 @@ class PartialPooledPoisson:
             gate, jnp.finfo(jnp.float64).tiny, 1.0 - jnp.finfo(jnp.float64).eps
         )
 
+        s0 = (100 - self.coverage) / 100.0
+        mu = final_outbreak_size_vmap_both(mu, s0)  # type: ignore
+        mu = (mu - s0) * self.population
+
         numpyro.sample(
             "cases",
             dist.ZeroInflatedPoisson(gate, mu),  # type: ignore
             obs=cases,
         )
+
+
+@jax.custom_jvp
+def final_outbreak_size(r0, s0=1.0):
+    # T = 1 - s0 * exp(-r0 * T)
+    # 1 - s0 exp(-r0 * T) - T = 0
+
+    def final_size_residual(t):
+        return 1 - s0 * jnp.exp(-r0 * t[0]) - t[0]
+
+    result = minimize(
+        lambda t: final_size_residual(t) ** 2,
+        x0=jnp.array([0.5]),
+        method="BFGS",
+    )
+
+    t = result.x[0]
+    t = jnp.clip(
+        t,
+        min=jnp.finfo(jnp.float64).tiny,
+        max=1.0 - jnp.finfo(jnp.float64).eps,
+    )
+    return t
+
+
+# @jax.vmap
+# def final_outbreak_size_vectorized(r0, s0=1.0):
+#     """Vectorized version to solve for multiple R0 values at once"""
+#     return final_outbreak_size(r0, s0)
+
+
+@final_outbreak_size.defjvp
+def final_outbreak_size_jvp(primals, tangents):
+    """
+    Custom JVP rule using implicit differentiation
+
+    We're solving: F(T, r0, s0) = 1 - s0 * exp(-r0 * T) - T = 0
+
+    By implicit function theorem:
+    dT/dr0 = -(∂F/∂r0) / (∂F/∂T)
+    dT/ds0 = -(∂F/∂s0) / (∂F/∂T)
+    """
+    r0, s0 = primals
+    r0_dot, s0_dot = tangents
+
+    # Get the primal solution
+    T = final_outbreak_size(r0, s0)
+
+    # Compute partial derivatives of F(T, r0, s0) = 1 - s0 * exp(-r0 * T) - T
+    exp_term = jnp.exp(-r0 * T)
+
+    # ∂F/∂T = s0 * r0 * exp(-r0 * T) - 1
+    dF_dT = s0 * r0 * exp_term - 1
+
+    # ∂F/∂r0 = s0 * T * exp(-r0 * T)
+    dF_dr0 = s0 * T * exp_term
+
+    # ∂F/∂s0 = -exp(-r0 * T)
+    dF_ds0 = -exp_term
+
+    # Apply implicit function theorem
+    # dT/dr0 = -(∂F/∂r0) / (∂F/∂T)
+    dT_dr0 = -dF_dr0 / dF_dT
+
+    # dT/ds0 = -(∂F/∂s0) / (∂F/∂T)
+    dT_ds0 = -dF_ds0 / dF_dT
+
+    # Apply chain rule
+    T_dot = dT_dr0 * r0_dot + dT_ds0 * s0_dot
+
+    return T, T_dot
+
+
+# Vectorized versions
+final_outbreak_size_vmap_both = jax.vmap(final_outbreak_size, in_axes=(0, 0))

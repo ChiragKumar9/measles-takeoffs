@@ -80,6 +80,8 @@ if __name__ == "__main__":
                 "log_income",
             ]
         ).to_jax(),
+        population=df["pop_5_9"].to_jax(),
+        coverage=df["estimated_mmr_cov"].to_jax(),
         groups=df["state"],
         group_fixed_effect=True,
     )
