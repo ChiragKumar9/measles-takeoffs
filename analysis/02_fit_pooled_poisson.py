@@ -56,7 +56,7 @@ if __name__ == "__main__":
     ].to_jax()
     model = poisson.PartialPooledPoisson(
         iv=iv,
-        covariates=df.select(
+        regression_covariates=df.select(
             [
                 "fraction_public",
                 "pop_density_5_9",
@@ -65,6 +65,19 @@ if __name__ == "__main__":
                 "log_population",
                 "log_income",
                 *years,
+            ]
+        ).to_jax(),
+        classification_covariates=df.select(
+            [
+                "estimated_mmr_cov",
+                "total_exempt_pct",
+                "fraction_nonmed_exempt",
+                "fraction_public",
+                "pop_density_5_9",
+                "fraction_white",
+                "fraction_graduate_degree",
+                "log_population",
+                "log_income",
             ]
         ).to_jax(),
         groups=df["state"],
