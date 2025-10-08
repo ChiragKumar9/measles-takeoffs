@@ -90,3 +90,52 @@ if __name__ == "__main__":
     )
 
     plt.show()
+
+    # histograms of marginal effects
+    iv_effect = (
+        posterior_samples["iv_global"][:, jnp.newaxis]
+        + posterior_samples["iv_group_variabilities"][:, jnp.newaxis]
+        * posterior_samples["iv_group_offsets"]
+    )
+
+    df_grouped = df.group_by("state", maintain_order=True)
+    cases = df_grouped.agg(pl.max("cases_outbreak"))
+    outbreak_ever = cases["cases_outbreak"] >= params["inclusion_threshold"]
+    outbreak_never = cases["cases_outbreak"] == 0
+
+    for i in range(iv_effect.shape[-1]):
+        fig, ax = plt.subplots(1, 1)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.get_xaxis().tick_bottom()
+        ax.get_yaxis().tick_left()
+        ax.tick_params(axis="x", direction="out")
+        ax.tick_params(axis="y", direction="out")
+        # offset the spines
+        for spine in ax.spines.values():
+            spine.set_position(("outward", 5))
+        # put the grid behind
+        ax.set_axisbelow(True)
+        ax.hist(
+            iv_effect[:, outbreak_never.to_jax(), i].flatten(),
+            bins=1000,
+            density=True,
+            color="blue",
+            alpha=0.7,
+            label="Never had outbreak",
+        )
+
+        ax.hist(
+            iv_effect[:, outbreak_ever.to_jax(), i].flatten(),
+            bins=1000,
+            density=True,
+            color="red",
+            alpha=0.7,
+            label="Had an outbreak",
+        )
+
+        ax.legend()
+        ax.set_xlabel("Log marginal effect")
+        ax.set_ylabel("Density")
+
+        plt.show()
