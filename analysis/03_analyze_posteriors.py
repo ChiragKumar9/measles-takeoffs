@@ -5,11 +5,7 @@ import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import polars as pl
 import yaml
-from jax.random import PRNGKey
 from matplotlib import rc
-from numpyro.infer import Predictive
-
-from outbreak_size import poisson
 
 plt.rcParams["figure.figsize"] = [9, 9]
 font = {"family": "Nimbus Roman", "size": 28}
@@ -90,6 +86,9 @@ if __name__ == "__main__":
     )
 
     plt.show()
+    # Report R2
+    print(jnp.polyfit(median, df["cases_outbreak"].to_jax(), 1))
+    print(jnp.corrcoef(df["cases_outbreak"].to_jax(), median)[0, 1] ** 2)
 
     # histograms of marginal effects
     iv_effect = (

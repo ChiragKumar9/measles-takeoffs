@@ -1,7 +1,6 @@
 import os
 import pickle
 
-import jax.numpy as jnp
 import polars as pl
 import yaml
 from jax.random import PRNGKey
@@ -38,8 +37,10 @@ if __name__ == "__main__":
 
     # make year dummy variables
     df = df.sort("year", descending=True)
+    year_data = df["year"]
     df = df.to_dummies(columns="year", separator="_", drop_first=True)
     years = [y for y in df.columns if y.startswith("year_")]
+    df = df.with_columns(year=year_data)
 
     # make new variables
     df = df.with_columns(
@@ -67,21 +68,9 @@ if __name__ == "__main__":
                 *years,
             ]
         ).to_jax(),
-        classification_covariates=df.select(
-            [
-                "estimated_mmr_cov",
-                "total_exempt_pct",
-                "fraction_nonmed_exempt",
-                "fraction_public",
-                "pop_density_5_9",
-                "fraction_white",
-                "fraction_graduate_degree",
-                "log_population",
-                "log_income",
-            ]
-        ).to_jax(),
-        population=df["pop_5_9"].to_jax(),
-        coverage=df["estimated_mmr_cov"].to_jax(),
+        exposure=df["pop_5_9"].to_jax()
+        * (100 - df["estimated_mmr_cov"]).to_jax()
+        / 100,
         groups=df["state"],
         group_fixed_effect=True,
     )
