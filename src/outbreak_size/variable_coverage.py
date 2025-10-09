@@ -19,11 +19,12 @@ class WithinCountyVariance:
         r0_prior=dist.LogNormal(jnp.log(15), jnp.log((18 / 12) ** 0.5)),
     ):
         self.coverage_fraction = coverage_fraction
-        self.uncovered_fraction = 1 - coverage_fraction
+        self.uncovered_fraction = 1.0 - coverage_fraction
+        self.num_samples = coverage_fraction.shape[0]
         self.population = population
         self.variance_covariates = variance_covariates
         self.num_variance_covariates = variance_covariates.shape[1]
-        # turn groups into an index
+        # turn groups into one-hot encoded features
         self.groups = groups.cast(pl.Categorical).to_physical()
         self.num_groups = max(self.groups) + 1
         self.groups = self.groups.to_jax()
@@ -49,6 +50,7 @@ class WithinCountyVariance:
 
         phi = log_baseline_concentration + covariate_effect
         phi = jnp.exp(phi)
+        numpyro.deterministic("concentration", phi)
 
         # We put a uniform prior on the coverage distribution
         # phi is a concentration parameter, it is alpha + beta in the convention beta
@@ -57,12 +59,14 @@ class WithinCountyVariance:
         # Under the hood, numpyro's BetaProportion does exactly this -- I'm just
         # doing it by hand so I can add the uniform prior in
         coverage_distribution = dist.Beta(
-            self.coverage_fraction * phi + 1, self.uncovered_fraction * phi + 1
+            1.0 + self.coverage_fraction * phi,
+            1.0 + self.uncovered_fraction * phi,
         )
 
-        inferred_coverage = numpyro.sample(
-            "inferred_coverage", coverage_distribution
-        )
+        with numpyro.plate("inferring_coverage", self.num_samples):
+            inferred_coverage = numpyro.sample(
+                "inferred_coverage", coverage_distribution
+            )
 
         # Now we do the semi-mechanistic outbreak size inference
         # We need some estimate of R0
@@ -74,6 +78,8 @@ class WithinCountyVariance:
         # We assume that the outbreak occured in a cluster at that coverage
         proportion = jnp.exp(coverage_distribution.log_prob(inferred_coverage))
         incident_infections = incidence * proportion * self.population
+        incident_infections = incident_infections + jnp.finfo(jnp.float64).eps
+        numpyro.deterministic("incident_infections", incident_infections)
 
         numpyro.sample("cases", dist.Poisson(incident_infections), obs=cases)
 

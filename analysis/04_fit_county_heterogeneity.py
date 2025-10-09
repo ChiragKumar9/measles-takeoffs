@@ -41,7 +41,6 @@ if __name__ == "__main__":
                 "fraction_nonmed_exempt",
                 "log_population",
                 "fraction_public",
-                "pop_density_5_9",
                 "fraction_white",
                 "fraction_graduate_degree",
                 "log_income",
@@ -57,7 +56,7 @@ if __name__ == "__main__":
     mcmc = MCMC(
         nuts_kernel,
         num_warmup=2000,
-        num_samples=2000,
+        num_samples=1000,
         num_chains=1,
     )
     mcmc.run(PRNGKey(params["seed"]), cases=df["cases_outbreak"].to_jax())
