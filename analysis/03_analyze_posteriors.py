@@ -79,11 +79,13 @@ if __name__ == "__main__":
     ax.set_xscale("symlog")
     ax.set_yscale("symlog")
     ax.plot(
-        [0, max(df["cases_outbreak"].max(), median.max())],  # type: ignore
-        [0, max(df["cases_outbreak"].max(), median.max())],  # type: ignore
+        [0, 1.05 * max(df["cases_outbreak"].max(), median.max())],  # type: ignore
+        [0, 1.05 * max(df["cases_outbreak"].max(), median.max())],  # type: ignore
         ls="--",
         c="black",
     )
+    ax.set_xlim(-0.3, 1.1 * max(df["cases_outbreak"].max(), median.max()))  # type: ignore
+    ax.set_ylim(-0.3, 1.1 * max(df["cases_outbreak"].max(), median.max()))  # type: ignore
 
     plt.show()
     # Report R2

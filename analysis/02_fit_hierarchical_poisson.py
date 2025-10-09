@@ -63,14 +63,11 @@ if __name__ == "__main__":
                 "pop_density_5_9",
                 "fraction_white",
                 "fraction_graduate_degree",
-                "log_population",
                 "log_income",
                 *years,
             ]
         ).to_jax(),
-        exposure=df["pop_5_9"].to_jax()
-        * (100 - df["estimated_mmr_cov"]).to_jax()
-        / 100,
+        exposure=df["pop_5_9"].to_jax(),
         groups=df["state"],
         group_fixed_effect=True,
     )
@@ -79,8 +76,8 @@ if __name__ == "__main__":
     nuts_kernel = NUTS(model.fit, init_strategy=init_to_median())
     mcmc = MCMC(
         nuts_kernel,
-        num_warmup=params["mcmc_warmup"],
-        num_samples=params["mcmc_samples"],
+        num_warmup=8000,
+        num_samples=4000,
         num_chains=4,
     )
     mcmc.run(PRNGKey(params["seed"]), cases=df["cases_outbreak"].to_jax())
