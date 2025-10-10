@@ -52,12 +52,11 @@ class WithinCountyVariance:
         phi = jnp.exp(phi)
         numpyro.deterministic("concentration", phi)
 
-        # We put a uniform prior on the coverage distribution
         # phi is a concentration parameter, it is alpha + beta in the convention beta
         # so alpha = coverage_fraction * phi, beta = (1 - coverage_fraction) * phi
-        # We add 1 to prevent any U shaped distributions and as a uniform prior
-        # Under the hood, numpyro's BetaProportion does exactly this -- I'm just
-        # doing it by hand so I can add the uniform prior in
+        # Numpyro's BetaProportion does exactly this under the hood, but I do it
+        # explicitly here so I can understand what's going on
+        # and so it's easier to add a meaningful prior
         coverage_distribution = dist.Beta(
             1.0 + self.coverage_fraction * phi,
             1.0 + self.uncovered_fraction * phi,
@@ -74,10 +73,14 @@ class WithinCountyVariance:
 
         # Now we infer the final outbreak size based on the inferred coverage
         final_size = final_outbreak_size_vmap(r0, 1.0 - inferred_coverage)  # type: ignore
+        numpyro.deterministic("final_size", final_size)
         incidence = final_size - inferred_coverage
         # We assume that the outbreak occured in a cluster at that coverage
         proportion = jnp.exp(coverage_distribution.log_prob(inferred_coverage))
-        incident_infections = incidence * proportion * self.population
+        attenuator = numpyro.sample("attenuator", dist.Beta(1, 1))
+        incident_infections = (
+            incidence * proportion * self.population * attenuator
+        )
         incident_infections = incident_infections + jnp.finfo(jnp.float64).eps
         numpyro.deterministic("incident_infections", incident_infections)
 

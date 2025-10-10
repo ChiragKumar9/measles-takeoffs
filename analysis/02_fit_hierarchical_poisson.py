@@ -77,7 +77,7 @@ if __name__ == "__main__":
     mcmc = MCMC(
         nuts_kernel,
         num_warmup=8000,
-        num_samples=4000,
+        num_samples=2000,
         num_chains=4,
     )
     mcmc.run(PRNGKey(params["seed"]), cases=df["cases_outbreak"].to_jax())

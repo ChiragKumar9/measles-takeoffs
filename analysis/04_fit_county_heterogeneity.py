@@ -5,10 +5,12 @@ import polars as pl
 import yaml
 from jax.random import PRNGKey
 from numpyro import enable_x64, set_host_device_count
+from numpyro.infer import MCMC, NUTS, Predictive, init_to_median
 
+# We have to do this above importing our model to avoid issues with Jax for
+# reasons I don't quite understand?
 set_host_device_count(4)  # use all cores for MCMC
 enable_x64()
-from numpyro.infer import MCMC, NUTS, Predictive, init_to_median
 
 from outbreak_size import variable_coverage
 
@@ -52,7 +54,9 @@ if __name__ == "__main__":
     )
 
     # fit model
-    nuts_kernel = NUTS(model.fit, init_strategy=init_to_median())
+    nuts_kernel = NUTS(
+        model.fit, init_strategy=init_to_median(), dense_mass=True
+    )
     mcmc = MCMC(
         nuts_kernel,
         num_warmup=2000,
@@ -69,7 +73,7 @@ if __name__ == "__main__":
     with open(
         os.path.join(
             output_dir,
-            "samples_within_county_variance.pkl",
+            "samples_within_county_coverage_varies.pkl",
         ),
         "wb",
     ) as file:
@@ -82,7 +86,7 @@ if __name__ == "__main__":
     with open(
         os.path.join(
             output_dir,
-            "predictive_within_county_variance.pkl",
+            "predictive_within_county_coverage_varies.pkl",
         ),
         "wb",
     ) as file:
