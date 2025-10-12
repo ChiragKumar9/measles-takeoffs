@@ -7,7 +7,7 @@ from jax.random import PRNGKey
 from numpyro import enable_x64, set_host_device_count
 from numpyro.infer import MCMC, NUTS, Predictive, init_to_median
 
-from outbreak_size import variable_coverage
+from outbreak_size import heterogeneous_coverage
 
 set_host_device_count(4)
 enable_x64()
@@ -31,7 +31,7 @@ if __name__ == "__main__":
     years = [y for y in df.columns if y.startswith("year_")]
 
     # set up model
-    model = variable_coverage.WithinCountyVarianceRegression(
+    model = heterogeneous_coverage.WithinCountyVarianceRegression(
         coverage_fraction=df["estimated_mmr_cov"].to_jax() / 100,
         exemption_fraction=df["total_exempt_pct"].to_jax() / 100,
         fraction_nonmed_exempt=df["fraction_nonmed_exempt"].to_jax(),

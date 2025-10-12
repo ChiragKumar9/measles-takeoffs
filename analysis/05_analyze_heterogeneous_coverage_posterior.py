@@ -15,7 +15,7 @@ parser.add_argument(
     "--input_stub",
     help="Input stub of the pickle file (e.g., 'within_county_Re_varies')",
     type=str,
-    required=True,
+    default="within_county_coverage_varies",
 )
 
 args = parser.parse_args()
