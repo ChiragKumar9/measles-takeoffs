@@ -7,12 +7,10 @@ from jax.random import PRNGKey
 from numpyro import enable_x64, set_host_device_count
 from numpyro.infer import MCMC, NUTS, Predictive, init_to_median
 
-# We have to do this above importing our model to avoid issues with Jax for
-# reasons I don't quite understand?
-set_host_device_count(4)  # use all cores for MCMC
-enable_x64()
-
 from outbreak_size import variable_coverage
+
+set_host_device_count(4)
+enable_x64()
 
 data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 output_dir = os.path.join(
@@ -33,15 +31,14 @@ if __name__ == "__main__":
     years = [y for y in df.columns if y.startswith("year_")]
 
     # set up model
-    model = variable_coverage.WithinCountyVariance(
+    model = variable_coverage.WithinCountyVarianceRegression(
         coverage_fraction=df["estimated_mmr_cov"].to_jax() / 100,
+        exemption_fraction=df["total_exempt_pct"].to_jax() / 100,
+        fraction_nonmed_exempt=df["fraction_nonmed_exempt"].to_jax(),
         population=df["pop_5_9"].to_jax(),
-        variance_covariates=df.select(
+        regression_controls=df.select(
             [
-                "estimated_mmr_cov",
-                "total_exempt_pct",
-                "fraction_nonmed_exempt",
-                "log_population",
+                "pop_density_5_9",
                 "fraction_public",
                 "fraction_white",
                 "fraction_graduate_degree",
@@ -50,17 +47,14 @@ if __name__ == "__main__":
             ]
         ).to_jax(),
         groups=df["state"],
-        group_fixed_effect=True,
     )
 
     # fit model
-    nuts_kernel = NUTS(
-        model.fit, init_strategy=init_to_median(), dense_mass=True
-    )
+    nuts_kernel = NUTS(model.fit, init_strategy=init_to_median())
     mcmc = MCMC(
         nuts_kernel,
         num_warmup=2000,
-        num_samples=1000,
+        num_samples=2000,
         num_chains=1,
     )
     mcmc.run(PRNGKey(params["seed"]), cases=df["cases_outbreak"].to_jax())
