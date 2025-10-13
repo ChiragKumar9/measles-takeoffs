@@ -4,6 +4,7 @@ import pickle
 
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
+import numpy as np
 import polars as pl
 import yaml
 from matplotlib import rc
@@ -251,6 +252,129 @@ if __name__ == "__main__":
     ax.set_ylim(0, 100)
     ax.legend()
 
+    plt.show()
+
+    # plot the two against each other
+    fig, ax = plt.subplots(1, 1)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.get_xaxis().tick_bottom()
+    ax.get_yaxis().tick_left()
+    ax.tick_params(axis="x", direction="out")
+    ax.tick_params(axis="y", direction="out")
+    # offset the spines
+    for spine in ax.spines.values():
+        spine.set_position(("outward", 5))
+    # put the grid behind
+    ax.set_axisbelow(True)
+    ax.scatter(underlying_median, median, c="blue")
+    ax.errorbar(
+        underlying_median,
+        median,
+        xerr=[
+            underlying_median - underlying_lower,
+            underlying_upper - underlying_median,
+        ],
+        yerr=[median - lower, upper - median],
+        fmt="o",
+        ecolor="blue",
+        c="blue",
+        capsize=0,
+        alpha=0.2,
+    )
+
+    ax.plot(
+        [0, 100],
+        [0, 100],
+        ls="--",
+        c="black",
+    )
+    ax.set_xlabel("Estimated sampling coverage (%)")
+    ax.set_ylabel("Estimated outbreak cluster coverage (%)")
+    ax.set_xlim(0, 100)
+    ax.set_ylim(0, 100)
+    ax.legend()
+
+    plt.show()
+
+    # histogram of inferred coverage based on whether the county had an outbreak
+    fig, ax = plt.subplots(1, 1)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.get_xaxis().tick_bottom()
+    ax.get_yaxis().tick_left()
+    ax.tick_params(axis="x", direction="out")
+    ax.tick_params(axis="y", direction="out")
+    # offset the spines
+    for spine in ax.spines.values():
+        spine.set_position(("outward", 5))
+    # put the grid behind
+    ax.set_axisbelow(True)
+    ax.hist(
+        inferred_coverage[:, df["cases_outbreak"].to_jax() > 0].flatten(),
+        bins=100,
+        color="red",
+        alpha=0.5,
+        density=True,
+        label="Counties with outbreaks",
+    )
+    ax.hist(
+        inferred_coverage[:, df["cases_outbreak"].to_jax() == 0].flatten(),
+        bins=100,
+        color="blue",
+        alpha=0.5,
+        density=True,
+        label="Counties without outbreaks",
+    )
+    ax.set_xlabel("Estimated outbreak cluster coverage (%)")
+    ax.set_ylabel("Density")
+    ax.set_xlim(0, 100)
+    ax.legend()
+    plt.show()
+
+    # report out some statistics
+    print(
+        "Statistics for inferred coverage among counties without an outbreak:"
+    )
+    no_outbreak = inferred_coverage[
+        :, df["cases_outbreak"].to_jax() == 0
+    ].flatten()
+    no_outbreak_median = jnp.median(no_outbreak)
+    no_outbreak_lower = jnp.quantile(no_outbreak, (1 - alpha) / 2)
+    no_outbreak_upper = jnp.quantile(no_outbreak, 1 - ((1 - alpha) / 2))
+    print(
+        f"  Median: {no_outbreak_median:.1f} ({no_outbreak_lower:.1f}, {no_outbreak_upper:.1f})"
+    )
+
+    # variance in outbreak cluster coverage across repeated counties
+    df = df.with_columns(median_inferred_outbreak_coverage=np.array(median))
+    df_grouped = df.group_by("fips").agg(
+        std_inferred_coverage=pl.col("median_inferred_outbreak_coverage").std()
+    )
+    # plot
+    fig, ax = plt.subplots(1, 1)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.get_xaxis().tick_bottom()
+    ax.get_yaxis().tick_left()
+    ax.tick_params(axis="x", direction="out")
+    ax.tick_params(axis="y", direction="out")
+    # offset the spines
+    for spine in ax.spines.values():
+        spine.set_position(("outward", 5))
+    # put the grid behind
+    ax.set_axisbelow(True)
+    ax.hist(
+        df_grouped["std_inferred_coverage"],
+        bins=20,
+        color="blue",
+        alpha=0.5,
+        density=True,
+    )
+    ax.set_xlabel(
+        "Standard deviation in estimated outbreak cluster coverage (%)"
+    )
+    ax.set_ylabel("Density")
     plt.show()
 
     # inferred coverage and outbreak size
