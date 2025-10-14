@@ -4,6 +4,7 @@ import numpyro
 import numpyro.distributions as dist
 import polars as pl
 import scipy as sp
+from jax.scipy.special import expit, logit
 
 
 class WithinCountyVarianceRegression:
@@ -87,19 +88,22 @@ class WithinCountyVarianceRegression:
         phi = phi + jnp.finfo(jnp.float64).eps
         numpyro.deterministic("concentration", phi)
 
-        # phi is a concentration parameter, it is alpha + beta in the convention beta
-        # so alpha = coverage_fraction * phi, beta = (1 - coverage_fraction) * phi
-        # Numpyro's BetaProportion does exactly this under the hood, but I do it
-        # explicitly here so I can understand what's going on
-        # and so I can add a meaningful prior
-        coverage_distribution = dist.Beta(
-            1.0 + self.coverage_fraction * phi,
-            1.0 + self.uncovered_fraction * phi,
-        )
+        # logit-normal approximation to Beta distribution
+        mean = self.coverage_fraction
+        mean_inv_mean = mean * (1 - mean)
+        logit_mean = logit(mean)
+        # Delta method says that
+        # Var(logit X) ~= Var(X) / mean_inv_mean^2
+        # for us, this becomes mean_inv_mean / (phi + 1) all over mean_inv_mean^2
+        logit_std = jnp.sqrt(1.0 / (mean_inv_mean * (phi + 1)))
 
         with numpyro.plate("inferring_coverage", self.num_samples):
-            inferred_coverage = numpyro.sample(
-                "inferred_coverage", coverage_distribution
+            raw_coverage = numpyro.sample(
+                "raw_coverage", dist.Normal(0.0, 1.0)
+            )
+            logit_coverage = logit_mean + logit_std * raw_coverage
+            inferred_coverage = numpyro.deterministic(
+                "inferred_coverage", expit(logit_coverage)
             )
 
         # Now we plug this into a regression to predict outbreak size
@@ -145,7 +149,7 @@ class WithinCountyVarianceRegression:
         )
         full_spatial_effect = full_spatial_effect[self.spatial_units]  # type: ignore
         # and finally add to mu
-        mu = mu + full_spatial_effect
+        mu = mu
 
         numpyro.deterministic("expected_cases", mu)
         numpyro.sample("cases", dist.Poisson(mu), obs=cases)

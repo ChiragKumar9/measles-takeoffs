@@ -7,12 +7,12 @@ import yaml
 from jax.random import PRNGKey
 from numpyro import enable_x64, set_host_device_count
 from numpyro.infer import MCMC, NUTS, Predictive, init_to_median
-from scipy.sparse import csr_matrix
 
-from outbreak_size import heterogeneous_coverage
-
+# Not sure why this has to be set up above importation of model code?
 set_host_device_count(4)
 enable_x64()
+
+from outbreak_size import heterogeneous_coverage
 
 data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 output_dir = os.path.join(
@@ -81,13 +81,15 @@ if __name__ == "__main__":
 
     # fit model
     nuts_kernel = NUTS(
-        model.fit, init_strategy=init_to_median(), target_accept_prob=0.99
+        model.fit,
+        init_strategy=init_to_median(num_samples=50),
+        target_accept_prob=0.8,
     )
     mcmc = MCMC(
         nuts_kernel,
-        num_warmup=20000,
+        num_warmup=8000,
         num_samples=2000,
-        num_chains=1,
+        num_chains=4,
     )
     mcmc.run(PRNGKey(params["seed"]), cases=df["cases_outbreak"].to_jax())
 
