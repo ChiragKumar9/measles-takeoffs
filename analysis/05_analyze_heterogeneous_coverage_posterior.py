@@ -440,9 +440,7 @@ if __name__ == "__main__":
     plt.show()
 
     # Report effect of coefficients on variance
-    if "Re" in input_stub:
-        coefs_to_report = ["log_baseline_concentration", "regression_betas"]
-    elif "coverage" in input_stub:
+    if "coverage" in input_stub:
         coefs_to_report = [
             "log_baseline_concentration",
             "log_variance_coverage_effect",
@@ -467,12 +465,27 @@ if __name__ == "__main__":
                 )
 
     # report regression coefficients -- in particular, effect of vaccinations
-    if "coverage" in input_stub:
-        for coef in [
-            "inferred_coverage_effect",
-            "baseline",
-            "regression_betas",
-        ]:
+    for coef in [
+        "inferred_coverage_effect",
+        "baseline",
+        "regression_betas",
+    ]:
+        samples = posterior_samples[coef]
+        median = jnp.median(samples, axis=0)
+        lower = jnp.quantile(samples, (1 - alpha) / 2, axis=0)
+        upper = jnp.quantile(samples, 1 - ((1 - alpha) / 2), axis=0)
+        print(f"Coefficient: {coef}")
+        if median.shape == ():
+            print(f"  {median:.3f} ({lower:.3f}, {upper:.3f})")
+        else:
+            for i in range(median.shape[0]):
+                print(
+                    f"  Covariate {i}: {median[i]:.3f} ({lower[i]:.3f}, {upper[i]:.3f})"
+                )
+
+    # if "CAR" is in the input stub, report out the spatial parameters
+    if "CAR" in input_stub:
+        for coef in ["spatial_precision", "spatial_correlation"]:
             samples = posterior_samples[coef]
             median = jnp.median(samples, axis=0)
             lower = jnp.quantile(samples, (1 - alpha) / 2, axis=0)
@@ -485,29 +498,3 @@ if __name__ == "__main__":
                     print(
                         f"  Covariate {i}: {median[i]:.3f} ({lower[i]:.3f}, {upper[i]:.3f})"
                     )
-
-    # report R0 distribution
-    if "Re" in input_stub:
-        r0_samples = posterior_samples["r0"]
-        median = jnp.median(r0_samples)
-        lower = jnp.quantile(r0_samples, (1 - alpha) / 2)
-        upper = jnp.quantile(r0_samples, 1 - ((1 - alpha) / 2))
-        print(f"R0: {median:.3f} ({lower:.3f}, {upper:.3f})")
-
-        # Plot histogram
-        fig, ax = plt.subplots(1, 1)
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
-        ax.get_xaxis().tick_bottom()
-        ax.get_yaxis().tick_left()
-        ax.tick_params(axis="x", direction="out")
-        ax.tick_params(axis="y", direction="out")
-        # offset the spines
-        for spine in ax.spines.values():
-            spine.set_position(("outward", 5))
-        # put the grid behind
-        ax.set_axisbelow(True)
-        ax.hist(r0_samples, bins=100, color="blue", alpha=1.0, density=True)
-        ax.set_xlabel(r"$R_0$")
-        ax.set_ylabel("Density")
-        plt.show()

@@ -1,11 +1,13 @@
 import os
 import pickle
 
+import numpy as np
 import polars as pl
 import yaml
 from jax.random import PRNGKey
 from numpyro import enable_x64, set_host_device_count
 from numpyro.infer import MCMC, NUTS, Predictive, init_to_median
+from scipy.sparse import csr_matrix
 
 from outbreak_size import heterogeneous_coverage
 
@@ -30,6 +32,32 @@ if __name__ == "__main__":
     )
     years = [y for y in df.columns if y.startswith("year_")]
 
+    adjacency_matrix = pl.read_csv(
+        os.path.join(data_dir, "county_adjacencies.txt"),
+        separator="|",
+        schema_overrides={
+            "County GEOID": pl.String,
+            "Neighbor GEOID": pl.String,
+        },
+    )
+    # only include counties in our dataset
+    adjacency_matrix = adjacency_matrix.filter(
+        pl.col("County GEOID").is_in(df["fips"])
+    )
+    # convert to adjacency matrix
+    counties = df["fips"].unique().to_list()
+    num_counties = len(counties)
+    adj_matrix = np.zeros((num_counties, num_counties))
+    for idx, fip in enumerate(counties):
+        # check that county has some neighbors
+        neighbors = adjacency_matrix.filter(pl.col("County GEOID") == fip)
+        if neighbors.height != 0:
+            for row in neighbors.iter_rows(named=True):
+                # is this county in our dataset?
+                if row["Neighbor GEOID"] in counties:
+                    neighbor_idx = counties.index(row["Neighbor GEOID"])
+                    adj_matrix[idx, neighbor_idx] = 1
+
     # set up model
     model = heterogeneous_coverage.WithinCountyVarianceRegression(
         coverage_fraction=df["estimated_mmr_cov"].to_jax() / 100,
@@ -47,13 +75,17 @@ if __name__ == "__main__":
             ]
         ).to_jax(),
         groups=df["state"],
+        spatial_units=df["fips"],
+        adjacency_matrix=adj_matrix,
     )
 
     # fit model
-    nuts_kernel = NUTS(model.fit, init_strategy=init_to_median())
+    nuts_kernel = NUTS(
+        model.fit, init_strategy=init_to_median(), target_accept_prob=0.99
+    )
     mcmc = MCMC(
         nuts_kernel,
-        num_warmup=2000,
+        num_warmup=20000,
         num_samples=2000,
         num_chains=1,
     )
@@ -67,7 +99,7 @@ if __name__ == "__main__":
     with open(
         os.path.join(
             output_dir,
-            "samples_within_county_coverage_varies.pkl",
+            "samples_within_county_coverage_varies_CAR.pkl",
         ),
         "wb",
     ) as file:
@@ -80,7 +112,7 @@ if __name__ == "__main__":
     with open(
         os.path.join(
             output_dir,
-            "predictive_within_county_coverage_varies.pkl",
+            "predictive_within_county_coverage_varies_CAR.pkl",
         ),
         "wb",
     ) as file:
