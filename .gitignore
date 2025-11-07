@@ -11,6 +11,12 @@
 *.xlsx
 *.txt
 *.pkl
+*.shp
+*.shx
+*.dbf
+*.prj
+*.iso.xml
+*.cpg
 
 # Documents
 *.doc

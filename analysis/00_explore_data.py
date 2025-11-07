@@ -1,13 +1,17 @@
+import argparse
+import glob
 import os
 
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 import yaml
+from addfips import AddFIPS
 from dotenv import load_dotenv
 from matplotlib import rc
+from tqdm.auto import tqdm
 
-from outbreak_size import utils
+from outbreak_size import synth_pop_clusters, utils
 
 plt.rcParams["figure.figsize"] = [9, 9]
 font = {"family": "Nimbus Roman", "size": 28}
@@ -19,12 +23,50 @@ data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 with open("params.yml", "r") as f:
     params = yaml.safe_load(f)
 
+parser = argparse.ArgumentParser()
+parser.add_argument(
+    "--five-year",
+    help="Whether to include five year averaged vaccination data.",
+    type=bool,
+    action=argparse.BooleanOptionalAction,
+)
+
+args = parser.parse_args()
+five_year = args.five_year
+
 
 def read_outbreaks(data_dir=data_dir) -> pl.DataFrame:
     df = pl.read_excel(os.path.join(data_dir, "Combined Measles Dataset.xlsx"))
 
     # to ensure consistent lower case column names
     df = df.rename({col: col.lower() for col in df.columns})
+
+    df_2025 = pl.read_csv(
+        os.path.join(
+            data_dir, "measles_data", "measles_county_all_updates.csv"
+        ),
+        schema_overrides={"location_id": pl.String},
+    )
+    # rename columns to match the main df
+    df_2025 = df_2025.rename(
+        {
+            "location_id": "fips",
+            "location_name": "county",
+            "value": "cases",
+        }
+    )
+
+    df_2025 = df_2025.with_columns(
+        year=pl.lit(2025),
+        state=pl.col("county").str.split(", ").list.get(1),
+        county=pl.col("county").str.split(", ").list.get(0),
+    )
+    df_2025 = df_2025.group_by(["year", "state", "county", "fips"]).agg(
+        pl.sum("cases")
+    )
+
+    # concatenate and return
+    df = pl.concat([df, df_2025], how="diagonal_relaxed")
 
     return df
 
@@ -33,14 +75,49 @@ def process_outbreaks_df(outbreaks_df: pl.DataFrame) -> pl.DataFrame:
     # the last row in outbreaks is a null row with the total number of cases over
     # the study period
     outbreaks_df = outbreaks_df.filter(pl.col("year").is_not_null())
-    # for now, let us drop outbreaks with no case count
+    # let us drop outbreaks with no case count
     # because that doesn't tell us anything about what would have happened had
     # there been an importation
     outbreaks_df = outbreaks_df.filter(pl.col("cases") != 0)
 
+    # when there are fips codes present, we need to do the usual cleaning
+    outbreaks_df = outbreaks_df.with_columns(
+        fips=pl.when(pl.col("fips").str.len_chars() > 2)
+        .then(pl.col("fips").str.zfill(5))
+        .otherwise(pl.col("fips"))
+    )
+    # for now, let's drop 2025 outbreaks with one or two digit fips codes
+    outbreaks_df = outbreaks_df.filter(
+        ~((pl.col("year") == 2025) & (pl.col("fips").str.len_chars() < 5))
+    )
+
     # last column seems to be urls of sources, drop it
     outbreaks_df = outbreaks_df.select(
-        ["year", "state", "county", "cases", "indigenous", "imported"]
+        ["year", "state", "county", "cases", "indigenous", "imported", "fips"]
+    )
+
+    # Delaware reports vaccination coverage at the state only, so aggregate
+    # the outbreak data up to that level as well
+    outbreaks_df = outbreaks_df.with_columns(
+        county=pl.when(pl.col("state") == "Delaware")
+        .then(pl.lit("State"))
+        .otherwise(pl.col("county"))
+    )
+
+    # Group by year, state, and county
+    outbreaks_df = outbreaks_df.group_by(["year", "state", "county"]).agg(
+        cases=pl.sum("cases"),
+        indigenous=pl.sum("indigenous"),
+        imported=pl.sum("imported"),
+        fips=pl.first("fips"),
+    )
+
+    # District of Columbia cases don't have a county listed, so they're never going to merge
+    # list the county as `District of Columbia` for merging purposes
+    outbreaks_df = outbreaks_df.with_columns(
+        county=pl.when(pl.col("state") == "District of Columbia")
+        .then(pl.lit("District of Columbia"))
+        .otherwise(pl.col("county"))
     )
 
     # for now, we don't want total importations by state, so drop rows with null county
@@ -75,9 +152,6 @@ def process_outbreaks_df(outbreaks_df: pl.DataFrame) -> pl.DataFrame:
         ]
     )
 
-    # For now, drop Alaska's Gulf Coast
-    outbreaks_df = outbreaks_df.filter(pl.col("county") != "Gulf Coast")
-
     # Detroit by itself doesn't have a fips code, so aggregate detroit up to Wayne Co
     outbreaks_df = (
         outbreaks_df.with_columns(
@@ -98,10 +172,82 @@ def process_outbreaks_df(outbreaks_df: pl.DataFrame) -> pl.DataFrame:
             imported=pl.when(pl.col("imported").is_null().all())
             .then(None)
             .otherwise(pl.col("imported").sum()),
+            fips=pl.first("fips"),
+        )
+    )
+
+    # Drop Chicago 2024 -- migrant shelter outbreak
+    outbreaks_df = outbreaks_df.filter(
+        ~(
+            (pl.col("year") == 2024)
+            & (pl.col("state") == "Illinois")
+            & (pl.col("county") == "Cook")
+        )
+    )
+    # Drop Wisconsin 2021 -- Operation Allies Welcome Afghan refugee outbreak
+    outbreaks_df = outbreaks_df.filter(
+        ~(
+            (pl.col("year") == 2021)
+            & (pl.col("state") == "Wisconsin")
+            & (pl.col("county") == "Monroe")
+        )
+    )
+    # Drop ICE detention facility 2016
+    outbreaks_df = outbreaks_df.filter(
+        ~(
+            (pl.col("year") == 2016)
+            & (pl.col("state") == "Arizona")
+            & (pl.col("county") == "Pinal")
         )
     )
 
     return outbreaks_df
+
+
+def higher_level_regions() -> dict[str, list[str]]:
+    assignment_special_places = {
+        "Fulton and Gwynett": ["13121", "13135"],
+        "Gulf Coast": ["02150", "02122", "02063", "02066"],
+        # East Tennessee consists of Anderson, Bledsoe, Blount, Bradley, Campbell, Carter, Claiborne,
+        # Cocke, Cumberland, Grainger, Greene, Hamblem, Hamilton, Hancock, Hawkins, Jefferson, Johnson,
+        # Knox, Loudon, McMinn, Meigs, Monroe, Morgan, Polk, Rhea, Roane, Scott, Sevier, Sullivan, Unicoi,
+        # Union, Washington
+        "East tennessee?": [
+            "47001",
+            "47007",
+            "47009",
+            "47011",
+            "47013",
+            "47019",
+            "47025",
+            "47029",
+            "47035",
+            "47057",
+            "47059",
+            "47063",
+            "47065",
+            "47067",
+            "47073",
+            "47089",
+            "47091",
+            "47093",
+            "47105",
+            "47107",
+            "47121",
+            "47123",
+            "47129",
+            "47139",
+            "47143",
+            "47145",
+            "47151",
+            "47155",
+            "47163",
+            "47171",
+            "47173",
+            "47179",
+        ],
+    }
+    return assignment_special_places
 
 
 def read_vaccinations(data_dir=data_dir) -> pl.DataFrame:
@@ -122,12 +268,154 @@ def read_vaccinations(data_dir=data_dir) -> pl.DataFrame:
             pl.col("mmr_cov").cast(pl.Float64, strict=False),
             pl.col("all_vacc_cov").cast(pl.Float64, strict=False),
             pl.col("enrollment").cast(pl.Int64, strict=False),
-            # fips codes are not always 5 digits -- those with leading zeros are 4
-            pl.col("fips").str.zfill(5),
-        ]
+        ],
+        # fips codes are not always 5 digits -- those with leading zeros are 4
+        # so add the leading zeros back in
+        # but only do this when the fips code is not two digits
+        fips=pl.when(pl.col("fips").str.len_chars() > 2)
+        .then(pl.col("fips").str.zfill(5))
+        .otherwise(pl.col("fips")),
     )
 
+    # add in kansas data
+    kansas_vacc = read_kansas_data(data_dir=data_dir)
+    df = pl.concat([df, kansas_vacc], how="diagonal_relaxed")
+
     return df
+
+
+# kansas data is special because it's usually at the school district level,
+# but we need it at the county level
+# So we hda it queried separately at the county level
+def read_kansas_data(data_dir=data_dir):
+    # get all MMR coverage data
+    mmr_files = glob.glob(os.path.join(data_dir, "MMR", "**", "*.csv"))
+    kansas_mmr_dfs = [
+        pl.read_csv(file, separator="\t", encoding="utf16")
+        for file in mmr_files
+    ]
+    kansas_mmr = pl.concat(kansas_mmr_dfs)
+    # do the same for exemption data
+    nme_files = glob.glob(
+        os.path.join(data_dir, "Religious Exemption", "**", "*.csv")
+    )
+    kansas_nme_dfs = [
+        pl.read_csv(file, separator="\t", encoding="utf16")
+        for file in nme_files
+    ]
+    kansas_nme = pl.concat(kansas_nme_dfs)
+    # do the same for medical exemption data
+    me_files = glob.glob(
+        os.path.join(data_dir, "Medical Exemption", "**", "*.csv")
+    )
+    kansas_me_dfs = [
+        pl.read_csv(file, separator="\t", encoding="utf16")
+        for file in me_files
+    ]
+    kansas_me = pl.concat(kansas_me_dfs)
+
+    # now we have to clean and merge
+    kansas_mmr = kansas_mmr.with_columns(
+        mmr_cov=pl.col("County Coverage")
+        .str.replace("%", "")
+        .cast(pl.Float64, strict=False),
+        year=pl.col("Academic Year")
+        .str.slice(0, 4)
+        .cast(pl.Int64, strict=False),
+    ).select(["County", "mmr_cov", "year"])
+
+    kansas_nme = kansas_nme.with_columns(
+        nonmed_exempt_pct=pl.col("Exemption String")
+        .str.replace("%", "")
+        .cast(pl.Float64, strict=False),
+        year=pl.col("Academic Year")
+        .str.slice(0, 4)
+        .cast(pl.Int64, strict=False),
+    ).select(["County", "nonmed_exempt_pct", "year"])
+
+    kansas_me = kansas_me.with_columns(
+        med_exempt_pct=pl.col("Exemption String")
+        .str.replace("%", "")
+        .cast(pl.Float64, strict=False),
+        year=pl.col("Academic Year")
+        .str.slice(0, 4)
+        .cast(pl.Int64, strict=False),
+    ).select(["County", "med_exempt_pct", "year"])
+
+    kansas_vacc = kansas_mmr.join(
+        kansas_nme, on=["County", "year"], how="inner"
+    ).join(kansas_me, on=["County", "year"], how="inner")
+
+    kansas_vacc = kansas_vacc.with_columns(state=pl.lit("Kansas"))
+
+    # we need to add fips codes into this data
+    addfips = AddFIPS()
+    kansas_vacc = kansas_vacc.with_columns(
+        fips=pl.col("County").map_elements(
+            lambda county: addfips.get_county_fips(county, "Kansas")
+        )
+    )
+
+    # rename "County" to be "county" for merging purposes
+    kansas_vacc = kansas_vacc.rename({"County": "county"})
+
+    return kansas_vacc
+
+
+def query_avg_vaccinations_region_years(
+    vaccinations_df: pl.DataFrame, years: list[int], fips: list[str]
+) -> dict:
+    # get the vaccination data for the region and years
+    temp_df = vaccinations_df.filter(
+        (pl.col("year").is_in(years)) & (pl.col("fips").is_in(fips))
+    )
+    if temp_df.height == 0:
+        return {
+            "estimated_mmr_cov": None,
+            "nonmed_exempt_pct": None,
+            "med_exempt_pct": None,
+        }
+    # get population to weight the average values
+    census_query = utils.CensusQuery(os.getenv("CENSUS_API_KEY"))  # type: ignore
+    pop_df = census_query.query_5_9_pop(
+        temp_df["year"].to_list(), temp_df["fips"].to_list()
+    )
+    temp_df = temp_df.with_columns(
+        pop_5=pop_df["pop_5_9"]
+        / 5  # entering kindergarteners ~ 1/5 of 5-9 pop
+    )
+    # calculate a weight
+    temp_df = temp_df.with_columns(
+        # this is a particular county's importance in the region for that year
+        weight=pl.col("pop_5") / pl.sum("pop_5").over("year")
+    )
+    # Let's aggregate up to the year level
+    temp_df = temp_df.group_by("year").agg(
+        estimated_mmr_cov=(
+            pl.col("estimated_mmr_cov") * pl.col("weight")
+        ).sum(),
+        nonmed_exempt_pct=(
+            pl.col("nonmed_exempt_pct") * pl.col("weight")
+        ).sum(),
+        med_exempt_pct=(pl.col("med_exempt_pct") * pl.col("weight")).sum(),
+        # Just sum the population
+        pop_5=pl.col("pop_5").sum(),
+    )
+    # Now we to condense these estimates across years into one estimate over the time range
+    # We need to weight by population again
+    temp_df = temp_df.with_columns(weight=pl.col("pop_5") / pl.sum("pop_5"))
+    temp_df = temp_df.with_columns(
+        estimated_mmr_cov=pl.col("estimated_mmr_cov") * pl.col("weight"),
+        nonmed_exempt_pct=pl.col("nonmed_exempt_pct") * pl.col("weight"),
+        med_exempt_pct=pl.col("med_exempt_pct") * pl.col("weight"),
+    )
+    temp_df = temp_df.select(
+        estimated_mmr_cov=pl.col("estimated_mmr_cov").sum(),
+        nonmed_exempt_pct=pl.col("nonmed_exempt_pct").sum(),
+        med_exempt_pct=pl.col("med_exempt_pct").sum(),
+    )
+
+    return temp_df.to_dict(as_series=False)
 
 
 def process_vaccinations_df(vaccinations_df: pl.DataFrame) -> pl.DataFrame:
@@ -167,15 +455,214 @@ def process_vaccinations_df(vaccinations_df: pl.DataFrame) -> pl.DataFrame:
         ]
     )
 
+    # edit the washington dc fips code to be 11001
+    vaccinations_df = vaccinations_df.with_columns(
+        fips=pl.when(pl.col("fips") == "00011")
+        .then(pl.lit("11001"))
+        .otherwise(pl.col("fips"))
+    )
+
+    # Nebraska reports vaccination data by their health district regions
+    # We down-aggregate here because the only county for which we have Nebraska
+    # measles cases is Douglas county, which is anyways by itself as a health district
+    nebraska_fips = {
+        "old_nebraska": [
+            *["310012"] * 3,  # Central
+            "310021",  # Dakota
+            "310002",  # Douglas
+            *["310005"] * 4,  # East Central
+            *["310008"] * 4,  # Elkhorn Logan Valley
+            *["310007"] * 4,  # Four Corners
+            "310003",  # Lincoln-Lancaster
+            *["310015"] * 9,  # Loup Basin
+            *["310020"] * 9,  # North Central
+            *["310010"] * 4,  # Northeast
+            *["310018"] * 8,  # Panhandle
+            *["310011"] * 5,  # Public Health Solutions
+            *["310006"] * 2,  # Sarpy/Cas
+            *["310013"] * 4,  # South Heartland
+            *["310009"] * 5,  # Southeast
+            *["310017"] * 9,  # Southwest
+            *["310004"] * 3,  # Three Rivers
+            *["310014"] * 7,  # Two Rivers
+            *["310016"] * 6,  # West Central
+        ],
+        "new_nebraska": [
+            "31079",
+            "31081",
+            "31121",  # Hall, Hamilton, and Merrick
+            "31043",  # Dakota
+            "31055",  # Douglas
+            "31011",
+            "31037",
+            "31125",
+            "31141",  # Boone, Colfax, Nance, and Platte
+            "31021",
+            "31039",
+            "31119",
+            "31167",  # Burt, Cuming, Madison, Stanton
+            "31023",
+            "31143",
+            "31159",
+            "31185",  # Bulter, Polk, Seward, York
+            "31109",  # Lancaster
+            "31009",
+            "31041",
+            "31071",
+            "31077",
+            "31093",
+            "31115",
+            "31163",
+            "31175",
+            "31183",  # Blaine, Custer, Garfield, Greeley, Howard, Loup, Sherman, Valley, Wheeler
+            "31003",
+            "31015",
+            "31017",
+            "31031",
+            "31089",
+            "31103",
+            "31107",
+            "31139",
+            "31149",  # Antelope, Boyd, Brown, Cherry, Holt, Keya Paha, Knox, Pierce, Rock
+            "31027",
+            "31051",
+            "31173",
+            "31179",  # Cedar, Dixon, Thurston, Wayne
+            "31007",
+            "31013",
+            "31033",
+            "31045",
+            "31049",
+            "31069",
+            "31075",
+            "31105",  # Banner, Box Butte, Cheyenne, Dawes, Deuel, Garden, Grant, Kimball
+            "31059",
+            "31067",
+            "31095",
+            "31151",
+            "31169",  # Fillmore, Gage, Jefferson, Saline, Thayer
+            "31153",
+            "31025",  # Sarpy, Cass
+            "31001",
+            "31035",
+            "31129",
+            "31181",  # Adams, Clay, Nuckolls, Webster
+            "31097",
+            "31127",
+            "31131",
+            "31133",
+            "31147",  # Johnson, Nemaha, Otoe, Pawnee, Richardson
+            "31029",
+            "31057",
+            "31063",
+            "31065",
+            "31085",
+            "31087",
+            "31101",
+            "31135",
+            "31145",  # Chase, Dundy, Frontier, Furnas, Hayes, Hitchcock, Keith, Perkins, Red Willow
+            "31053",
+            "31177",
+            "31155",  # Dodge, Washington, Saunders
+            "31019",
+            "31047",
+            "31061",
+            "31073",
+            "31083",
+            "31099",
+            "31137",  # Buffalo, Dawson, Franklin, Gosper, Harlan, kearney, Phelps
+            "31005",
+            "31091",
+            "31111",
+            "31113",
+            "31117",
+            "31171",  # Arthur, Hooker, Lincoln, Logan, McPherson, Thomas
+        ],
+    }
+
+    nebraska_fips = pl.DataFrame(nebraska_fips)
+    vaccinations_df = vaccinations_df.join(
+        nebraska_fips, left_on="fips", right_on="old_nebraska", how="left"
+    )
+    vaccinations_df = vaccinations_df.with_columns(
+        fips=pl.when(pl.col("fips") == "11")
+        .then(pl.lit("11001"))
+        .otherwise(pl.col("fips"))
+    )
+
+    # I pulled the counties in Kansas that have cases
+    # None of them have cases since 2019, which is when the state started reporting
+    # vaccination coverage, so I don't touch these data and we can just drop them
+
+    # Indiana only reports state level data and only for exemptions
+    # That's too much extrapolation for what we want to do, so not going to touch
+    # those data and we just drop them
+
+    # Let's make fake columns for the places where we have measles cases at a
+    # higher geographic resolution than the vaccination data so that we
+    # don't accidentally drop them in the merge
+
+    # We want to tack on our special locations too
+    # These are locations that require multiple fips codes of analysis
+    assignment_special_places = higher_level_regions()
+
+    for place, fips_list in assignment_special_places.items():
+        if place == "Gulf Coast":
+            continue  # We have vaccination data for the region for this one
+
+        state = vaccinations_df.filter(pl.col("fips") == fips_list[0])[
+            "state"
+        ][0]
+
+        for year in vaccinations_df["year"].unique().to_list():
+            temp = query_avg_vaccinations_region_years(
+                vaccinations_df, years=[year], fips=fips_list
+            )
+
+            # make a temp df
+            temp_df = pl.DataFrame(temp)
+            # add year, state, county columns
+            temp_df = temp_df.with_columns(
+                year=pl.lit(year),
+                state=pl.lit(state),
+                county=pl.lit(place),
+                fips=pl.lit(None),
+            )
+
+            # append to vaccinations_df
+            vaccinations_df = pl.concat(
+                [vaccinations_df, temp_df], how="diagonal_relaxed"
+            )
+
+    # in some cases, we have longer than we need fips details
+    vaccinations_df = vaccinations_df.with_columns(
+        fips=pl.when(pl.col("fips").str.len_chars() > 5)
+        .then(pl.col("fips").str.slice(0, 5))
+        .otherwise(pl.col("fips"))
+    )
+
     return vaccinations_df
 
 
 def merge_outbreaks_vaccinations(
     outbreaks_df: pl.DataFrame, vaccinations_df: pl.DataFrame
 ) -> pl.DataFrame:
-    merged_df = outbreaks_df.join(
-        vaccinations_df, on=["year", "state", "county"], how="left"
+    outbreaks_df = outbreaks_df.with_columns(
+        year_relevant_vaccination=pl.col("year") - 1
     )
+    merged_df = outbreaks_df.join(
+        vaccinations_df,
+        left_on=["year_relevant_vaccination", "state", "county"],
+        right_on=["year", "state", "county"],
+        how="left",
+    )
+    # we'll have two fips codes here -- one from the vaccine data and other from 2025
+    merged_df = merged_df.with_columns(
+        fips=pl.when(pl.col("fips_right").is_not_null())
+        .then(pl.col("fips_right"))
+        .otherwise(pl.col("fips"))
+    )
+    merged_df = merged_df.drop(["fips_right"])
     return merged_df
 
 
@@ -184,18 +671,21 @@ def add_pop_variables(
 ) -> pl.DataFrame:
     census_query = utils.CensusQuery(census_key)
     fips = merged_df["fips"].to_list()
-    # make sure years are capped at 2023 since census data isn't available beyond that
-    years_census = merged_df["year"].clip(upper_bound=2023).to_list()
+    years_census = merged_df["year"].to_list()
     pop_df = census_query.query_5_9_pop(years_census, fips)
     merged_df = merged_df.with_columns(
         pop_df[
             [
+                "pop",
+                "pop_under_5",
                 "pop_5_9",
-                "public_schooled_5_9",
-                "private_schooled_5_9",
-                "not_enrolled_5_9",
+                "school_aged_population",
+                "public_schooled",
+                "private_schooled",
                 "median_household_income",
-                "fraction_graduate_degree",
+                "number_graduate_degree",
+                "pop_25_up",
+                "pop_15_up",
                 "fraction_white",
             ]
         ]
@@ -203,39 +693,16 @@ def add_pop_variables(
     # add a land size variable
     land_df = census_query.query_land_size(fips)
     merged_df = merged_df.join(land_df, on="fips", how="left")
-    years_mobility = merged_df["year"].to_list()
-    mobility_df = census_query.query_within_county_mobility(
-        years_mobility, fips
-    )
-    merged_df = merged_df.with_columns(
-        year_mobility=pl.col("year").clip(lower_bound=2019)
-    )
-    merged_df = merged_df.join(
-        mobility_df,
-        left_on=["year_mobility", "fips"],
-        right_on=["year", "fips"],
-        how="left",
-    )
-    merged_df = merged_df.with_columns(
-        pop_density_5_9=(pl.col("pop_5_9") / pl.col("land_size_sq_km")),
-        fraction_public=(pl.col("public_schooled_5_9") / pl.col("pop_5_9")),
-        fraction_private=(pl.col("private_schooled_5_9") / pl.col("pop_5_9")),
-        # I previously checked by hand that public+private+not_enrolled = total pop 5-9
-        fraction_not_enrolled=(pl.col("not_enrolled_5_9") / pl.col("pop_5_9")),
-        within_county_mobility_proxy=pl.col("within_county_estimate")
-        / pl.mean("within_county_estimate"),
-    )
-    return merged_df
 
-
-def add_hoc_merged_df_adjustments(merged_df: pl.DataFrame) -> pl.DataFrame:
-    # in this merged dataset, there is an instance of a six-digit fips code
-    # it looks to me like this just fairfax county, VA (fips 51059), so truncate
-    # just for now while playing around
     merged_df = merged_df.with_columns(
-        fips=pl.when(pl.col("fips") == "510591")
-        .then(pl.lit("51059"))
-        .otherwise(pl.col("fips"))
+        pop_density=(pl.col("pop") / pl.col("land_size_sq_km")),
+        # these quantities are calculated only for people aged 5-9
+        fraction_public=(pl.col("public_schooled") / pl.col("pop_5_9")),
+        fraction_private=(pl.col("private_schooled") / pl.col("pop_5_9")),
+        # I previously checked by hand that public+private+not_enrolled = total pop
+        fraction_graduate_degree=(
+            pl.col("number_graduate_degree") / pl.col("pop_25_up")
+        ),
     )
     return merged_df
 
@@ -369,7 +836,9 @@ def assemble_analysis_dataset(
     # Now make a new column of cases that is the number of cases generated in the
     # outbreak -- basically excluding the imports
     merged_df = merged_df.with_columns(
-        cases_outbreak=pl.when(pl.col("imported").is_null())
+        cases_outbreak=pl.when(
+            pl.col("imported").is_null() | pl.col("imported") == 0
+        )
         .then(pl.col("cases") - 1)  # if we don't know imports, assume 1 import
         .otherwise(pl.col("cases") - pl.col("imported")),
         # Since we'll need it, make a total pct exempt
@@ -391,9 +860,12 @@ if __name__ == "__main__":
 
     vaccinations_df = read_vaccinations(data_dir)
     vaccinations_df = process_vaccinations_df(vaccinations_df)
-    # Merge and make ad hoc adjustments
+    # Merge
     raw_merged_df = merge_outbreaks_vaccinations(outbreaks_df, vaccinations_df)
-    raw_merged_df = add_hoc_merged_df_adjustments(raw_merged_df)
+    # Let's save this dataset so we have it for plotting
+    raw_merged_df.write_csv(
+        os.path.join(data_dir, "raw_merged_outbreaks_vaccinations.csv")
+    )
     # Subset data to require vaccinations
     merged_df = require_vaccine_data(raw_merged_df)
     # Assemble analysis dataset by estimating a "cases_outbreak" variable
@@ -427,11 +899,103 @@ if __name__ == "__main__":
     # %% VACCINATION COVERAGE AND OUTBREAK SIZE
     # add population variables to make it easy to consider population-dependent
     # variables in the exploration
-    # add a population variable to plot incidence
+    # add census variables
     assert census_key is not None, (
         "A Census API key is required to run this analysis."
     )
+    # Before we do this, we need to remove the places that are special
+    special_places_dict = higher_level_regions()
+    special = merged_df.filter(
+        pl.col("county").is_in(special_places_dict.keys())
+    )
+    merged_df = merged_df.filter(
+        ~pl.col("county").is_in(special_places_dict.keys())
+    )
     merged_df = add_pop_variables(merged_df, census_key)
+    # Query population for special places and re-append
+    for place, fips_list in special_places_dict.items():
+        # let's extract the place from our special df
+        temp_df = special.filter(pl.col("county") == place)
+        if temp_df.height == 0:
+            continue  # something missing in the vaccine data for this special place
+        # repeat each row for all the constituent fips codes
+        temp_df = pl.concat(
+            [temp_df] * len(fips_list), how="diagonal_relaxed"
+        ).with_columns(fips=pl.Series(fips_list))
+        # add pop variables
+        temp_df = add_pop_variables(temp_df, census_key)
+        # aggregate back up to the special place level
+        temp_df = temp_df.with_columns(
+            # make a population-weighting variable
+            weight_15_up=pl.col("pop_15_up")
+            / pl.sum("pop_15_up").over("year"),
+            weight_25_up=pl.col("pop_25_up")
+            / pl.sum("pop_25_up").over("year"),
+            weight_overall=pl.col("pop") / pl.sum("pop").over("year"),
+        )
+        temp_df = temp_df.group_by(["year"]).agg(
+            # state and county are givens
+            state=pl.first("state"),
+            county=pl.lit(place),
+            # cases have to be kept
+            cases=pl.first("cases"),
+            cases_outbreak=pl.first("cases_outbreak"),
+            imported=pl.first("imported"),
+            indigenous=pl.first("indigenous"),
+            # vaccination variables are already population-weighted averages
+            estimated_mmr_cov=pl.first("estimated_mmr_cov"),
+            nonmed_exempt_pct=pl.first("nonmed_exempt_pct"),
+            med_exempt_pct=pl.first("med_exempt_pct"),
+            total_exempt_pct=pl.first("total_exempt_pct"),
+            # populations are summed
+            pop=pl.sum("pop"),
+            school_aged_population=pl.sum("school_aged_population"),
+            pop_5_9=pl.sum("pop_5_9"),
+            public_schooled=pl.sum("public_schooled"),
+            private_schooled=pl.sum("private_schooled"),
+            pop_15_up=pl.sum("pop_15_up"),
+            pop_25_up=pl.sum("pop_25_up"),
+            pop_under_5=pl.sum("pop_under_5"),
+            number_graduate_degree=pl.sum("number_graduate_degree"),
+            land_size_sq_km=pl.sum("land_size_sq_km"),
+            # other variables are population-weighted averages
+            median_household_income=(
+                pl.col("median_household_income") * pl.col("weight_15_up")
+            ).sum(),
+            fraction_white=(
+                pl.col("fraction_white") * pl.col("weight_overall")
+            ).sum(),
+        )
+        # We have to make our own fraction public/private/not enrolled
+        temp_df = temp_df.with_columns(
+            fraction_public=(
+                pl.col("public_schooled") / pl.col("pop_under_5")
+            ),
+            fraction_private=(
+                pl.col("private_schooled") / pl.col("pop_under_5")
+            ),
+            fraction_graduate_degree=(
+                pl.col("number_graduate_degree") / pl.col("pop_25_up")
+            ),
+            pop_density=(pl.col("pop") / pl.col("land_size_sq_km")),
+            fips=pl.lit(None),
+        )
+        # append back to merged_df
+        merged_df = pl.concat([merged_df, temp_df], how="diagonal_relaxed")
+
+    # While we're here, let's make some other composite variables we need
+    merged_df = merged_df.with_columns(
+        total_exempt_pct=pl.col("nonmed_exempt_pct")
+        + pl.col("med_exempt_pct"),
+        fraction_nonmed_exempt=pl.col("nonmed_exempt_pct")
+        / pl.col("total_exempt_pct").fill_nan(0.0),
+        fraction_school_aged=pl.col("school_aged_population") / pl.col("pop"),
+        fraction_under_5=pl.col("pop_under_5") / pl.col("pop"),
+        fraction_5_9=pl.col("pop_5_9") / pl.col("pop"),
+        log_income=pl.col("median_household_income").log10(),
+        log_population=pl.col("pop").log10(),
+        log_population_density=pl.col("pop_density").log10(),
+    )
 
     # MMR vaccination coverage
     fig, ax = compare_distributions(
@@ -478,61 +1042,104 @@ if __name__ == "__main__":
     plt.show()
 
     # 5 year MMR vaccination coverage
-    merged_df = merged_df.with_columns(
-        estimated_mmr_cov_5yr=pl.col("estimated_mmr_cov")
-        .rolling_mean(window_size=5, min_samples=1)
-        .over("fips")
-    )
-    fig, ax = compare_distributions(
-        merged_df.filter(pl.col("cases_outbreak") == 0)[
-            "estimated_mmr_cov_5yr"
-        ],
-        merged_df.filter(
-            pl.col("cases_outbreak") >= params["inclusion_threshold"]
-        )["estimated_mmr_cov_5yr"],
-        xlabel="Estimated 5 yr MMR vaccination coverage (%)",
-        label1="No outbreak",
-        label2=f"Outbreak (Cases >= {params['inclusion_threshold']})",
-        log_scale=False,
-        bins=np.arange(75, 100, 0.01),
-        density=True,
-        cumulative=True,
-    )
-    plt.show()
+    # add new columns
+    if five_year:
+        merged_df = merged_df.with_columns(
+            estimated_mmr_cov_5yr=pl.lit(None),
+            nonmed_exempt_pct_5yr=pl.lit(None),
+            med_exempt_pct_5yr=pl.lit(None),
+        )
+        # iterate through the df
+        new_df = []
+        for row in merged_df.iter_rows(named=True):
+            if row["fips"] is None:
+                # this is one of our special places
+                assert row["county"] in special_places_dict.keys()
+            vaccinations_5_yrs = query_avg_vaccinations_region_years(
+                vaccinations_df,
+                years=list(range(row["year"] - 5, row["year"])),
+                fips=[row["fips"]]
+                if row["fips"] is not None
+                else special_places_dict[row["county"]],
+            )
+            # update the row
+            row = pl.DataFrame(row)
+            row = row.with_columns(
+                estimated_mmr_cov_5yr=pl.Series(
+                    vaccinations_5_yrs["estimated_mmr_cov"]
+                ),
+                nonmed_exempt_pct_5yr=pl.Series(
+                    vaccinations_5_yrs["nonmed_exempt_pct"]
+                ),
+                med_exempt_pct_5yr=pl.Series(
+                    vaccinations_5_yrs["med_exempt_pct"]
+                ),
+            )
 
-    fig, ax = compare_distributions(
-        merged_df.filter(pl.col("cases_outbreak") == 0)[
-            "estimated_mmr_cov_5yr"
-        ],
-        merged_df.filter(pl.col("cases_outbreak") >= 5)[
-            "estimated_mmr_cov_5yr"
-        ],
-        xlabel="Estimated 5 yr MMR vaccination coverage (%)",
-        label1="No outbreak",
-        label2="Outbreak (Cases >= 5)",
-        log_scale=False,
-        bins=np.arange(75, 100, 0.01),
-        density=True,
-        cumulative=True,
-    )
-    plt.show()
+            # append to new df
+            new_df.append(row)
 
-    fig, ax = compare_distributions(
-        merged_df.filter(pl.col("cases_outbreak") == 0)[
-            "estimated_mmr_cov_5yr"
-        ],
-        merged_df.filter(pl.col("cases_outbreak") >= 10)[
-            "estimated_mmr_cov_5yr"
-        ],
-        xlabel="Estimated 5 yr MMR vaccination coverage (%)",
-        label1="No outbreak",
-        label2="Outbreak (Cases >= 10)",
-        log_scale=False,
-        bins=np.arange(75, 100, 0.01),
-        density=True,
-        cumulative=True,
-    )
-    plt.show()
+        merged_df = pl.concat(new_df, how="diagonal_relaxed")
+        # make total exemption columns
+        merged_df = merged_df.with_columns(
+            total_exempt_pct_5yr=pl.col("nonmed_exempt_pct_5yr")
+            + pl.col("med_exempt_pct_5yr"),
+        ).with_columns(
+            # fractions of exemptions
+            fraction_nonmed_exempt_5yr=pl.col("nonmed_exempt_pct_5yr")
+            / pl.col("total_exempt_pct_5yr").fill_nan(0.0),
+        )
+
+        fig, ax = compare_distributions(
+            merged_df.filter(pl.col("cases_outbreak") == 0)[
+                "estimated_mmr_cov_5yr"
+            ],
+            merged_df.filter(
+                pl.col("cases_outbreak") >= params["inclusion_threshold"]
+            )["estimated_mmr_cov_5yr"],
+            xlabel="Estimated 5 yr MMR vaccination coverage (%)",
+            label1="No outbreak",
+            label2=f"Outbreak (Cases >= {params['inclusion_threshold']})",
+            log_scale=False,
+            bins=np.arange(75, 100, 0.01),
+            density=True,
+            cumulative=True,
+        )
+        plt.show()
+
+        fig, ax = compare_distributions(
+            merged_df.filter(pl.col("cases_outbreak") == 0)[
+                "estimated_mmr_cov_5yr"
+            ],
+            merged_df.filter(pl.col("cases_outbreak") >= 5)[
+                "estimated_mmr_cov_5yr"
+            ],
+            xlabel="Estimated 5 yr MMR vaccination coverage (%)",
+            label1="No outbreak",
+            label2="Outbreak (Cases >= 5)",
+            log_scale=False,
+            bins=np.arange(75, 100, 0.01),
+            density=True,
+            cumulative=True,
+        )
+        plt.show()
+
+        fig, ax = compare_distributions(
+            merged_df.filter(pl.col("cases_outbreak") == 0)[
+                "estimated_mmr_cov_5yr"
+            ],
+            merged_df.filter(pl.col("cases_outbreak") >= 10)[
+                "estimated_mmr_cov_5yr"
+            ],
+            xlabel="Estimated 5 yr MMR vaccination coverage (%)",
+            label1="No outbreak",
+            label2="Outbreak (Cases >= 10)",
+            log_scale=False,
+            bins=np.arange(75, 100, 0.01),
+            density=True,
+            cumulative=True,
+        )
+        plt.show()
 
     fig, ax, _ = pairplot(
         merged_df["estimated_mmr_cov"],
@@ -543,15 +1150,16 @@ if __name__ == "__main__":
     )
     plt.show()
 
-    fig, ax, _ = pairplot(
-        merged_df["estimated_mmr_cov_5yr"],
-        merged_df["cases_outbreak"],
-        xlabel="Estimated 5 yr MMR vaccination coverage (%)",
-        ylabel="Outbreak size (cases)",
-        alpha=0.5,
-        log=True,
-    )
-    plt.show()
+    if five_year:
+        fig, ax, _ = pairplot(
+            merged_df["estimated_mmr_cov_5yr"],
+            merged_df["cases_outbreak"],
+            xlabel="Estimated 5 yr MMR vaccination coverage (%)",
+            ylabel="Outbreak size (cases)",
+            alpha=0.5,
+            log=True,
+        )
+        plt.show()
 
     # %% NONMEDICAL VACCINATION EXEMPTIONS AND OUTBREAK SIZE
     # Nonmedical vaccination exemptions
@@ -571,27 +1179,23 @@ if __name__ == "__main__":
     plt.show()
 
     # 5 year nonmedical vaccination exemptions
-    merged_df = merged_df.with_columns(
-        nonmed_exempt_pct_5yr=pl.col("nonmed_exempt_pct")
-        .rolling_mean(window_size=5, min_samples=1)
-        .over("fips")
-    )
-    fig, ax = compare_distributions(
-        merged_df.filter(pl.col("cases_outbreak") == 0)[
-            "nonmed_exempt_pct_5yr"
-        ],
-        merged_df.filter(
-            pl.col("cases_outbreak") >= params["inclusion_threshold"]
-        )["nonmed_exempt_pct_5yr"],
-        xlabel="Estimated 5 yr nonmedical vaccination exemptions (%)",
-        label1="No outbreak",
-        label2=f"Outbreak (Cases >= {params['inclusion_threshold']})",
-        log_scale=False,
-        bins=np.arange(0, 20, 0.01),
-        density=True,
-        cumulative=True,
-    )
-    plt.show()
+    if five_year:
+        fig, ax = compare_distributions(
+            merged_df.filter(pl.col("cases_outbreak") == 0)[
+                "nonmed_exempt_pct_5yr"
+            ],
+            merged_df.filter(
+                pl.col("cases_outbreak") >= params["inclusion_threshold"]
+            )["nonmed_exempt_pct_5yr"],
+            xlabel="Estimated 5 yr nonmedical vaccination exemptions (%)",
+            label1="No outbreak",
+            label2=f"Outbreak (Cases >= {params['inclusion_threshold']})",
+            log_scale=False,
+            bins=np.arange(0, 20, 0.01),
+            density=True,
+            cumulative=True,
+        )
+        plt.show()
 
     # %% TOTAL VACCINATION EXEMPTIONS AND OUTBREAK SIZE
     # Total vaccination exemptions
@@ -611,35 +1215,31 @@ if __name__ == "__main__":
     plt.show()
 
     # 5 year total vaccination exemptions
-    merged_df = merged_df.with_columns(
-        total_exempt_pct_5yr=pl.col("total_exempt_pct")
-        .rolling_mean(window_size=5, min_samples=1)
-        .over("fips")
-    )
-    fig, ax = compare_distributions(
-        merged_df.filter(pl.col("cases_outbreak") == 0)[
-            "total_exempt_pct_5yr"
-        ],
-        merged_df.filter(
-            pl.col("cases_outbreak") >= params["inclusion_threshold"]
-        )["total_exempt_pct_5yr"],
-        xlabel="Estimated 5 yr total vaccination exemptions (%)",
-        label1="No outbreak",
-        label2=f"Outbreak (Cases >= {params['inclusion_threshold']})",
-        log_scale=False,
-        bins=np.arange(0, 20, 0.01),
-        density=True,
-        cumulative=True,
-    )
-    plt.show()
+    if five_year:
+        fig, ax = compare_distributions(
+            merged_df.filter(pl.col("cases_outbreak") == 0)[
+                "total_exempt_pct_5yr"
+            ],
+            merged_df.filter(
+                pl.col("cases_outbreak") >= params["inclusion_threshold"]
+            )["total_exempt_pct_5yr"],
+            xlabel="Estimated 5 yr total vaccination exemptions (%)",
+            label1="No outbreak",
+            label2=f"Outbreak (Cases >= {params['inclusion_threshold']})",
+            log_scale=False,
+            bins=np.arange(0, 20, 0.01),
+            density=True,
+            cumulative=True,
+        )
+        plt.show()
 
     # %% POPULATION SIZE AND OUTBREAK SIZE
     fig, ax = compare_distributions(
-        merged_df.filter(pl.col("cases_outbreak") == 0)["pop_5_9"],
+        merged_df.filter(pl.col("cases_outbreak") == 0)["pop_under_5"],
         merged_df.filter(
             pl.col("cases_outbreak") >= params["inclusion_threshold"]
-        )["pop_5_9"],
-        xlabel="Population size (ages 5-9)",
+        )["pop_under_5"],
+        xlabel="Population size (ages 0-4)",
         label1="No outbreak",
         label2=f"Outbreak (Cases >= {params['inclusion_threshold']})",
         log_scale=False,
@@ -651,10 +1251,10 @@ if __name__ == "__main__":
 
     # %% POPULATION DENSITY AND OUTBREAK SIZE
     fig, ax = compare_distributions(
-        merged_df.filter(pl.col("cases_outbreak") == 0)["pop_density_5_9"],
+        merged_df.filter(pl.col("cases_outbreak") == 0)["pop_density"],
         merged_df.filter(
             pl.col("cases_outbreak") >= params["inclusion_threshold"]
-        )["pop_density_5_9"],
+        )["pop_density"],
         xlabel=r"Population density (ages 5-9 / km$^2$)",
         label1="No outbreak",
         label2=f"Outbreak (Cases >= {params['inclusion_threshold']})",
@@ -697,24 +1297,6 @@ if __name__ == "__main__":
     )
     plt.show()
 
-    # %% FRACTION NOT ENROLLED AND OUTBREAK SIZE
-    fig, ax = compare_distributions(
-        merged_df.filter(pl.col("cases_outbreak") == 0)[
-            "fraction_not_enrolled"
-        ],
-        merged_df.filter(
-            pl.col("cases_outbreak") >= params["inclusion_threshold"]
-        )["fraction_not_enrolled"],
-        xlabel="Fraction of students not in public/private school",
-        label1="No outbreak",
-        label2=f"Outbreak (Cases >= {params['inclusion_threshold']})",
-        log_scale=False,
-        bins=np.arange(0.0, 0.15, 0.001),
-        density=True,
-        cumulative=True,
-    )
-    plt.show()
-
     # %% INTERACTION BETWEEN VACCINATION COVERAGE AND PUBLIC SCHOOL
     merged_df = merged_df.with_columns(
         vaccine_coverage_school_interaction=pl.col("estimated_mmr_cov")
@@ -728,31 +1310,6 @@ if __name__ == "__main__":
             pl.col("cases_outbreak") >= params["inclusion_threshold"]
         )["vaccine_coverage_school_interaction"],
         xlabel="Vaccination coverage * fraction public school",
-        label1="No outbreak",
-        label2=f"Outbreak (Cases >= {params['inclusion_threshold']})",
-        log_scale=False,
-        bins=np.arange(45, 100, 0.01),
-        density=True,
-        cumulative=True,
-    )
-    plt.show()
-
-    # five year version
-    merged_df = merged_df.with_columns(
-        vaccine_coverage_school_interaction_5yr=pl.col(
-            "vaccine_coverage_school_interaction"
-        )
-        .rolling_mean(window_size=5, min_samples=1)
-        .over("fips")
-    )
-    fig, ax = compare_distributions(
-        merged_df.filter(pl.col("cases_outbreak") == 0)[
-            "vaccine_coverage_school_interaction_5yr"
-        ],
-        merged_df.filter(
-            pl.col("cases_outbreak") >= params["inclusion_threshold"]
-        )["vaccine_coverage_school_interaction_5yr"],
-        xlabel="5 yr average vaccination coverage * fraction public school",
         label1="No outbreak",
         label2=f"Outbreak (Cases >= {params['inclusion_threshold']})",
         log_scale=False,
@@ -854,28 +1411,6 @@ if __name__ == "__main__":
     )
     plt.show()
 
-    merged_df = merged_df.with_columns(
-        median_household_income_5yr=pl.col("median_household_income")
-        .rolling_mean(window_size=5, min_samples=1)
-        .over("fips")
-    )
-
-    fig, ax = compare_distributions(
-        merged_df.filter(pl.col("cases_outbreak") == 0)[
-            "median_household_income_5yr"
-        ],
-        merged_df.filter(
-            pl.col("cases_outbreak") >= params["inclusion_threshold"]
-        )["median_household_income_5yr"],
-        xlabel="5 yr median household income (2024 USD)",
-        label1="No outbreak",
-        label2=f"Outbreak (Cases >= {params['inclusion_threshold']})",
-        bins=np.arange(40000, 185000, 100),
-        density=True,
-        cumulative=True,
-    )
-    plt.show()
-
     # income-exemptions correlation?
     fig, ax, scatter = pairplot(
         merged_df["median_household_income"],
@@ -968,52 +1503,6 @@ if __name__ == "__main__":
     fig.colorbar(scatter, ax=ax, label="Log10(Outbreak cases + 1)")
     plt.show()
 
-    # %% MOBILITY AND OUTBREAK SIZE
-    fig, ax = compare_distributions(
-        merged_df.filter(pl.col("cases_outbreak") == 0)[
-            "within_county_mobility_proxy"
-        ],
-        merged_df.filter(
-            pl.col("cases_outbreak") >= params["inclusion_threshold"]
-        )["within_county_mobility_proxy"],
-        xlabel="Within-county mobility proxy",
-        label1="No outbreak",
-        label2=f"Outbreak (Cases >= {params['inclusion_threshold']})",
-        bins=np.arange(0, 6.7, 0.01),
-        density=True,
-        cumulative=True,
-    )
-    plt.show()
-
-    # Mobility, coverage, and cases
-    fig, ax, scatter = pairplot(
-        merged_df["within_county_mobility_proxy"],
-        merged_df["estimated_mmr_cov"],
-        xlabel="Within-county mobility proxy",
-        ylabel="Estimated MMR vaccination coverage (%)",
-        log=False,
-        c=np.log10(merged_df["cases_outbreak"] + 1),
-        cmap="viridis",
-    )
-    ax.set_xscale("log")
-    fig.colorbar(scatter, ax=ax, label="Log10(Outbreak cases + 1)")
-    plt.show()
-
-    # Mobility * coverage, and cases
-    fig, ax, scatter = pairplot(
-        merged_df["within_county_mobility_proxy"]
-        * merged_df["estimated_mmr_cov"],
-        merged_df["total_exempt_pct"],
-        xlabel="Within-county mobility proxy * coverage interaction",
-        ylabel="Total vaccine exemptions (%)",
-        log=False,
-        c=np.log10(merged_df["cases_outbreak"] + 1),
-        cmap="viridis",
-    )
-    ax.set_xscale("log")
-    fig.colorbar(scatter, ax=ax, label="Log10(Outbreak cases + 1)")
-    plt.show()
-
     # medical vs nonmedical exemptions
     fig, ax, scatter = pairplot(
         merged_df["med_exempt_pct"],
@@ -1050,6 +1539,70 @@ if __name__ == "__main__":
         label2="",
         log_scale=True,
         bins=np.arange(0, 225, 1),
+    )
+    plt.show()
+
+    # %% SYNTHETIC POPULATION CLUSTERS
+    # let's make a geoid for easy merging later
+    merged_df = merged_df.with_columns(
+        geoid=pl.when(pl.col("fips").is_null())
+        .then(pl.col("county"))
+        .otherwise(pl.col("county") + pl.col("fips"))
+    )
+    # grab the counties and fips codes
+    population_pockets = merged_df[["geoid", "county", "fips"]].unique()
+    population_pockets = population_pockets.with_columns(
+        population_pockets_proxy=pl.lit(None),
+        avg_house_size=pl.lit(None),
+        std_house_size=pl.lit(None),
+        # make the fips code a list for the special places
+        fips=pl.struct("county", "fips").map_elements(
+            lambda cols: [cols["fips"]]
+            if cols["fips"] is not None
+            else special_places_dict[cols["county"]],
+            return_dtype=pl.List(pl.Utf8),
+        ),
+    )
+
+    population_pockets_proxy = []
+    avg_house_size = []
+    std_house_size = []
+    for fips in tqdm(population_pockets["fips"]):
+        population_pockets_proxy.append(
+            synth_pop_clusters.cluster_fips(fips)[0]
+        )
+        avg_house_size_fips, std_house_size_fips = (
+            synth_pop_clusters.summarize_household_size(fips)
+        )
+        avg_house_size.append(avg_house_size_fips)
+        std_house_size.append(std_house_size_fips)
+    # merge back to main df
+    population_pockets = population_pockets.with_columns(
+        population_pockets_proxy=pl.Series(population_pockets_proxy),
+        avg_house_size=pl.Series(avg_house_size),
+        std_house_size=pl.Series(std_house_size),
+    )
+    merged_df = merged_df.join(
+        population_pockets[
+            [
+                "geoid",
+                "population_pockets_proxy",
+                "avg_house_size",
+                "std_house_size",
+            ]
+        ],
+        on="geoid",
+        how="left",
+    )
+
+    # plot
+    fig, ax, scatter = pairplot(
+        merged_df["population_pockets_proxy"],
+        merged_df["cases_outbreak"],
+        xlabel="Population pockets proxy",
+        ylabel="Outbreak size (cases)",
+        log=True,
+        c=merged_df["estimated_mmr_cov"],
     )
     plt.show()
 
