@@ -88,7 +88,9 @@ if __name__ == "__main__":
 
     # fit model
     nuts_kernel = NUTS(
-        model.fit, init_strategy=init_to_median(), target_accept_prob=0.80
+        model.fit,
+        init_strategy=init_to_median(),
+        target_accept_prob=0.80,
     )
     mcmc = MCMC(
         nuts_kernel,

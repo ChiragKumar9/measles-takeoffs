@@ -106,8 +106,8 @@ class PartialPooledPoisson:
         else:
             # pull coefficients for each iv just like they are normal covariates
             with numpyro.plate("iv_no_pooling", self.num_ivs):
-                iv_effects = numpyro.sample("iv_effects", self.betas)  # type: ignore
-            iv_effect = jnp.dot(self.iv, iv_effects)
+                iv_global = numpyro.sample("iv_global", self.betas)  # type: ignore
+            iv_effect = jnp.dot(self.iv, iv_global)
 
         mu = (
             baseline_rate
@@ -115,6 +115,17 @@ class PartialPooledPoisson:
             + covariate_effect
             + iv_effect
         )
+
+        spatial_random_sigma = numpyro.sample(
+            "spatial_random_sigma", dist.HalfNormal(1.0)
+        )
+        with numpyro.plate(
+            "spatial_random_effects_plate", self.has_a_neighbor.shape[0]
+        ):
+            spatial_random_effects = numpyro.sample(
+                "spatial_random_effects", dist.Normal(0, 1)
+            )
+        full_spatial_effect = spatial_random_sigma * spatial_random_effects
 
         if not self.is_adjacency_empty:
             if self.spatial:
@@ -136,15 +147,14 @@ class PartialPooledPoisson:
                     "raw_spatial_effect", car_distribution
                 )
                 spatial_effect = spatial_sigma * raw_spatial_effect
-                # spatial_effect is a vector of length of number of counties
-                # need to expand spatial effects also to include counties without neighbors
-                full_spatial_effect = jnp.zeros(self.has_a_neighbor.shape[0])
-                full_spatial_effect = full_spatial_effect.at[
+                full_spatial_effect = full_spatial_effect.at[  # type: ignore
                     self.has_a_neighbor
                 ].set(spatial_effect)
-                full_spatial_effect = full_spatial_effect[self.spatial_units]  # type: ignore
 
-                mu = mu + full_spatial_effect
+        # spatial_effect is a vector of length of number of counties
+        # need to expand spatial effects also to include counties without neighbors
+        full_spatial_effect = full_spatial_effect[self.spatial_units]  # type: ignore
+        mu = mu + full_spatial_effect
         mu = jnp.exp(mu)
         mu = mu + jnp.finfo(jnp.float64).eps
 

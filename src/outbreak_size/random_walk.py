@@ -305,7 +305,7 @@ class PartialPooledPoisson:
         mu = (
             baseline_rate
             + jnp.log(self.population)  # offset by population
-            + +covariate_effect
+            + covariate_effect
             + group_varying_only_effect
             + time_varying_only_effect
             + time_and_group_varying_effect
@@ -329,8 +329,19 @@ class PartialPooledPoisson:
         spatial_effect = spatial_sigma * raw_spatial_effect
         # spatial_effect is a vector of length of number of counties
         # need to expand spatial effects also to include counties without neighbors
-        full_spatial_effect = jnp.zeros(self.has_a_neighbor.shape[0])
-        full_spatial_effect = full_spatial_effect.at[self.has_a_neighbor].set(
+
+        spatial_random_sigma = numpyro.sample(
+            "spatial_random_sigma", dist.HalfNormal(1.0)
+        )
+        with numpyro.plate(
+            "spatial_random_effects_plate", self.has_a_neighbor.shape[0]
+        ):
+            spatial_random_effects = numpyro.sample(
+                "spatial_random_effects", dist.Normal(0, 1)
+            )
+        full_spatial_effect = spatial_random_sigma * spatial_random_effects
+
+        full_spatial_effect = full_spatial_effect.at[self.has_a_neighbor].set(  # type: ignore
             spatial_effect
         )
         full_spatial_effect = full_spatial_effect[self.spatial_units]  # type: ignore

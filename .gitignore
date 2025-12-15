@@ -17,6 +17,7 @@
 *.prj
 *.iso.xml
 *.cpg
+*.npy
 
 # Documents
 *.doc
@@ -26,6 +27,8 @@
 *.ppt
 *.pptx
 *.pdf
+
+manuscript/
 
 # Images
 *.bmp

@@ -263,6 +263,9 @@ def query(census, fip, y):
     elif y < 2010:
         # census data is not available before 2010
         y = 2010
+    if fip[:2] == "09":
+        # for some reason Connecticut data is not available after 2021
+        y = min(y, 2021)
     if len(fip) < 5:
         fcn = census.acs5.state
         args = {"state_fips": fip[:2], "year": y}

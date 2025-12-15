@@ -256,7 +256,7 @@ def plot_coverage_distribution(
         ["2011-2020", "2021-2025"],
     )
     ax.axhline(y=vaccination_threshold, color="k", linestyle="--")
-    ax.set_ylabel("Estimated MMR\nvaccine coverage (%)")
+    ax.set_ylabel("MMR vaccine coverage (%)")
     ax.set_xlabel("Outbreak size (cases)")
 
     return fig, ax
@@ -264,14 +264,18 @@ def plot_coverage_distribution(
 
 def plot_outbreak_identification_rate(df, fig, ax):
     # calculate what percentage of outbreaks we would have captured had we said
-    # all counties with coverage less than 90, 95, 98% were at risk
+    # all counties with coverage less than threshold% were at risk
     df = df.with_columns(
         recent=pl.col("year").is_in([2021, 2022, 2023, 2024, 2025]),
-        below_90=pl.col("estimated_mmr_cov") < 90,
-        below_92=pl.col("estimated_mmr_cov") < 92,
-        below_94=pl.col("estimated_mmr_cov") < 94,
-        below_96=pl.col("estimated_mmr_cov") < 96,
-        below_98=pl.col("estimated_mmr_cov") < 98,
+        below_90=pl.col("estimated_mmr_cov") <= 90,
+        below_91=pl.col("estimated_mmr_cov") <= 91,
+        below_92=pl.col("estimated_mmr_cov") <= 92,
+        below_93=pl.col("estimated_mmr_cov") <= 93,
+        below_94=pl.col("estimated_mmr_cov") <= 94,
+        below_95=pl.col("estimated_mmr_cov") <= 95,
+        below_96=pl.col("estimated_mmr_cov") <= 96,
+        below_97=pl.col("estimated_mmr_cov") <= 97,
+        below_98=pl.col("estimated_mmr_cov") <= 98,
         cases_10=pl.col("cases_outbreak") >= 10,
         cases_5=pl.col("cases_outbreak") >= 5,
         cases_3=pl.col("cases_outbreak") >= 3,
@@ -283,65 +287,50 @@ def plot_outbreak_identification_rate(df, fig, ax):
         total_3=pl.col("cases_3").sum().over("recent"),
     )
 
-    df_90 = (
-        df.group_by(["recent", "below_90"])
-        .agg(
-            identified_10=pl.sum("cases_10") / pl.col("total_10").first(),
-            identified_5=pl.sum("cases_5") / pl.col("total_5").first(),
-            identified_3=pl.sum("cases_3") / pl.col("total_3").first(),
+    df_identification = pl.DataFrame()
+    for coverage in range(90, 99):
+        df_temp = (
+            df.group_by(["recent", f"below_{coverage}"])
+            .agg(
+                identified_10=pl.sum("cases_10") / pl.col("total_10").first(),
+                identified_5=pl.sum("cases_5") / pl.col("total_5").first(),
+                identified_3=pl.sum("cases_3") / pl.col("total_3").first(),
+            )
+            .filter(pl.col(f"below_{coverage}") == True)
+            .with_columns(coverage=pl.lit(coverage))
         )
-        .filter(pl.col("below_90") == True)
-        .with_columns(coverage=pl.lit(90))
-    )
-
-    df_92 = (
-        df.group_by(["recent", "below_92"])
-        .agg(
-            identified_10=pl.sum("cases_10") / pl.col("total_10").first(),
-            identified_5=pl.sum("cases_5") / pl.col("total_5").first(),
-            identified_3=pl.sum("cases_3") / pl.col("total_3").first(),
+        df_identification = pl.concat(
+            [df_identification, df_temp], how="diagonal_relaxed"
         )
-        .filter(pl.col("below_92") == True)
-        .with_columns(coverage=pl.lit(92))
-    )
 
-    df_94 = (
-        df.group_by(["recent", "below_94"])
-        .agg(
-            identified_10=pl.sum("cases_10") / pl.col("total_10").first(),
-            identified_5=pl.sum("cases_5") / pl.col("total_5").first(),
-            identified_3=pl.sum("cases_3") / pl.col("total_3").first(),
-        )
-        .filter(pl.col("below_94") == True)
-        .with_columns(coverage=pl.lit(94))
-    )
+    # # before any of the identification stuff, we want to have the coverage CDF
+    # counts_old, bins_old = np.histogram(df.filter(pl.col("recent") == False)["estimated_mmr_cov"].to_list(), bins=np.arange(0, 100.1, 0.1))
+    # counts_old = np.cumsum(counts_old)
+    # # Normalize to 0-100
+    # counts_normalized_old = (counts_old / counts_old.max()) * 100
 
-    df_96 = (
-        df.group_by(["recent", "below_96"])
-        .agg(
-            identified_10=pl.sum("cases_10") / pl.col("total_10").first(),
-            identified_5=pl.sum("cases_5") / pl.col("total_5").first(),
-            identified_3=pl.sum("cases_3") / pl.col("total_3").first(),
-        )
-        .filter(pl.col("below_96") == True)
-        .with_columns(coverage=pl.lit(96))
-    )
+    # counts_new, bins_new = np.histogram(df.filter(pl.col("recent") == True)["estimated_mmr_cov"].to_list(), bins=np.arange(0, 100.1, 0.1))
+    # counts_new = np.cumsum(counts_new)
+    # # Normalize to 0-100
+    # counts_normalized_new = (counts_new / counts_new.max()) * 100
 
-    df_98 = (
-        df.group_by(["recent", "below_98"])
-        .agg(
-            identified_10=pl.sum("cases_10") / pl.col("total_10").first(),
-            identified_5=pl.sum("cases_5") / pl.col("total_5").first(),
-            identified_3=pl.sum("cases_3") / pl.col("total_3").first(),
-        )
-        .filter(pl.col("below_98") == True)
-        .with_columns(coverage=pl.lit(98))
-    )
-
-    # stitch the values we need into one dataframe for analysis
-    df_identification = pl.concat(
-        [df_90, df_92, df_94, df_96, df_98], how="diagonal_relaxed"
-    )
+    # # Plot
+    # ax2 = ax.twinx()
+    # ax2.spines["top"].set_visible(False)
+    # ax2.spines["left"].set_visible(False)
+    # ax2.get_xaxis().tick_bottom()
+    # ax2.get_yaxis().tick_right()
+    # ax2.tick_params(axis="x", direction="out")
+    # ax2.tick_params(axis="y", direction="out")
+    # # offset the spines
+    # for spine in ax2.spines.values():
+    #     spine.set_position(("outward", 5))
+    # # put the grid behind
+    # ax2.set_axisbelow(True)
+    # ax2.plot(bins_old[:-1], counts_normalized_old, color='blue', linewidth=2)
+    # ax2.plot(bins_new[:-1], counts_normalized_new, color='green', linewidth=2)
+    # ax2.set_ylabel("Cumulative density (%)", rotation=-90, labelpad=30)
+    # ax.set_xlim([89.9, 98.1])
 
     ax.plot(
         df_identification.filter(pl.col("recent") == False)[
@@ -352,7 +341,7 @@ def plot_outbreak_identification_rate(df, fig, ax):
             "identified_10"
         ].to_numpy(),
         marker="P",
-        label="10+, 2011-2020",
+        label="≥10 cases, 2011-2020",
         color="blue",
         linestyle="--",
     )
@@ -366,7 +355,7 @@ def plot_outbreak_identification_rate(df, fig, ax):
             "identified_10"
         ].to_numpy(),
         marker="P",
-        label="10+, 2021-2025",
+        label="≥10 cases, 2021-2025",
         color="green",
         linestyle="--",
     )
@@ -380,7 +369,7 @@ def plot_outbreak_identification_rate(df, fig, ax):
             "identified_5"
         ].to_numpy(),
         marker="s",
-        label="5+, 2011-2020",
+        label="≥5 cases, 2011-2020",
         color="blue",
         linestyle="--",
     )
@@ -394,14 +383,15 @@ def plot_outbreak_identification_rate(df, fig, ax):
             "identified_5"
         ].to_numpy(),
         marker="s",
-        label="5+, 2021-2025",
+        label="≥5 cases, 2021-2025",
         color="green",
         linestyle="--",
     )
 
     ax.legend()
-    ax.set_xlabel("Coverage threshold (%)")
-    ax.set_ylabel("Outbreaks identified (%)")
+    ax.set_xlabel("MMR vaccine coverage (%)")
+    ax.set_ylabel("Identification rate (sensitivity) (%)")
+    ax.set_ylim(0)
 
     return df_identification, fig, ax
 
@@ -411,7 +401,7 @@ def plot_coverage_various_models(df, fig, ax):
         [2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020],
         [2021, 2022, 2023, 2024, 2025],
     ]
-    models = ["Just coverage", "Just vaccination measures", "All covariates"]
+    models = ["MMR coverage", "MMR coverage + exemptions", "All covariates"]
     assembled_effects = pl.DataFrame({"years": year_buckets}).join(
         pl.DataFrame({"model": models}), how="cross"
     )
@@ -434,7 +424,7 @@ def plot_coverage_various_models(df, fig, ax):
             with open(
                 os.path.join(
                     output_dir,
-                    f"samples_partial_pooled_poisson_five_year=False_CAR=True_{model_name}_{year}.pkl",
+                    f"samples_partial_pooled_poisson_state_fixed_effect=True_pool=True_five_year=False_CAR=True_{model_name}_{year}.pkl",
                 ),
                 "rb",
             ) as file:
@@ -451,9 +441,11 @@ def plot_coverage_various_models(df, fig, ax):
             )
             coverage_effects = coverage_effects / std
             coverage_effects = jnp.exp(coverage_effects) * 100
+            # to express as percent change
+            coverage_effects = coverage_effects - 100
             median_effect = float(jnp.median(coverage_effects, axis=0))
-            lower_effect = float(jnp.quantile(coverage_effects, 0.05, axis=0))
-            upper_effect = float(jnp.quantile(coverage_effects, 0.95, axis=0))
+            lower_effect = float(jnp.quantile(coverage_effects, 0.025, axis=0))
+            upper_effect = float(jnp.quantile(coverage_effects, 0.975, axis=0))
             mean_effect = float(jnp.mean(coverage_effects, axis=0))
 
             assembled_effects = assembled_effects.with_columns(
@@ -480,18 +472,18 @@ def plot_coverage_various_models(df, fig, ax):
             )
 
     colors = {
-        "Just coverage": "orange",
-        "Just vaccination measures": "purple",
-        "All covariates": "red",
+        "MMR coverage": "red",
+        "MMR coverage + exemptions": "purple",
+        "All covariates": "orange",
     }
 
-    for model_name in reversed(models):
+    for model_name, offset in zip(models, [-0.07, 0, 0.07]):
         model_effects = assembled_effects.filter(
             pl.col("model") == model_name
         ).sort("year_index")
-        if model_name == "Just vaccination measures":
+        if model_name == "All covariates":
             ax.errorbar(
-                ["2011-2020", "2021-2025"],
+                [0 + offset, 1 + offset],
                 model_effects["median_coverage_effect"].to_list(),
                 yerr=[
                     model_effects["median_coverage_effect"].to_numpy()
@@ -506,7 +498,7 @@ def plot_coverage_various_models(df, fig, ax):
             )
         else:
             ax.errorbar(
-                ["2011-2020", "2021-2025"],
+                [0 + offset, 1 + offset],
                 model_effects["median_coverage_effect"].to_list(),
                 yerr=[
                     model_effects["median_coverage_effect"].to_numpy()
@@ -520,21 +512,25 @@ def plot_coverage_various_models(df, fig, ax):
             )
 
         # scatter plot the mean with a "*" as its marker
-        ax.plot(
-            ["2011-2020", "2021-2025"],
-            model_effects["mean_coverage_effect"].to_list(),
-            marker="*",
-            markersize=12,
-            color=colors[model_name],
-        )
+        # ax.scatter(
+        #     [0 + offset, 1 + offset],
+        #     model_effects["mean_coverage_effect"].to_list(),
+        #     marker="*",
+        #     s=12,
+        #     color=colors[model_name],
+        # )
 
     # dashed line at 1
-    ax.axhline(y=100, color="k", linestyle="--")
+    ax.axhline(y=0, color="k", linestyle="--")
+    ax.set_xticks([0, 1])
+    ax.set_xticklabels(["2011-2020", "2021-2025"])
     ax.set_xlim([-0.25, 1.25])
 
     ax.set_xlabel("Year")
-    ax.set_ylabel("Estimated marginal IRR of\nvaccination coverage (%)")
-    ax.legend()
+    ax.set_ylabel(
+        "% change in incidence rate per 1%\nincrease in MMR vaccine coverage"
+    )
+    ax.legend(loc=(0.2, 0.65))
 
     return fig, ax
 
@@ -545,10 +541,12 @@ def plot_effect_over_time(samples, df, years_in_order, fig, ax):
     samples = samples / std
     # exponentiate and multiply by 100
     samples = jnp.exp(samples) * 100
+    # to express as percent change
+    samples = samples - 100
 
     median_effect = jnp.median(samples, axis=0)
-    lower_effect = jnp.quantile(samples, 0.05, axis=0)
-    upper_effect = jnp.quantile(samples, 0.95, axis=0)
+    lower_effect = jnp.quantile(samples, 0.025, axis=0)
+    upper_effect = jnp.quantile(samples, 0.975, axis=0)
     ax.fill_between(
         years_in_order,
         lower_effect,
@@ -558,29 +556,13 @@ def plot_effect_over_time(samples, df, years_in_order, fig, ax):
     )
     ax.plot(years_in_order, median_effect, color="grey")
 
-    # histogram
-
-    counts, bins = np.histogram(df["year"], bins=np.arange(2011, 2027) - 0.5)
-    ax2 = ax.twinx()
-    ax2.bar(bins[:-1], counts, width=np.diff(bins), alpha=0.2, align="edge")
-    ax2.set_ylabel("County-year outbreaks (N)")
-    ax2.spines["top"].set_visible(False)
-    ax2.spines["left"].set_visible(False)
-    ax2.get_xaxis().tick_bottom()
-    ax2.get_yaxis().tick_right()
-    ax2.tick_params(axis="x", direction="out")
-    ax2.tick_params(axis="y", direction="out")
-    # offset the spines
-    for spine in ax2.spines.values():
-        spine.set_position(("outward", 5))
-    # put the grid behind
-    ax2.set_axisbelow(True)
-
     # horizontal line at y=100
-    ax.axhline(100, ls="--", color="black")
+    ax.axhline(0, ls="--", color="black")
 
     ax.set_xlabel("Year")
-    ax.set_ylabel(f"Estimated marginal IRR of\nvaccination coverage")
+    ax.set_ylabel(
+        "% change in incidence rate per 1%\nincrease in MMR vaccine coverage"
+    )
 
     return fig, ax
 
