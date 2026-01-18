@@ -499,8 +499,8 @@ def coverage_increase_nme_policy_change(df, fig, ax):
             color=state_colors[state],
         )
 
-    ax.axhline(0, color="grey", linestyle="--", linewidth=1)
-    ax.legend()
+    ax.axhline(0, color="black", linewidth=ax.spines["bottom"].get_linewidth())
+    ax.legend(loc=(0.6, 0.0))
     ax.set_xlabel("Pre-policy nonmedical exemption rate (%)")
     ax.set_ylabel("Change in MMR coverage (%)")
     ax.set_xlim(0)
