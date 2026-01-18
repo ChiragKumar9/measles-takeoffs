@@ -365,6 +365,17 @@ def coverage_increase_nme_policy_change(df, fig, ax):
             Slope_lower=pl.lit(estimator[2]),
             Slope_upper=pl.lit(estimator[3]),
             Intercept=pl.lit(estimator[1]),
+            R2=pl.lit(
+                np.corrcoef(
+                    temp_regression["nonmed_exempt_pct"].to_numpy()
+                    * estimator[0]
+                    + estimator[1],
+                    temp_regression[
+                        "estimated_mmr_cov_change_policy_year"
+                    ].to_numpy(),
+                )[0, 1]
+                ** 2
+            ),
             N=pl.lit(temp_regression.height),
         )
         regression_df.append(temp_regression)
@@ -402,6 +413,15 @@ def coverage_increase_nme_policy_change(df, fig, ax):
             Slope_lower=pl.lit(estimator[2]),
             Slope_upper=pl.lit(estimator[3]),
             Intercept=pl.lit(estimator[1]),
+            R2=pl.lit(
+                np.corrcoef(
+                    temp_regression["nonmed_exempt_pct"].to_numpy()
+                    * estimator[0]
+                    + estimator[1],
+                    temp_regression["estimated_mmr_cov_change_1yr"].to_numpy(),
+                )[0, 1]
+                ** 2
+            ),
             N=pl.lit(temp_regression.height),
         )
         regression_df.append(temp_regression)
@@ -441,6 +461,17 @@ def coverage_increase_nme_policy_change(df, fig, ax):
                 Slope_lower=pl.lit(estimator[2]),
                 Slope_upper=pl.lit(estimator[3]),
                 Intercept=pl.lit(estimator[1]),
+                R2=pl.lit(
+                    np.corrcoef(
+                        temp_regression["nonmed_exempt_pct"].to_numpy()
+                        * estimator[0]
+                        + estimator[1],
+                        temp_regression[
+                            "estimated_mmr_cov_change_2yr"
+                        ].to_numpy(),
+                    )[0, 1]
+                    ** 2
+                ),
                 N=pl.lit(temp_regression.height),
             )
             regression_df.append(temp_regression)
@@ -498,6 +529,17 @@ def coverage_increase_nme_policy_change(df, fig, ax):
             Slope_lower=pl.lit(estimator[2]),
             Slope_upper=pl.lit(estimator[3]),
             Intercept=pl.lit(estimator[1]),
+            R2=pl.lit(
+                np.corrcoef(
+                    temp_regression["nonmed_exempt_pct"].to_numpy()
+                    * estimator[0]
+                    + estimator[1],
+                    temp_regression[
+                        f"estimated_mmr_cov_change_{year_mode}"
+                    ].to_numpy(),
+                )[0, 1]
+                ** 2
+            ),
             N=pl.lit(temp_regression.height),
         )
         regression_df.append(temp_regression)
@@ -535,6 +577,14 @@ def coverage_increase_nme_policy_change(df, fig, ax):
             Slope_lower=pl.lit(None),
             Slope_upper=pl.lit(None),
             Intercept=pl.lit(estimator.intercept_),
+            R2=pl.lit(
+                estimator.score(
+                    X,
+                    temp_regression[
+                        f"estimated_mmr_cov_change_{year_mode}"
+                    ].to_numpy(),
+                )
+            ),
             N=pl.lit(temp_regression.height),
         )
         regression_df.append(temp_regression)
@@ -547,6 +597,12 @@ def coverage_increase_nme_policy_change(df, fig, ax):
     slope = regression_df.filter(
         (pl.col("State") == "All states") & (pl.col("Year") == "1 year after")
     )["Slope"][0]
+    slope_lower = regression_df.filter(
+        (pl.col("State") == "All states") & (pl.col("Year") == "1 year after")
+    )["Slope_lower"][0]
+    slope_upper = regression_df.filter(
+        (pl.col("State") == "All states") & (pl.col("Year") == "1 year after")
+    )["Slope_upper"][0]
     intercept = regression_df.filter(
         (pl.col("State") == "All states") & (pl.col("Year") == "1 year after")
     )["Intercept"][0]
@@ -557,21 +613,74 @@ def coverage_increase_nme_policy_change(df, fig, ax):
         color="black",
         linewidth=2,
     )
+    # put some confidence bounds
+    y_lower = intercept + slope_lower * x_vals
+    y_upper = intercept + slope_upper * x_vals
+    ax.fill_between(
+        x_vals,
+        y_lower,
+        y_upper,
+        color="grey",
+        alpha=0.3,
+    )
 
-    regression_df = regression_df.with_columns(
-        Slope=pl.when(pl.col("Slope_lower").is_not_null())
-        .then(
-            pl.col("Slope").round(3).cast(pl.String)
-            + " ["
-            + pl.col("Slope_lower").round(3).cast(pl.String)
-            + ", "
-            + pl.col("Slope_upper").round(3).cast(pl.String)
-            + "]"
+    # annotate the figure with the regression equation
+    ax.text(
+        0.05,
+        0.95,
+        f"Slope: {slope:.3f} ({slope_lower:.3f}, {slope_upper:.3f})",
+        transform=ax.transAxes,
+        fontsize=32,
+        verticalalignment="top",
+    )
+    # annotate the figure with the R2
+    r2 = regression_df.filter(
+        (pl.col("State") == "All states") & (pl.col("Year") == "1 year after")
+    )["R2"][0]
+    ax.text(
+        0.05,
+        0.85,
+        rf"$R^2$: {r2 * 100:.2f}%",
+        transform=ax.transAxes,
+        fontsize=32,
+        verticalalignment="top",
+    )
+
+    # annotate the figure with the 1-1 line
+    ax.plot(
+        x_vals,
+        x_vals,
+        color="grey",
+        linestyle="--",
+        linewidth=1,
+    )
+
+    regression_df = (
+        regression_df.with_columns(
+            Slope=pl.when(pl.col("Slope_lower").is_not_null())
+            .then(
+                pl.col("Slope").round(3).cast(pl.String)
+                + " ["
+                + pl.col("Slope_lower").round(3).cast(pl.String)
+                + ", "
+                + pl.col("Slope_upper").round(3).cast(pl.String)
+                + "]"
+            )
+            .otherwise(pl.col("Slope").round(3).cast(pl.String)),
+            # round the intercept values
+            Intercept=pl.col("Intercept").round(3),
+            # round R2
+            R2=(pl.col("R2") * 100).round(3),
         )
-        .otherwise(pl.col("Slope").round(3).cast(pl.String)),
-        # round the intercept values
-        Intercept=pl.col("Intercept").round(3),
-    ).drop(["Slope_lower", "Slope_upper"])
+        .drop(["Slope_lower", "Slope_upper"])
+        .rename(
+            {
+                "Slope": "Slope (95% CI)",
+                "Intercept": "Intercept",
+                "R2": "R² (%)",
+            }
+        )
+    )
 
     return regression_df
 
