@@ -1,5 +1,4 @@
 import argparse
-import glob
 import os
 
 import matplotlib.pyplot as plt
@@ -11,7 +10,7 @@ from dotenv import load_dotenv
 from matplotlib import rc
 from tqdm.auto import tqdm
 
-from outbreak_size import synth_pop_clusters, utils
+from outbreak_size import synth_pop_clusters, utils, vaccination_wrangling
 
 plt.rcParams["figure.figsize"] = [9, 9]
 font = {"family": "Nimbus Roman", "size": 28}
@@ -59,10 +58,57 @@ def read_outbreaks(data_dir=data_dir) -> pl.DataFrame:
     df_2025 = df_2025.with_columns(
         year=pl.lit(2025),
         state=pl.col("county").str.split(", ").list.get(1),
-        county=pl.col("county").str.split(", ").list.get(0),
+        county=pl.when(
+            pl.col("county").is_in(list(higher_level_regions().keys()))
+        )
+        .then(pl.col("county"))
+        .otherwise(pl.col("county").str.split(", ").list.get(0)),
     )
+    # set the fips for any county that is a higher level region to be the name
+    # of the county
+    df_2025 = df_2025.with_columns(
+        fips=pl.when(
+            pl.col("county").is_in(list(higher_level_regions().keys()))
+        )
+        .then(pl.col("county"))
+        .otherwise(pl.col("fips"))
+    )
+
+    # group by the case to get total 2025 cases
     df_2025 = df_2025.group_by(["year", "state", "county", "fips"]).agg(
         pl.sum("cases")
+    )
+
+    df_2025_with_imports = pl.read_csv(
+        os.path.join(
+            data_dir, "measles_data", "measles_county_all_updates_detailed.csv"
+        ),
+        schema_overrides={"location_id": pl.String},
+    )
+    df_2025_with_imports = df_2025_with_imports.filter(
+        pl.col("outcome_type") == "case_imported"
+    )
+    # rename columns to match the main df
+    df_2025_with_imports = df_2025_with_imports.rename(
+        {
+            "location_id": "fips",
+            "location_name": "county",
+            "value": "imported",
+        }
+    )
+    # groupby
+    df_2025_with_imports = df_2025_with_imports.group_by("fips").agg(
+        pl.sum("imported")
+    )
+
+    # join
+    df_2025 = df_2025.join(
+        df_2025_with_imports.select(["fips", "imported"]),
+        on="fips",
+        how="left",
+    )
+    df_2025 = df_2025.with_columns(
+        indigenous=pl.col("cases") - pl.col("imported")
     )
 
     # concatenate and return
@@ -86,9 +132,15 @@ def process_outbreaks_df(outbreaks_df: pl.DataFrame) -> pl.DataFrame:
         .then(pl.col("fips").str.zfill(5))
         .otherwise(pl.col("fips"))
     )
-    # for now, let's drop 2025 outbreaks with one or two digit fips codes
+    # for now, let's drop 2025 outbreaks with one or two digit fips codes because
+    # in these cases the data are not at the state level but rather in an unknown
+    # county
     outbreaks_df = outbreaks_df.filter(
-        ~((pl.col("year") == 2025) & (pl.col("fips").str.len_chars() < 5))
+        ~(
+            (pl.col("year") == 2025)
+            & (pl.col("fips").str.len_chars() < 5)
+            & pl.col("fips").is_not_null()
+        )
     )
 
     # last column seems to be urls of sources, drop it
@@ -246,6 +298,144 @@ def higher_level_regions() -> dict[str, list[str]]:
             "47173",
             "47179",
         ],
+        "Southwest Health District, Utah": [
+            "49001",
+            "49017",
+            "49021",
+            "49025",
+            "49053",
+        ],
+        "Mid-Cumberland Region, Tennessee": [
+            "47043",
+            "47125",
+            "47147",
+            "47161",
+            "47187",
+            "47189",
+        ],
+        "Bear River, Utah": ["49003", "49005", "49033"],
+        "Southeast Health District, Utah": ["49007", "49015", "49019"],
+        "North, Alabama": [
+            "01019",
+            "01033",
+            "01043",
+            "01049",
+            "01059",
+            "01071",
+            "01077",
+            "01079",
+            "01083",
+            "01089",
+            "01095",
+            "01103",
+            "01133",
+        ],
+        "Upper Cumberland Region, Tennessee": [
+            "47015",
+            "47027",
+            "47041",
+            "47049",
+            "47061",
+            "47087",
+            "47111",
+            "47133",
+            "47137",
+            "47141",
+            "47159",
+            "47175",
+            "47177",
+            "47185",
+        ],
+        "Nashville-Davidson County Region, Tennessee": ["47037"],
+        "Twin Cities Metro Area, Minnesota": [
+            "27003",
+            "27025",
+            "27053",
+            "27079",
+            "27139",
+            "27171",
+            "27019",
+            "27037",
+            "27059",
+            "27095",
+            "27123",
+            "27141",
+            "27163",
+        ],
+        "Region 9, Louisiana": ["22063", "22091", "22103", "22105", "22107"],
+        "Northwest Region, Virginia": [
+            "51015",
+            "51017",
+            "51091",
+            "51163",
+            "51165",
+            "51530",
+            "51660",
+            "51790",
+            "51820",
+            "51043",
+            "51069",
+            "51139",
+            "51171",
+            "51187",
+            "51840",
+            "51033",
+            "51099",
+            "51177",
+            "51179",
+            "51630",
+            "51047",
+            "51061",
+            "51113",
+            "51137",
+            "51157",
+            "51003",
+            "51065",
+            "51079",
+            "51109",
+            "51125",
+            "51540",
+        ],
+        "Eastern Region, Virginia": [
+            "51550",
+            "51001",
+            "51131",
+            "51650",
+            "51710",
+            "51095",
+            "51199",
+            "51700",
+            "51735",
+            "51830",
+            "51740",
+            "51057",
+            "51073",
+            "51097",
+            "51101",
+            "51103",
+            "51115",
+            "51119",
+            "51133",
+            "51159",
+            "51193",
+            "51810",
+            "51093",
+            "51175",
+            "51620",
+            "51800",
+        ],
+        "Upstate, South Carolina": [
+            "45045",
+            "45083",
+            "45007",
+            "45077",
+            "45073",
+            "45047",
+            "45059",
+            "45021",
+            "45087",
+            "45001",
+        ],
     }
     return assignment_special_places
 
@@ -253,7 +443,7 @@ def higher_level_regions() -> dict[str, list[str]]:
 def read_vaccinations(data_dir=data_dir) -> pl.DataFrame:
     df = pl.read_excel(
         os.path.join(
-            data_dir, "Compiled_Vaccine_Exemption_Data_Final_v1_092425.xlsx"
+            data_dir, "Compiled_Vaccine_Exemption_Data_R1_110225_Hawaiied.xlsx"
         )
     )
     # upper case lower case seem to be inconsistent across datasets
@@ -263,11 +453,9 @@ def read_vaccinations(data_dir=data_dir) -> pl.DataFrame:
     df = df.with_columns(
         [
             pl.col("nonmed_exempt_pct").cast(pl.Float64, strict=False),
-            pl.col("nonmed_exempt_total").cast(pl.Int64, strict=False),
             pl.col("med_exempt_pct").cast(pl.Float64, strict=False),
             pl.col("mmr_cov").cast(pl.Float64, strict=False),
             pl.col("all_vacc_cov").cast(pl.Float64, strict=False),
-            pl.col("enrollment").cast(pl.Int64, strict=False),
         ],
         # fips codes are not always 5 digits -- those with leading zeros are 4
         # so add the leading zeros back in
@@ -276,90 +464,26 @@ def read_vaccinations(data_dir=data_dir) -> pl.DataFrame:
         .then(pl.col("fips").str.zfill(5))
         .otherwise(pl.col("fips")),
     )
+    # add in missing fips
+    addfips = AddFIPS()
+    df = df.with_columns(
+        fips=pl.when(pl.col("state") != "Delaware")
+        .then(
+            pl.struct(["fips", "county", "state"]).map_elements(
+                lambda row: addfips.get_county_fips(
+                    row["county"], row["state"]
+                ),  # type: ignore
+                return_dtype=pl.String,
+            ),
+        )
+        .otherwise(pl.col("fips"))
+    )
 
     # add in kansas data
-    kansas_vacc = read_kansas_data(data_dir=data_dir)
+    kansas_vacc = vaccination_wrangling.read_kansas_data(data_dir=data_dir)
     df = pl.concat([df, kansas_vacc], how="diagonal_relaxed")
 
     return df
-
-
-# kansas data is special because it's usually at the school district level,
-# but we need it at the county level
-# So we hda it queried separately at the county level
-def read_kansas_data(data_dir=data_dir):
-    # get all MMR coverage data
-    mmr_files = glob.glob(os.path.join(data_dir, "MMR", "**", "*.csv"))
-    kansas_mmr_dfs = [
-        pl.read_csv(file, separator="\t", encoding="utf16")
-        for file in mmr_files
-    ]
-    kansas_mmr = pl.concat(kansas_mmr_dfs)
-    # do the same for exemption data
-    nme_files = glob.glob(
-        os.path.join(data_dir, "Religious Exemption", "**", "*.csv")
-    )
-    kansas_nme_dfs = [
-        pl.read_csv(file, separator="\t", encoding="utf16")
-        for file in nme_files
-    ]
-    kansas_nme = pl.concat(kansas_nme_dfs)
-    # do the same for medical exemption data
-    me_files = glob.glob(
-        os.path.join(data_dir, "Medical Exemption", "**", "*.csv")
-    )
-    kansas_me_dfs = [
-        pl.read_csv(file, separator="\t", encoding="utf16")
-        for file in me_files
-    ]
-    kansas_me = pl.concat(kansas_me_dfs)
-
-    # now we have to clean and merge
-    kansas_mmr = kansas_mmr.with_columns(
-        mmr_cov=pl.col("County Coverage")
-        .str.replace("%", "")
-        .cast(pl.Float64, strict=False),
-        year=pl.col("Academic Year")
-        .str.slice(0, 4)
-        .cast(pl.Int64, strict=False),
-    ).select(["County", "mmr_cov", "year"])
-
-    kansas_nme = kansas_nme.with_columns(
-        nonmed_exempt_pct=pl.col("Exemption String")
-        .str.replace("%", "")
-        .cast(pl.Float64, strict=False),
-        year=pl.col("Academic Year")
-        .str.slice(0, 4)
-        .cast(pl.Int64, strict=False),
-    ).select(["County", "nonmed_exempt_pct", "year"])
-
-    kansas_me = kansas_me.with_columns(
-        med_exempt_pct=pl.col("Exemption String")
-        .str.replace("%", "")
-        .cast(pl.Float64, strict=False),
-        year=pl.col("Academic Year")
-        .str.slice(0, 4)
-        .cast(pl.Int64, strict=False),
-    ).select(["County", "med_exempt_pct", "year"])
-
-    kansas_vacc = kansas_mmr.join(
-        kansas_nme, on=["County", "year"], how="inner"
-    ).join(kansas_me, on=["County", "year"], how="inner")
-
-    kansas_vacc = kansas_vacc.with_columns(state=pl.lit("Kansas"))
-
-    # we need to add fips codes into this data
-    addfips = AddFIPS()
-    kansas_vacc = kansas_vacc.with_columns(
-        fips=pl.col("County").map_elements(
-            lambda county: addfips.get_county_fips(county, "Kansas")
-        )
-    )
-
-    # rename "County" to be "county" for merging purposes
-    kansas_vacc = kansas_vacc.rename({"County": "county"})
-
-    return kansas_vacc
 
 
 def query_avg_vaccinations_region_years(
@@ -477,7 +601,7 @@ def process_vaccinations_df(vaccinations_df: pl.DataFrame) -> pl.DataFrame:
             *["310015"] * 9,  # Loup Basin
             *["310020"] * 9,  # North Central
             *["310010"] * 4,  # Northeast
-            *["310018"] * 8,  # Panhandle
+            *["310018"] * 12,  # Panhandle
             *["310011"] * 5,  # Public Health Solutions
             *["310006"] * 2,  # Sarpy/Cas
             *["310013"] * 4,  # South Heartland
@@ -535,7 +659,11 @@ def process_vaccinations_df(vaccinations_df: pl.DataFrame) -> pl.DataFrame:
             "31049",
             "31069",
             "31075",
-            "31105",  # Banner, Box Butte, Cheyenne, Dawes, Deuel, Garden, Grant, Kimball
+            "31165",
+            "31157",
+            "31123",
+            "31161",
+            "31105",  # Banner, Box Butte, Cheyenne, Dawes, Deuel, Garden, Grant, Kimball, Sioux, Scotts Bluff, Morrill, Sheridan
             "31059",
             "31067",
             "31095",
@@ -590,10 +718,6 @@ def process_vaccinations_df(vaccinations_df: pl.DataFrame) -> pl.DataFrame:
         .otherwise(pl.col("fips"))
     )
 
-    # I pulled the counties in Kansas that have cases
-    # None of them have cases since 2019, which is when the state started reporting
-    # vaccination coverage, so I don't touch these data and we can just drop them
-
     # Indiana only reports state level data and only for exemptions
     # That's too much extrapolation for what we want to do, so not going to touch
     # those data and we just drop them
@@ -636,7 +760,11 @@ def process_vaccinations_df(vaccinations_df: pl.DataFrame) -> pl.DataFrame:
 
     # in some cases, we have longer than we need fips details
     vaccinations_df = vaccinations_df.with_columns(
-        fips=pl.when(pl.col("fips").str.len_chars() > 5)
+        # Kansas fips codes are weird because NBC team created their own effectively
+        fips=pl.when(
+            (pl.col("fips").str.len_chars() > 5)
+            & (pl.col("state") != "Kansas")
+        )
         .then(pl.col("fips").str.slice(0, 5))
         .otherwise(pl.col("fips"))
     )
@@ -860,6 +988,9 @@ if __name__ == "__main__":
 
     vaccinations_df = read_vaccinations(data_dir)
     vaccinations_df = process_vaccinations_df(vaccinations_df)
+    vaccinations_df.write_csv(
+        os.path.join(data_dir, "processed_vaccinations_data.csv")
+    )
     # Merge
     raw_merged_df = merge_outbreaks_vaccinations(outbreaks_df, vaccinations_df)
     # Let's save this dataset so we have it for plotting

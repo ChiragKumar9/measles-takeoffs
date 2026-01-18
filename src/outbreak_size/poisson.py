@@ -21,7 +21,7 @@ class PartialPooledPoisson:
         group_fixed_effect=True,
         spatial=True,
         spatial_correlation=dist.Beta(2, 2),
-        spatial_sigma=dist.HalfNormal(10.0),
+        spatial_sigma=dist.HalfNormal(1.0),
     ):
         self.iv = iv
         self.num_observations = iv.shape[0]
@@ -67,7 +67,7 @@ class PartialPooledPoisson:
         self.adjacency_matrix = sp.sparse.csr_matrix(self.adjacency_matrix)
         self.spatial = spatial
 
-    def fit(self, cases=None):
+    def fit(self, is_observed, cases=None):
         baseline_rate = numpyro.sample("baseline_rate", self.baseline)
         with numpyro.plate(
             "regression_covariates", self.num_regression_covariates
@@ -106,8 +106,8 @@ class PartialPooledPoisson:
         else:
             # pull coefficients for each iv just like they are normal covariates
             with numpyro.plate("iv_no_pooling", self.num_ivs):
-                iv_effects = numpyro.sample("iv_effects", self.betas)  # type: ignore
-            iv_effect = jnp.dot(self.iv, iv_effects)
+                iv_global = numpyro.sample("iv_global", self.betas)  # type: ignore
+            iv_effect = jnp.dot(self.iv, iv_global)
 
         mu = (
             baseline_rate
@@ -116,8 +116,19 @@ class PartialPooledPoisson:
             + iv_effect
         )
 
-        if not self.is_adjacency_empty:
-            if self.spatial:
+        if self.spatial:
+            spatial_random_sigma = numpyro.sample(
+                "spatial_random_sigma", self.spatial_sigma
+            )
+            with numpyro.plate(
+                "spatial_random_effects_plate", self.has_a_neighbor.shape[0]
+            ):
+                spatial_random_effects = numpyro.sample(
+                    "spatial_random_effects", dist.Normal(0, 1)
+                )
+            full_spatial_effect = spatial_random_sigma * spatial_random_effects
+
+            if not self.is_adjacency_empty:
                 # add spatial correlation
                 correlation = numpyro.sample(
                     "spatial_correlation", self.spatial_correlation
@@ -136,21 +147,24 @@ class PartialPooledPoisson:
                     "raw_spatial_effect", car_distribution
                 )
                 spatial_effect = spatial_sigma * raw_spatial_effect
-                # spatial_effect is a vector of length of number of counties
-                # need to expand spatial effects also to include counties without neighbors
-                full_spatial_effect = jnp.zeros(self.has_a_neighbor.shape[0])
-                full_spatial_effect = full_spatial_effect.at[
+                full_spatial_effect = full_spatial_effect.at[  # type: ignore
                     self.has_a_neighbor
                 ].set(spatial_effect)
-                full_spatial_effect = full_spatial_effect[self.spatial_units]  # type: ignore
 
-                mu = mu + full_spatial_effect
+            # spatial_effect is a vector of length of number of counties
+            # need to expand spatial effects also to include counties without neighbors
+            full_spatial_effect = full_spatial_effect[self.spatial_units]  # type: ignore
+            mu = mu + full_spatial_effect
         mu = jnp.exp(mu)
         mu = mu + jnp.finfo(jnp.float64).eps
 
-        with numpyro.plate("observations", size=self.num_observations):
+        numpyro.deterministic("mu", mu)
+
+        if cases is not None:
+            poisson_log_prob = dist.Poisson(mu).log_prob(cases)
+            numpyro.factor("poisson_log_prob", poisson_log_prob * is_observed)
+        else:
             numpyro.sample(
                 "cases",
-                dist.Poisson(mu),  # type: ignore
-                obs=cases,
+                dist.Poisson(mu),
             )
