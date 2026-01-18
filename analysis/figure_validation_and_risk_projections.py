@@ -14,8 +14,6 @@ import pandas as pd
 import polars as pl
 import yaml
 from matplotlib import rc
-from matplotlib.colors import Normalize
-from scipy import stats
 from shapely.geometry import MultiPolygon, Polygon
 
 data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")

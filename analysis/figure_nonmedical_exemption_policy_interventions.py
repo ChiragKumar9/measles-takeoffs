@@ -8,7 +8,9 @@ import pandas as pd
 import polars as pl
 import yaml
 from matplotlib import rc
+from scipy import stats
 from shapely.geometry import MultiPolygon, Polygon
+from sklearn.linear_model import TheilSenRegressor
 
 data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 output_dir = os.path.join(
@@ -304,10 +306,279 @@ def map_fips_code_data(
     return fig, ax
 
 
+def coverage_increase_nme_policy_change(df, fig, ax):
+    states = {
+        "California": 2016,
+        "Maine": 2021,
+        "New York": 2019,
+        "Connecticut": 2022,
+    }
+
+    all_dfs = []
+    regression_df = []
+    for state, year in states.items():
+        t1 = df.filter(
+            (pl.col("state") == state) & (pl.col("year") == year - 1)
+        ).select(
+            [
+                "state",
+                "year",
+                "county",
+                "nonmed_exempt_pct",
+                "estimated_mmr_cov",
+            ]
+        )
+
+        t2 = df.filter(
+            (pl.col("state") == state) & (pl.col("year") == year)
+        ).select(
+            [
+                "state",
+                "year",
+                "county",
+                "nonmed_exempt_pct",
+                "estimated_mmr_cov",
+            ]
+        )
+
+        temp = t1.join(
+            t2, on=["state", "county"], suffix="_policy_year"
+        ).with_columns(
+            estimated_mmr_cov_change_policy_year=pl.col(
+                "estimated_mmr_cov_policy_year"
+            )
+            - pl.col("estimated_mmr_cov"),
+        )
+
+        # do a regression between nonmed_exempt_pct and estimated_mmr_cov_change_policy_year
+        temp_regression = temp[
+            ["nonmed_exempt_pct", "estimated_mmr_cov_change_policy_year"]
+        ].drop_nulls()
+        estimator = stats.theilslopes(
+            temp_regression["estimated_mmr_cov_change_policy_year"].to_numpy(),
+            temp_regression["nonmed_exempt_pct"].to_numpy(),
+        )
+        temp_regression = pl.DataFrame().with_columns(
+            State=pl.lit(state + " only"),
+            Year=pl.lit("Policy change year: " + str(year)),
+            Slope=pl.lit(estimator[0]),
+            Slope_lower=pl.lit(estimator[2]),
+            Slope_upper=pl.lit(estimator[3]),
+            Intercept=pl.lit(estimator[1]),
+            N=pl.lit(temp_regression.height),
+        )
+        regression_df.append(temp_regression)
+
+        t3 = df.filter(
+            (pl.col("state") == state) & (pl.col("year") == year + 1)
+        ).select(
+            [
+                "state",
+                "year",
+                "county",
+                "nonmed_exempt_pct",
+                "estimated_mmr_cov",
+            ]
+        )
+
+        temp = temp.join(
+            t3, on=["state", "county"], suffix="_1yr"
+        ).with_columns(
+            estimated_mmr_cov_change_1yr=pl.col("estimated_mmr_cov_1yr")
+            - pl.col("estimated_mmr_cov"),
+        )
+
+        temp_regression = temp[
+            ["nonmed_exempt_pct", "estimated_mmr_cov_change_1yr"]
+        ].drop_nulls()
+        estimator = stats.theilslopes(
+            temp_regression["estimated_mmr_cov_change_1yr"].to_numpy(),
+            temp_regression["nonmed_exempt_pct"].to_numpy(),
+        )
+        temp_regression = pl.DataFrame().with_columns(
+            State=pl.lit(state + " only"),
+            Year=pl.lit("1 year after: " + str(year + 1)),
+            Slope=pl.lit(estimator[0]),
+            Slope_lower=pl.lit(estimator[2]),
+            Slope_upper=pl.lit(estimator[3]),
+            Intercept=pl.lit(estimator[1]),
+            N=pl.lit(temp_regression.height),
+        )
+        regression_df.append(temp_regression)
+
+        t4 = df.filter(
+            (pl.col("state") == state) & (pl.col("year") == year + 2)
+        ).select(
+            [
+                "state",
+                "year",
+                "county",
+                "nonmed_exempt_pct",
+                "estimated_mmr_cov",
+            ]
+        )
+
+        temp = temp.join(
+            t4, on=["state", "county"], suffix="_2yr"
+        ).with_columns(
+            estimated_mmr_cov_change_2yr=pl.col("estimated_mmr_cov_2yr")
+            - pl.col("estimated_mmr_cov"),
+        )
+
+        if state != "Connecticut":
+            # connecticut reported state-level data in 2024
+            temp_regression = temp[
+                ["nonmed_exempt_pct", "estimated_mmr_cov_change_2yr"]
+            ].drop_nulls()
+            estimator = stats.theilslopes(
+                temp_regression["estimated_mmr_cov_change_2yr"].to_numpy(),
+                temp_regression["nonmed_exempt_pct"].to_numpy(),
+            )
+            temp_regression = pl.DataFrame().with_columns(
+                State=pl.lit(state + " only"),
+                Year=pl.lit("2 years after: " + str(year + 2)),
+                Slope=pl.lit(estimator[0]),
+                Slope_lower=pl.lit(estimator[2]),
+                Slope_upper=pl.lit(estimator[3]),
+                Intercept=pl.lit(estimator[1]),
+                N=pl.lit(temp_regression.height),
+            )
+            regression_df.append(temp_regression)
+
+        all_dfs.append(temp)
+
+    result_df = pl.concat(all_dfs)
+
+    # plot
+    state_colors = {
+        "California": "lightblue",
+        "Maine": "purple",
+        "New York": "darkgreen",
+        "Connecticut": "orange",
+    }
+
+    for state in states.keys():
+        state_df = result_df.filter(pl.col("state") == state)
+        ax.scatter(
+            state_df["nonmed_exempt_pct"].to_numpy(),
+            state_df["estimated_mmr_cov_change_1yr"].to_numpy(),
+            label=state,
+            alpha=0.7,
+            s=150,
+            color=state_colors[state],
+        )
+
+    ax.axhline(0, color="grey", linestyle="--", linewidth=1)
+    ax.legend()
+    ax.set_xlabel("Pre-policy nonmedical exemption rate (%)")
+    ax.set_ylabel("Change in MMR coverage (%)")
+    ax.set_xlim(0)
+
+    # do a regression for all states combined
+    for year_mode in ["policy_year", "1yr", "2yr"]:
+        temp_regression = result_df[
+            ["nonmed_exempt_pct", f"estimated_mmr_cov_change_{year_mode}"]
+        ].drop_nulls()
+        estimator = stats.theilslopes(
+            temp_regression[
+                f"estimated_mmr_cov_change_{year_mode}"
+            ].to_numpy(),
+            temp_regression["nonmed_exempt_pct"].to_numpy(),
+        )
+        temp_regression = pl.DataFrame().with_columns(
+            State=pl.lit("All states"),
+            Year=pl.lit(
+                "Policy change year"
+                if year_mode == "policy_year"
+                else "1 year after"
+                if year_mode == "1yr"
+                else "2 years after"
+            ),
+            Slope=pl.lit(estimator[0]),
+            Slope_lower=pl.lit(estimator[2]),
+            Slope_upper=pl.lit(estimator[3]),
+            Intercept=pl.lit(estimator[1]),
+            N=pl.lit(temp_regression.height),
+        )
+        regression_df.append(temp_regression)
+
+    # do the same but add in state fixed effects
+    for year_mode in ["policy_year", "1yr", "2yr"]:
+        temp_regression = result_df[
+            [
+                "state",
+                "nonmed_exempt_pct",
+                f"estimated_mmr_cov_change_{year_mode}",
+            ]
+        ].drop_nulls()
+        temp_regression = temp_regression.to_dummies("state", drop_first=True)
+        x_cols = ["nonmed_exempt_pct"] + [
+            col for col in temp_regression.columns if col.startswith("state_")
+        ]
+        X = temp_regression.select(x_cols).to_numpy()
+        estimator = TheilSenRegressor(random_state=108).fit(
+            X,
+            temp_regression[
+                f"estimated_mmr_cov_change_{year_mode}"
+            ].to_numpy(),
+        )
+        temp_regression = pl.DataFrame().with_columns(
+            State=pl.lit("All states with state fixed effects"),
+            Year=pl.lit(
+                "Policy change year"
+                if year_mode == "policy_year"
+                else "1 year after"
+                if year_mode == "1yr"
+                else "2 years after"
+            ),
+            Slope=pl.lit(estimator.coef_[0]),
+            Slope_lower=pl.lit(None),
+            Slope_upper=pl.lit(None),
+            Intercept=pl.lit(estimator.intercept_),
+            N=pl.lit(temp_regression.height),
+        )
+        regression_df.append(temp_regression)
+
+    # merge slopes
+    regression_df = pl.concat(regression_df)
+
+    # add a line to the plot for the regression of all states combined
+    x_vals = np.array(ax.get_xlim())
+    slope = regression_df.filter(
+        (pl.col("State") == "All states") & (pl.col("Year") == "1 year after")
+    )["Slope"][0]
+    intercept = regression_df.filter(
+        (pl.col("State") == "All states") & (pl.col("Year") == "1 year after")
+    )["Intercept"][0]
+    y_vals = intercept + slope * x_vals
+    ax.plot(
+        x_vals,
+        y_vals,
+        color="black",
+        linewidth=2,
+    )
+
+    regression_df = regression_df.with_columns(
+        Slope=pl.when(pl.col("Slope_lower").is_not_null())
+        .then(
+            pl.col("Slope").round(3).cast(pl.String)
+            + " ["
+            + pl.col("Slope_lower").round(3).cast(pl.String)
+            + ", "
+            + pl.col("Slope_upper").round(3).cast(pl.String)
+            + "]"
+        )
+        .otherwise(pl.col("Slope").round(3).cast(pl.String)),
+        # round the intercept values
+        Intercept=pl.col("Intercept").round(3),
+    ).drop(["Slope_lower", "Slope_upper"])
+
+    return regression_df
+
+
 if __name__ == "__main__":
     df = pl.read_csv(
-        os.path.join(output_dir, "projection_dataset.csv"),
-        # make sure we read fips codes as strings
+        os.path.join(data_dir, "latest_vaccination_data.csv"),
         schema_overrides={"fips": pl.String},
     )
 
@@ -343,6 +614,21 @@ if __name__ == "__main__":
         fontweight="bold",
         va="top",
         ha="right",
+    )
+    vac_df = pl.read_csv(
+        os.path.join(data_dir, "processed_vaccinations_data.csv"),
+        schema_overrides={
+            "fips": pl.String,
+            "estimated_mmr_cov": pl.Float64,
+            "nonmed_exempt_pct": pl.Float64,
+        },
+    )
+    regression_df = coverage_increase_nme_policy_change(vac_df, fig, ax[0, 1])  # type: ignore
+    regression_df.write_csv(
+        os.path.join(
+            fig_dir,
+            "table_supplemental_mmr_coverage_change_nme_policy_interventions.csv",
+        )
     )
 
     ax[1, 0].text(  # type: ignore

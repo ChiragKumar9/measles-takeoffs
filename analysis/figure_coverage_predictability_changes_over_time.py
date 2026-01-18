@@ -71,8 +71,21 @@ def plot_coverage_distribution(
         ),
         year_of_interest=pl.col("year").is_in([2021, 2022, 2023, 2024, 2025]),
     )
+    print(
+        stats.spearmanr(
+            df.filter(pl.col("year_of_interest") == False)[vaccination_metric],
+            df.filter(pl.col("year_of_interest") == False)["cases_outbreak"],
+        )
+    )
+
+    print(
+        stats.spearmanr(
+            df.filter(pl.col("year_of_interest") == True)[vaccination_metric],
+            df.filter(pl.col("year_of_interest") == True)["cases_outbreak"],
+        )
+    )
     df = df.group_by(["outbreak_size_buckets", "year_of_interest"]).agg(
-        pl.col(vaccination_metric)
+        pl.col(vaccination_metric), pl.col("cases_outbreak")
     )
     df = df.sort(by=["outbreak_size_buckets", "year_of_interest"])
     df = df.with_columns(
