@@ -200,7 +200,8 @@ def plot_coverage_distribution(
         y=medians_pre,
         yerr=[medians_pre - lowers_pre, uppers_pre - medians_pre],
         fmt="o",
-        capsize=5,
+        capsize=10,
+        capthick=2,
         color="blue",
     )
 
@@ -228,7 +229,8 @@ def plot_coverage_distribution(
         y=medians_post,
         yerr=[medians_post - lowers_post, uppers_post - medians_post],
         fmt="o",
-        capsize=5,
+        capsize=10,
+        capthick=2,
         color="green",
     )
 
@@ -254,6 +256,7 @@ def plot_coverage_distribution(
     ax.legend(
         [violinparts1["bodies"][0], violinparts2["bodies"][0]],
         ["2011-2020", "2021-2025"],
+        loc=(0.45, 0.02),
     )
     ax.axhline(y=vaccination_threshold, color="k", linestyle="--")
     ax.set_ylabel("MMR vaccine coverage (%)")
@@ -302,35 +305,6 @@ def plot_outbreak_identification_rate(df, fig, ax):
         df_identification = pl.concat(
             [df_identification, df_temp], how="diagonal_relaxed"
         )
-
-    # # before any of the identification stuff, we want to have the coverage CDF
-    # counts_old, bins_old = np.histogram(df.filter(pl.col("recent") == False)["estimated_mmr_cov"].to_list(), bins=np.arange(0, 100.1, 0.1))
-    # counts_old = np.cumsum(counts_old)
-    # # Normalize to 0-100
-    # counts_normalized_old = (counts_old / counts_old.max()) * 100
-
-    # counts_new, bins_new = np.histogram(df.filter(pl.col("recent") == True)["estimated_mmr_cov"].to_list(), bins=np.arange(0, 100.1, 0.1))
-    # counts_new = np.cumsum(counts_new)
-    # # Normalize to 0-100
-    # counts_normalized_new = (counts_new / counts_new.max()) * 100
-
-    # # Plot
-    # ax2 = ax.twinx()
-    # ax2.spines["top"].set_visible(False)
-    # ax2.spines["left"].set_visible(False)
-    # ax2.get_xaxis().tick_bottom()
-    # ax2.get_yaxis().tick_right()
-    # ax2.tick_params(axis="x", direction="out")
-    # ax2.tick_params(axis="y", direction="out")
-    # # offset the spines
-    # for spine in ax2.spines.values():
-    #     spine.set_position(("outward", 5))
-    # # put the grid behind
-    # ax2.set_axisbelow(True)
-    # ax2.plot(bins_old[:-1], counts_normalized_old, color='blue', linewidth=2)
-    # ax2.plot(bins_new[:-1], counts_normalized_new, color='green', linewidth=2)
-    # ax2.set_ylabel("Cumulative density (%)", rotation=-90, labelpad=30)
-    # ax.set_xlim([89.9, 98.1])
 
     ax.plot(
         df_identification.filter(pl.col("recent") == False)[
@@ -388,7 +362,7 @@ def plot_outbreak_identification_rate(df, fig, ax):
         linestyle="--",
     )
 
-    ax.legend()
+    ax.legend(loc=(0.40, 0.0))
     ax.set_xlabel("MMR vaccine coverage (%)")
     ax.set_ylabel("Identification rate (sensitivity) (%)")
     ax.set_ylim(0)
@@ -524,7 +498,7 @@ def plot_coverage_various_models(df, fig, ax):
     ax.axhline(y=0, color="k", linestyle="--")
     ax.set_xticks([0, 1])
     ax.set_xticklabels(["2011-2020", "2021-2025"])
-    ax.set_xlim([-0.25, 1.25])
+    ax.set_xlim([-0.18, 1.18])
 
     ax.set_xlabel("Year")
     ax.set_ylabel(
@@ -537,25 +511,93 @@ def plot_coverage_various_models(df, fig, ax):
 
 def plot_effect_over_time(samples, df, years_in_order, fig, ax):
     # scale by standard deviation to make it interpretable
-    std = df["estimated_mmr_cov"].to_numpy().std()
-    samples = samples / std
+    mu = samples["mu"]
+    samples = samples["effects_over_time_and_group"][:, :, 0]
+    std_wh = df["estimated_mmr_cov"].to_numpy().std()
+    samples_wh = samples / std_wh
     # exponentiate and multiply by 100
-    samples = jnp.exp(samples) * 100
+    samples_wh = jnp.exp(samples_wh) * 100
     # to express as percent change
-    samples = samples - 100
+    samples_wh = samples_wh - 100
 
-    median_effect = jnp.median(samples, axis=0)
-    lower_effect = jnp.quantile(samples, 0.025, axis=0)
-    upper_effect = jnp.quantile(samples, 0.975, axis=0)
+    # collect the values by years
+    median_effect = np.array([])
+    lower_effect = np.array([])
+    upper_effect = np.array([])
+    years_all_out = range(
+        int(min(years_in_order)), int(max(years_in_order)) + 1
+    )
+    for year in years_all_out:
+        mask = df["year"].is_in(year).to_jax()
+        samples = samples_wh[:, mask]
+        # average weighted by cases
+        samples = (
+            samples * mu[:, mask] / mu[:, mask].sum(axis=1, keepdims=True)
+        )
+        samples = samples.sum(axis=1)
+        median_effect = np.append(
+            median_effect, float(jnp.median(samples, axis=0))
+        )
+        lower_effect = np.append(
+            lower_effect, float(jnp.quantile(samples, 0.025, axis=0))
+        )
+        upper_effect = np.append(
+            upper_effect, float(jnp.quantile(samples, 0.975, axis=0))
+        )
+
+    median_effect_expanded_cumsum = jnp.cumsum(median_effect)
+
+    median_effect_expanded = jnp.concatenate(
+        [
+            median_effect[:1],
+            median_effect_expanded_cumsum[1:2] / 2,
+            median_effect_expanded_cumsum[2:3] / 3,
+            (
+                median_effect_expanded_cumsum[3:]
+                - median_effect_expanded_cumsum[:-3]
+            )
+            / 3,
+        ]
+    )
+
+    lower_effect_expanded_cumsum = jnp.cumsum(lower_effect)
+
+    lower_effect_expanded = jnp.concatenate(
+        [
+            lower_effect[:1],
+            lower_effect_expanded_cumsum[1:2] / 2,
+            lower_effect_expanded_cumsum[2:3] / 3,
+            (
+                lower_effect_expanded_cumsum[3:]
+                - lower_effect_expanded_cumsum[:-3]
+            )
+            / 3,
+        ]
+    )
+
+    upper_effect_expanded_cumsum = jnp.cumsum(upper_effect)
+
+    upper_effect_expanded = jnp.concatenate(
+        [
+            upper_effect[:1],
+            upper_effect_expanded_cumsum[1:2] / 2,
+            upper_effect_expanded_cumsum[2:3] / 3,
+            (
+                upper_effect_expanded_cumsum[3:]
+                - upper_effect_expanded_cumsum[:-3]
+            )
+            / 3,
+        ]
+    )
+
     ax.fill_between(
-        years_in_order,
-        lower_effect,
-        upper_effect,
+        years_all_out,
+        lower_effect_expanded,
+        upper_effect_expanded,
         color="grey",
         alpha=0.3,
     )
-    ax.plot(years_in_order, median_effect, color="grey")
-
+    ax.plot(years_all_out, median_effect_expanded, color="grey")
     # horizontal line at y=100
     ax.axhline(0, ls="--", color="black")
 
@@ -634,7 +676,7 @@ if __name__ == "__main__":
     with open(
         os.path.join(
             output_dir,
-            "predictive_random_walk_poisson_CAR.pkl",
+            "predictive_random_walk_poisson_CAR_time_and_group_varying_2025_mega_regions=True.pkl",
         ),
         "rb",
     ) as file:
@@ -653,13 +695,9 @@ if __name__ == "__main__":
     )
 
     plot_effect_over_time(
-        predictive_samples["effects_over_time"][:, :, 0],
+        predictive_samples,
         df,
-        list(
-            reversed(
-                [2011, 2012.5, 2014.5, 2016.5, 2018.5, 2020.5, 2022.5, 2025]
-            )
-        ),
+        list([2011, 2012.5, 2014.5, 2016.5, 2018.5, 2020.5, 2022.5, 2025]),
         fig,
         ax[1, 1],  # type: ignore
     )

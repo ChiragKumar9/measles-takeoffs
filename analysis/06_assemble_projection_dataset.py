@@ -102,9 +102,6 @@ if __name__ == "__main__":
     assert census_key is not None, "CENSUS_API_KEY not found in environment"
     df = add_pop_variables(df, census_key)
 
-    print("Saving projection dataset...")
-    df.write_csv(os.path.join(output_dir, "projection_dataset.csv"))
-
     # scale the data
     train_df = pl.read_csv(
         os.path.join(data_dir, "analysis_dataset.csv"),
@@ -115,14 +112,7 @@ if __name__ == "__main__":
         pl.col("year").is_in([2021, 2022, 2023, 2024, 2025])
     )
 
-    train_states = (
-        train_df.select("state")
-        .unique(maintain_order=True)
-        .to_series()
-        .to_list()
-    )
-    df = df.with_columns(in_train=pl.col("state").is_in(train_states))
-    train_df = train_df.select(
+    train_df_to_scale = train_df.select(
         [
             "estimated_mmr_cov",
             "nonmed_exempt_pct",
@@ -141,7 +131,21 @@ if __name__ == "__main__":
 
     scaler = StandardScaler()
     print("Fitting scaler on training data...")
-    scaler.fit(train_df.to_numpy())
+    scaled_train = scaler.fit_transform(train_df_to_scale.to_numpy())
+
+    train_df = pl.DataFrame(
+        scaled_train, train_df_to_scale.columns
+    ).with_columns(
+        state=train_df["state"],
+        geoid=train_df["geoid"],
+        fips=train_df["fips"],
+        county=train_df["county"],
+        year=train_df["year"],
+        pop=train_df["pop"],
+        in_train=pl.lit(1),
+        cases_outbreak=train_df["cases_outbreak"],
+        type=pl.lit("train"),
+    )
 
     # now apply the same scaler to our df
     projection_df = df.select(
@@ -173,37 +177,31 @@ if __name__ == "__main__":
             df["county"],
             df["year"],
             df["pop"],
-            df["in_train"],
-        ]
+        ],
+        in_train=pl.lit(0),
+        # we need to have some value but it is not used
+        cases_outbreak=pl.lit(0),
+        estimated_mmr_cov_raw=df["estimated_mmr_cov"],
+        type=pl.lit("projection"),
     )
+    scaled_df = scaled_df.with_columns(
+        geoid=pl.when(pl.col("fips").is_null())
+        .then(pl.col("county"))
+        .otherwise(pl.col("county") + pl.col("fips"))
+    )
+
+    # join the two dataframes together
+    scaled_df = pl.concat([train_df, scaled_df], how="diagonal_relaxed")
+
+    # drop places with nas -- means there were too few people there to get census data
+    scaled_df = scaled_df.drop_nans()
 
     # save scaled df
     print("Saving scaled projection dataset...")
-    # we have to order this dataset so that the states are in the same order as
-    # the train data
-    # Convert state column to Enum so that they can be in the same order as training data
-    df_in_train = scaled_df.filter(pl.col("in_train") == True)
-    df_in_train = df_in_train.with_columns(
-        pl.col("state").cast(pl.Enum(train_states))
-    ).sort("state")
-    df_not_in_train = scaled_df.filter(pl.col("in_train") == False)
-    # sort by state so at least they're all together
-    df_not_in_train = df_not_in_train.sort("state")
-    # concatenate back together
-    scaled_df = pl.concat(
-        [df_in_train, df_not_in_train], how="diagonal_relaxed"
-    )
     scaled_df.write_csv(
         os.path.join(output_dir, "scaled_projection_dataset.csv")
     )
 
-    # make adjacency matrix for projection dataset
-    fips_list_in_train = scaled_df.filter(pl.col("in_train") == True)[
-        "fips"
-    ].to_list()
-    fips_list_not_in_train = scaled_df.filter(pl.col("in_train") == False)[
-        "fips"
-    ].to_list()
     print("Making adjacency matrix for projection dataset...")
     adjacency_matrix = pl.read_csv(
         os.path.join(data_dir, "county_adjacencies.txt"),
@@ -213,19 +211,11 @@ if __name__ == "__main__":
             "Neighbor GEOID": pl.String,
         },
     )
-    adj_matrix_in_train = adjacency.assemble_adjacency_matrix(
-        adjacency_matrix, fips_list_in_train
+    adj_matrix = adjacency.assemble_adjacency_matrix(
+        adjacency_matrix,
+        scaled_df["fips"].unique(maintain_order=True).to_list(),
     )
     np.savetxt(
-        os.path.join(output_dir, "projection_adjacency_matrix_in_train.npy"),
-        adj_matrix_in_train,
-    )
-    adj_matrix_not_in_train = adjacency.assemble_adjacency_matrix(
-        adjacency_matrix, fips_list_not_in_train
-    )
-    np.savetxt(
-        os.path.join(
-            output_dir, "projection_adjacency_matrix_not_in_train.npy"
-        ),
-        adj_matrix_not_in_train,
+        os.path.join(output_dir, "projection_adjacency_matrix.npy"),
+        adj_matrix,
     )

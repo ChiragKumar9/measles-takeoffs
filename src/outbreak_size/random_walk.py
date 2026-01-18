@@ -22,7 +22,7 @@ class PartialPooledPoisson:
         baseline=dist.Normal(0, 1),
         priors=dist.Normal(0, 1),
         spatial_correlation=dist.Beta(2, 2),
-        spatial_sigma=dist.HalfNormal(10.0),
+        spatial_sigma=dist.HalfNormal(1.0),
         drift_scale=0.25,
     ):
         if time_and_group_varying is not None:
@@ -293,6 +293,10 @@ class PartialPooledPoisson:
                     time_and_group_varying_effect = (
                         state_effect + rw[self.years]
                     )  # type: ignore
+                    numpyro.deterministic(
+                        "effects_over_time_and_group",
+                        time_and_group_varying_effect,
+                    )
 
                 time_and_group_varying_effect = jnp.sum(
                     time_and_group_varying_effect
@@ -331,7 +335,7 @@ class PartialPooledPoisson:
         # need to expand spatial effects also to include counties without neighbors
 
         spatial_random_sigma = numpyro.sample(
-            "spatial_random_sigma", dist.HalfNormal(1.0)
+            "spatial_random_sigma", self.spatial_sigma
         )
         with numpyro.plate(
             "spatial_random_effects_plate", self.has_a_neighbor.shape[0]
@@ -349,6 +353,7 @@ class PartialPooledPoisson:
         mu = mu + full_spatial_effect
         mu = jnp.exp(mu)
         mu = mu + jnp.finfo(jnp.float64).eps
+        numpyro.deterministic("mu", mu)
 
         with numpyro.plate("observations", size=self.num_observations):
             numpyro.sample(

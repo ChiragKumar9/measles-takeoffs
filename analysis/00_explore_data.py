@@ -58,10 +58,57 @@ def read_outbreaks(data_dir=data_dir) -> pl.DataFrame:
     df_2025 = df_2025.with_columns(
         year=pl.lit(2025),
         state=pl.col("county").str.split(", ").list.get(1),
-        county=pl.col("county").str.split(", ").list.get(0),
+        county=pl.when(
+            pl.col("county").is_in(list(higher_level_regions().keys()))
+        )
+        .then(pl.col("county"))
+        .otherwise(pl.col("county").str.split(", ").list.get(0)),
     )
+    # set the fips for any county that is a higher level region to be the name
+    # of the county
+    df_2025 = df_2025.with_columns(
+        fips=pl.when(
+            pl.col("county").is_in(list(higher_level_regions().keys()))
+        )
+        .then(pl.col("county"))
+        .otherwise(pl.col("fips"))
+    )
+
+    # group by the case to get total 2025 cases
     df_2025 = df_2025.group_by(["year", "state", "county", "fips"]).agg(
         pl.sum("cases")
+    )
+
+    df_2025_with_imports = pl.read_csv(
+        os.path.join(
+            data_dir, "measles_data", "measles_county_all_updates_detailed.csv"
+        ),
+        schema_overrides={"location_id": pl.String},
+    )
+    df_2025_with_imports = df_2025_with_imports.filter(
+        pl.col("outcome_type") == "case_imported"
+    )
+    # rename columns to match the main df
+    df_2025_with_imports = df_2025_with_imports.rename(
+        {
+            "location_id": "fips",
+            "location_name": "county",
+            "value": "imported",
+        }
+    )
+    # groupby
+    df_2025_with_imports = df_2025_with_imports.group_by("fips").agg(
+        pl.sum("imported")
+    )
+
+    # join
+    df_2025 = df_2025.join(
+        df_2025_with_imports.select(["fips", "imported"]),
+        on="fips",
+        how="left",
+    )
+    df_2025 = df_2025.with_columns(
+        indigenous=pl.col("cases") - pl.col("imported")
     )
 
     # concatenate and return
@@ -85,9 +132,15 @@ def process_outbreaks_df(outbreaks_df: pl.DataFrame) -> pl.DataFrame:
         .then(pl.col("fips").str.zfill(5))
         .otherwise(pl.col("fips"))
     )
-    # for now, let's drop 2025 outbreaks with one or two digit fips codes
+    # for now, let's drop 2025 outbreaks with one or two digit fips codes because
+    # in these cases the data are not at the state level but rather in an unknown
+    # county
     outbreaks_df = outbreaks_df.filter(
-        ~((pl.col("year") == 2025) & (pl.col("fips").str.len_chars() < 5))
+        ~(
+            (pl.col("year") == 2025)
+            & (pl.col("fips").str.len_chars() < 5)
+            & pl.col("fips").is_not_null()
+        )
     )
 
     # last column seems to be urls of sources, drop it
@@ -244,6 +297,144 @@ def higher_level_regions() -> dict[str, list[str]]:
             "47171",
             "47173",
             "47179",
+        ],
+        "Southwest Health District, Utah": [
+            "49001",
+            "49017",
+            "49021",
+            "49025",
+            "49053",
+        ],
+        "Mid-Cumberland Region, Tennessee": [
+            "47043",
+            "47125",
+            "47147",
+            "47161",
+            "47187",
+            "47189",
+        ],
+        "Bear River, Utah": ["49003", "49005", "49033"],
+        "Southeast Health District, Utah": ["49007", "49015", "49019"],
+        "North, Alabama": [
+            "01019",
+            "01033",
+            "01043",
+            "01049",
+            "01059",
+            "01071",
+            "01077",
+            "01079",
+            "01083",
+            "01089",
+            "01095",
+            "01103",
+            "01133",
+        ],
+        "Upper Cumberland Region, Tennessee": [
+            "47015",
+            "47027",
+            "47041",
+            "47049",
+            "47061",
+            "47087",
+            "47111",
+            "47133",
+            "47137",
+            "47141",
+            "47159",
+            "47175",
+            "47177",
+            "47185",
+        ],
+        "Nashville-Davidson County Region, Tennessee": ["47037"],
+        "Twin Cities Metro Area, Minnesota": [
+            "27003",
+            "27025",
+            "27053",
+            "27079",
+            "27139",
+            "27171",
+            "27019",
+            "27037",
+            "27059",
+            "27095",
+            "27123",
+            "27141",
+            "27163",
+        ],
+        "Region 9, Louisiana": ["22063", "22091", "22103", "22105", "22107"],
+        "Northwest Region, Virginia": [
+            "51015",
+            "51017",
+            "51091",
+            "51163",
+            "51165",
+            "51530",
+            "51660",
+            "51790",
+            "51820",
+            "51043",
+            "51069",
+            "51139",
+            "51171",
+            "51187",
+            "51840",
+            "51033",
+            "51099",
+            "51177",
+            "51179",
+            "51630",
+            "51047",
+            "51061",
+            "51113",
+            "51137",
+            "51157",
+            "51003",
+            "51065",
+            "51079",
+            "51109",
+            "51125",
+            "51540",
+        ],
+        "Eastern Region, Virginia": [
+            "51550",
+            "51001",
+            "51131",
+            "51650",
+            "51710",
+            "51095",
+            "51199",
+            "51700",
+            "51735",
+            "51830",
+            "51740",
+            "51057",
+            "51073",
+            "51097",
+            "51101",
+            "51103",
+            "51115",
+            "51119",
+            "51133",
+            "51159",
+            "51193",
+            "51810",
+            "51093",
+            "51175",
+            "51620",
+            "51800",
+        ],
+        "Upstate, South Carolina": [
+            "45045",
+            "45083",
+            "45007",
+            "45077",
+            "45073",
+            "45047",
+            "45059",
+            "45021",
+            "45087",
+            "45001",
         ],
     }
     return assignment_special_places

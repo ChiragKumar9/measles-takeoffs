@@ -1,6 +1,7 @@
 from numpyro import enable_x64
 
 enable_x64()
+
 import os
 import pickle
 
@@ -13,6 +14,8 @@ import pandas as pd
 import polars as pl
 import yaml
 from matplotlib import rc
+from matplotlib.colors import Normalize
+from scipy import stats
 from shapely.geometry import MultiPolygon, Polygon
 
 data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
@@ -27,60 +30,6 @@ rc("font", **font)
 # read analysis params yaml
 with open("params.yml", "r") as f:
     params = yaml.safe_load(f)
-
-state_abbreviations = {
-    "Alabama": "AL",
-    "Alaska": "AK",
-    "Arizona": "AZ",
-    "Arkansas": "AR",
-    "California": "CA",
-    "Colorado": "CO",
-    "Connecticut": "CT",
-    "Delaware": "DE",
-    "District of Columbia": "DC",
-    "Florida": "FL",
-    "Georgia": "GA",
-    "Hawaii": "HI",
-    "Idaho": "ID",
-    "Illinois": "IL",
-    "Indiana": "IN",
-    "Iowa": "IA",
-    "Kansas": "KS",
-    "Kentucky": "KY",
-    "Louisiana": "LA",
-    "Maine": "ME",
-    "Maryland": "MD",
-    "Massachusetts": "MA",
-    "Michigan": "MI",
-    "Minnesota": "MN",
-    "Mississippi": "MS",
-    "Missouri": "MO",
-    "Montana": "MT",
-    "Nebraska": "NE",
-    "Nevada": "NV",
-    "New Hampshire": "NH",
-    "New Jersey": "NJ",
-    "New Mexico": "NM",
-    "New York": "NY",
-    "North Carolina": "NC",
-    "North Dakota": "ND",
-    "Ohio": "OH",
-    "Oklahoma": "OK",
-    "Oregon": "OR",
-    "Pennsylvania": "PA",
-    "Rhode Island": "RI",
-    "South Carolina": "SC",
-    "South Dakota": "SD",
-    "Tennessee": "TN",
-    "Texas": "TX",
-    "Utah": "UT",
-    "Vermont": "VT",
-    "Virginia": "VA",
-    "Washington": "WA",
-    "West Virginia": "WV",
-    "Wisconsin": "WI",
-    "Wyoming": "WY",
-}
 
 
 def setup_plot(nrows, ncols):
@@ -113,127 +62,98 @@ def setup_plot(nrows, ncols):
     return fig, ax
 
 
-def plot_validation(df, fig, ax):
-    # we have validation data for 2023, 2024, and 2025
-    projection_years = [2023, 2024, 2025]
-    df = df.filter(pl.col("year").is_in(projection_years))
-    df = df.with_columns(
-        # must be either "min", "ordinal", "random" to be true percentiles
-        overall_rank_order=pl.col("cases_outbreak").rank(
-            "random", descending=False, seed=108
-        )
-        - 1
-    ).with_columns(
-        overall_percentile=pl.col("overall_rank_order")
-        / pl.col("overall_rank_order").max()
-        * 100
-    )
-    dfs_by_year = {}
-    for year in projection_years:
+def plot_metric_over_values(df, samples, with_importation, x_label, fig, ax):
+    colors = ["chartreuse", "forestgreen", "darkgreen"]
+    shapes = ["o", "s", "^"]
+    for idx, year in enumerate([2023, 2024, 2025]):
+        year_mask = (df["year"] == year).to_jax()
         df_year = df.filter(pl.col("year") == year)
-        # calculate the rank order of the samples
-        with open(
-            os.path.join(
-                output_dir,
-                f"samples_partial_pooled_poisson_validation_testing_{year}.pkl",
-            ),
-            "rb",
-        ) as file:
-            projections = pickle.load(file)
+        if with_importation is None:
+            outcome = "cases_outbreak"
+        else:
+            outcome = "cases"
+        cases_sorted = df_year[outcome].sort().unique().to_list()
+        metric_median = jnp.array([])
+        metric_lower = jnp.array([])
+        metric_upper = jnp.array([])
+        metric_p_values_median = jnp.array([])
+        for val in cases_sorted:
+            mask = df_year[outcome].to_jax() >= val
+            true = df_year.filter(pl.col(outcome) >= float(val))[
+                outcome
+            ].to_jax()
+            samples_year = samples[idx][:, mask]
+            # get the averages to match
+            if with_importation is not None:
+                samples_year *= with_importation[:, year_mask][:, mask]
+            # samples_year = samples_year - jnp.mean(samples_year, axis=1, keepdims=True)
+            # samples_year = samples_year / jnp.std(samples_year, axis=1, keepdims=True) * jnp.std(true)
+            # samples_year = samples_year + jnp.mean(true)
+            # metric_values = jnp.array([])
+            # metric_p_values = jnp.array([])
+            metric_values = jnp.array(
+                [jnp.corrcoef(true, c)[0, 1] ** 2 * 100 for c in samples_year]
+            )
 
-        ranked_projections = np.argsort(
-            np.argsort(-projections, axis=1, kind="stable"),
-            axis=1,
-            kind="stable",
-        )
-
-        df_year = df_year.with_columns(
-            median_risk_rank=pl.Series(
-                jnp.median(ranked_projections, axis=0).__array__()
-            ),
-            lower_risk_rank=pl.Series(
-                jnp.percentile(ranked_projections, 25, axis=0).__array__()
-            ),
-            upper_risk_rank=pl.Series(
-                jnp.percentile(ranked_projections, 75, axis=0).__array__()
-            ),
-        ).with_columns(
-            # turn into percentiles
-            median_risk_rank=pl.col("median_risk_rank") * 100 / df_year.height,
-            lower_risk_rank=pl.col("lower_risk_rank") * 100 / df_year.height,
-            upper_risk_rank=pl.col("upper_risk_rank") * 100 / df_year.height,
-        )
-        df_year = df_year.sort("median_risk_rank")
-        dfs_by_year[year] = df_year
-
-    # want to plot overall rank vs predicted rank
-    df_ranked = df.sort("overall_rank_order")
-    year_color = {
-        2023: "#78c679",
-        2024: "#238443",
-        2025: "#004529",
-    }
-    for year in projection_years:
+            # metric_p_values_median = jnp.append(metric_p_values_median, jnp.nanmedian(metric_p_values))
+            metric_median = jnp.append(
+                metric_median, jnp.nanmedian(metric_values)
+            )
+            metric_lower = jnp.append(
+                metric_lower, jnp.nanpercentile(metric_values, 2.5)
+            )
+            metric_upper = jnp.append(
+                metric_upper, jnp.nanpercentile(metric_values, 97.5)
+            )
+        # truncate cases_sorted because some of the metric_values may have been nan
+        # cases_sorted = cases_sorted[: len(metric_median)]
         ax.errorbar(
-            dfs_by_year[year]["cases_outbreak"],
-            dfs_by_year[year]["median_risk_rank"],
+            cases_sorted,
+            metric_median,
             yerr=np.array(
                 [
-                    np.array(
-                        [
-                            dfs_by_year[year]["median_risk_rank"].to_numpy()
-                            - dfs_by_year[year]["lower_risk_rank"].to_numpy()
-                        ]
-                    ),
-                    np.array(
-                        [
-                            dfs_by_year[year]["upper_risk_rank"].to_numpy()
-                            - dfs_by_year[year]["median_risk_rank"].to_numpy()
-                        ]
-                    ),
+                    [metric_median.__array__() - metric_lower.__array__()],
+                    [metric_upper.__array__() - metric_median.__array__()],
                 ]
             )[:, 0, :],
-            fmt="o",
-            color=year_color[year],
-            ecolor=year_color[year],
-            label=str(year),
-            alpha=0.7,
+            label=f"{year}",
+            capsize=0,
+            fmt=shapes[idx],
+            alpha=0.6,
+            ecolor=colors[idx],
+            color=colors[idx],
         )
-    # counter_by_year = {2023: 0, 2024: 0, 2025: 0}
-    # for outbreak_size, year in zip(
-    #     df_ranked['cases_outbreak'],
-    #     df_ranked['year']
-    # ):
-    #     # get the relevant value for the year
-    #     predicted_rank = dfs_by_year[year]['median_risk_rank'][counter_by_year[year]]
-    #     lower_rank = dfs_by_year[year]['lower_risk_rank'][counter_by_year[year]]
-    #     upper_rank = dfs_by_year[year]['upper_risk_rank'][counter_by_year[year]]
-    #     # augment the counter for the given year
-    #     counter_by_year[year] += 1
-
-    #     # plot
-    #     if counter_by_year[year] == 1:
-    #         label = str(year)
-    #     else:
-    #         label = None
-    #     ax.errorbar(
-    #         outbreak_size,
-    #         predicted_rank,
-    #         yerr = [[predicted_rank - lower_rank],
-    #                 [upper_rank - predicted_rank]],
-    #         fmt='o',
-    #         color=year_color[year],
-    #         ecolor=year_color[year],
-    #         label=label,
-    #         alpha = 0.7
-    #     )
-
-    ax.set_xlabel("Reported cases (N)")
-    ax.set_xscale("symlog")
-    ax.set_ylabel("Predicted outbreak size percentile")
+        # ax.errorbar(
+        #     cases_sorted,
+        #     metric_median,
+        #     yerr=np.array([[metric_median.__array__() - metric_lower.__array__()], [metric_upper.__array__() - metric_median.__array__()]])[:, 0, :],
+        #     capsize=0,
+        #     fmt = 'none',
+        #     alpha = 0.6,
+        #     ecolor = 'grey',
+        # )
+        # ax.scatter(
+        #     cases_sorted,
+        #     metric_median,
+        #     label=f"{year}",
+        #     marker=shapes[idx],
+        #     c=metric_p_values_median,
+        #     cmap = 'viridis',
+        #     vmin = 0,
+        #     vmax = 1,
+        # )
+    # add colorbar
+    # norm = Normalize(vmin = 0, vmax = 1)
+    # fig.colorbar(plt.cm.ScalarMappable(norm=norm, cmap='viridis'), ax=ax, label='Median p-value')
+    ax.set_xlabel(x_label)
+    ax.set_ylabel(r"$R^2$ (%)")
     ax.legend()
-
-    return fig, ax
+    ax.set_ylim([0, 103])
+    if with_importation is None:
+        ax.set_xscale("symlog")
+    else:
+        ax.set_xscale("log")
+        ax.set_xlim(0.9)
 
 
 def map_fips_code_data(
@@ -363,20 +283,17 @@ def map_fips_code_data(
 
     if cbar_type == "percentile_risk":
         norm = mcolors.Normalize(vmin=0, vmax=100)
-        breakpoints = [-1, 10, 20, 30, 40, 50, 60, 70, 80, 90, 101]
+        breakpoints = [-1, 20, 40, 60, 80, 101]
+        cmap = plt.get_cmap("Reds")
         cmap = mcolors.ListedColormap(
-            [
-                "#fff5f0",
-                "#fee0d2",
-                "#fcbba1",
-                "#fc9272",
-                "#fb6a4a",
-                "#ef3b2c",
-                "#cb181d",
-                "#a50f15",
-                "#67000d",
-                "#3f0000",
-            ]
+            [cmap(i) for i in np.linspace(0.3, 1.0, 5)]
+        )
+    elif cbar_type == "probability":
+        norm = mcolors.Normalize(vmin=0, vmax=1)
+        breakpoints = [-1, 0.2, 0.4, 0.6, 0.8, 1.01]
+        cmap = plt.get_cmap("Reds")
+        cmap = mcolors.ListedColormap(
+            [cmap(i) for i in np.linspace(0.3, 1.0, 5)]
         )
 
     elif cbar_type == "exemptions":
@@ -448,21 +365,21 @@ def map_fips_code_data(
             cbar.ax.tick_params(labelsize=24, rotation=-60, length=0)
 
         if cbar_type == "percentile_risk":
-            cbar.set_ticks([10, 20, 30, 40, 50, 60, 70, 80, 90, 100])
+            cbar.set_ticks([20, 40, 60, 80, 100])
             cbar.set_ticklabels(
                 [
-                    "Bottom 10%",
-                    "10%-20%",
-                    "20%-30%",
-                    "30%-40%",
-                    "40%-50%",
-                    "50%-60%",
-                    "60%-70%",
-                    "70%-80%",
-                    "80%-90%",
-                    "Top 10%",
+                    "Bottom 20%",
+                    "20%-40%",
+                    "40%-60%",
+                    "60%-80%",
+                    "Top 20%",
                 ]
             )
+            cbar.ax.tick_params(labelsize=24, rotation=-60, length=0)
+
+        if cbar_type == "probability":
+            cbar.set_ticks([0.0, 0.2, 0.4, 0.6, 0.8, 1.0])
+            cbar.set_ticklabels(["0.0", "0.2", "0.4", "0.6", "0.8", "1.0"])
             cbar.ax.tick_params(labelsize=24, rotation=-60, length=0)
 
     # Add state borders
@@ -523,165 +440,7 @@ def map_fips_code_data(
     return fig, ax
 
 
-def plot_county_risk_fcn_of_coverage(samples, df, fig, ax):
-    df = df.with_columns(projections=samples.T.__array__())
-
-    # make an incidence measure
-    df = df.with_columns(incidence=pl.col("projections") / pl.col("pop"))
-
-    # extract the incidence data to do numpy rank ordering
-    incidence = np.vstack(df["incidence"].to_numpy())
-    percentile_projections = np.argsort(
-        np.argsort(incidence, axis=0, kind="stable"), axis=0, kind="stable"
-    )
-    percentile_projections = (
-        percentile_projections / percentile_projections.max() * 100
-    )
-
-    # now calculate median and 95% CrI across samples
-    df = df.with_columns(
-        median_risk_rank=pl.Series(
-            jnp.median(percentile_projections, axis=1).__array__()
-        ),
-        lower_risk_rank=pl.Series(
-            jnp.percentile(percentile_projections, 2.5, axis=1).__array__()
-        ),
-        upper_risk_rank=pl.Series(
-            jnp.percentile(percentile_projections, 97.5, axis=1).__array__()
-        ),
-        # median incidences
-        median_projection=pl.Series(jnp.median(incidence, axis=1).__array__()),
-        lower_projection=pl.Series(
-            jnp.percentile(incidence, 25, axis=1).__array__()
-        ),
-        upper_projection=pl.Series(
-            jnp.percentile(incidence, 75, axis=1).__array__()
-        ),
-    )
-
-    # now plot rank vs MMR coverage
-    ax.errorbar(
-        df["estimated_mmr_cov"].to_numpy(),
-        df["median_risk_rank"].to_numpy(),
-        yerr=0,
-        # [[df['median_risk_rank'].to_numpy() - df['lower_risk_rank'].to_numpy()],
-        #         [df['upper_risk_rank'].to_numpy() - df['median_risk_rank'].to_numpy()]],
-        fmt="o",
-        alpha=0.7,
-        ecolor="black",
-        color="black",
-    )
-
-    ax.set_ylabel("Risk percentile")
-    ax.set_xlabel("MMR coverage (%)")
-
-    return fig, ax
-
-
-def plot_state_risk_fcn_of_coverage(samples, df, fig, ax):
-    df = df.with_columns(projections=samples.T.__array__())
-    # group by state and add projections
-    state_df = df.group_by("state").agg(
-        pl.col("projections").map_elements(
-            lambda x: np.sum(np.stack([x]), axis=0).tolist(),
-            return_dtype=pl.List(pl.Int64),
-        ),
-        # count number of counties per state
-        n_counties=pl.col("fips").count(),
-        mmr_coverage=pl.col("estimated_mmr_cov").mean(),
-        total_population=pl.col("pop").sum(),
-    )
-
-    # now sum across all counties
-    state_df = state_df.with_columns(
-        projections=pl.col("projections").map_elements(
-            lambda x: np.array(x).sum(axis=0).tolist(),
-            return_dtype=pl.List(pl.Int64),
-        )
-    )
-
-    # make an incidence measure
-    state_df = state_df.with_columns(
-        incidence=pl.col("projections") / pl.col("total_population")
-    )
-
-    # extract the incidence data to do numpy rank ordering
-    incidence = np.vstack(state_df["incidence"].to_numpy())
-    percentile_projections = np.argsort(
-        np.argsort(incidence, axis=0, kind="stable"), axis=0, kind="stable"
-    )
-    percentile_projections = (
-        percentile_projections / percentile_projections.max() * 100
-    )
-
-    # now calculate median and 95% CrI across samples
-    state_df = state_df.with_columns(
-        median_risk_rank=pl.Series(
-            jnp.median(percentile_projections, axis=1).__array__()
-        ),
-        lower_risk_rank=pl.Series(
-            jnp.percentile(percentile_projections, 2.5, axis=1).__array__()
-        ),
-        upper_risk_rank=pl.Series(
-            jnp.percentile(percentile_projections, 97.5, axis=1).__array__()
-        ),
-        # median incidences
-        median_projection=pl.Series(jnp.median(incidence, axis=1).__array__()),
-        lower_projection=pl.Series(
-            jnp.percentile(incidence, 2.5, axis=1).__array__()
-        ),
-        upper_projection=pl.Series(
-            jnp.percentile(incidence, 97.5, axis=1).__array__()
-        ),
-    )
-
-    # get state abbreviations
-    state_df = state_df.with_columns(
-        state_abbr=pl.col("state").replace(state_abbreviations)
-    )
-
-    # now plot rank vs MMR coverage
-    for cov, median_risk, lower_risk, upper_risk, state in zip(
-        state_df["mmr_coverage"],
-        state_df["median_risk_rank"],
-        state_df["lower_risk_rank"],
-        state_df["upper_risk_rank"],
-        state_df["state_abbr"],
-    ):
-        # ax.errorbar(
-        #     cov,
-        #     median_risk,
-        #     yerr = [[median_risk - lower_risk],
-        #             [upper_risk - median_risk]],
-        #     fmt='none',
-        #     alpha=0.7,
-        #     ecolor='black',
-        # )
-
-        ax.scatter(cov, median_risk, s=0, alpha=0.0)
-
-        ax.text(
-            cov,
-            median_risk,
-            state,
-            fontsize=18,
-            va="center",
-            ha="center",
-        )
-
-    ax.set_ylabel("Risk percentile")
-    ax.set_xlabel("MMR coverage (%)")
-
-    return fig, ax
-
-
 if __name__ == "__main__":
-    df = pl.read_csv(
-        os.path.join(data_dir, "analysis_dataset.csv"),
-        # make sure we read fips codes as strings
-        schema_overrides={"fips": pl.String},
-    )
-
     fig, ax = setup_plot(2, 2)  # type: ignore
 
     ax[0, 0].text(  # type: ignore
@@ -694,66 +453,74 @@ if __name__ == "__main__":
         va="top",
         ha="right",
     )
-
-    plot_validation(df, fig, ax[0, 0])  # type: ignore
-
-    with open(
-        os.path.join(
-            output_dir,
-            "risk_projections.pkl",
-        ),
-        "rb",
-    ) as f:
-        projections = pickle.load(f)
-
-    df = pl.read_csv(
-        os.path.join(output_dir, "projection_dataset.csv"),
+    df_train = pl.read_csv(
+        os.path.join(data_dir, "analysis_dataset.csv"),
         # make sure we read fips codes as strings
         schema_overrides={"fips": pl.String},
     )
 
-    incidence = projections / df["pop"].to_numpy()
+    import_df = pl.read_csv(
+        os.path.join(output_dir, "empirical_importation_probability.csv"),
+        # make sure we read fips codes as strings
+        schema_overrides={"fips": pl.String},
+    )
+    with open(
+        os.path.join(
+            output_dir,
+            "empirical_importation_probability_samples.pkl",
+        ),
+        "rb",
+    ) as f:
+        samples = pickle.load(f)
+    import_df = import_df.with_columns(
+        importation_probability_samples=pl.Series(samples)
+    )
+    import_df = import_df.filter(pl.col("type") == "train")
 
-    percentile_projections = np.argsort(
-        np.argsort(incidence, axis=1, kind="stable"), axis=1, kind="stable"
-    )
-    percentile_projections = (
-        percentile_projections / percentile_projections.max() * 100
-    )
-
-    # concatenate to dataframe so we can print out counties by risk
-    df = df.with_columns(
-        median_risk_rank=pl.Series(
-            jnp.median(percentile_projections, axis=0).__array__()
-        ),
-        lower_risk_rank=pl.Series(
-            jnp.percentile(percentile_projections, 2.5, axis=0).__array__()
-        ),
-        upper_risk_rank=pl.Series(
-            jnp.percentile(percentile_projections, 97.5, axis=0).__array__()
-        ),
-        # median projections
-        median_projection=pl.Series(jnp.median(incidence, axis=0).__array__()),
-        lower_projection=pl.Series(
-            jnp.percentile(incidence, 2.5, axis=0).__array__()
-        ),
-        upper_projection=pl.Series(
-            jnp.percentile(incidence, 97.5, axis=0).__array__()
-        ),
-    )
-    print(
-        df.sort("median_risk_rank")
-        .select(
+    # join up with df
+    df_train = df_train.join(
+        import_df.select(
             [
+                "county",  # rather than fips because we have some regions
                 "state",
-                "county",
-                "fips",
-                "median_risk_rank",
-                "median_projection",
+                "year",
+                "importation_probability_samples",
             ]
-        )
-        .to_pandas()
-        .head(60)
+        ),
+        on=["county", "state", "year"],
+        how="left",
+    )
+    importation_samples = jnp.array(
+        np.vstack(df_train["importation_probability_samples"].to_numpy())  # type: ignore
+    ).T
+
+    samples = []
+    for idx, year in enumerate([2023, 2024, 2025]):
+        with open(
+            os.path.join(
+                output_dir,
+                f"samples_partial_pooled_poisson_validation_testing_{year}_pool=True_CAR=False_All covariates.pkl",
+            ),
+            "rb",
+        ) as f:
+            m = pickle.load(
+                f,
+            )
+        samples.append(m)
+
+    plot_metric_over_values(
+        df_train,
+        samples,
+        with_importation=importation_samples,
+        x_label="Case threshold",
+        fig=fig,
+        ax=ax[0, 0],  # type: ignore
+    )
+
+    df = pl.read_csv(
+        os.path.join(output_dir, "assembled_projection_results.csv"),
+        # make sure we read fips codes as strings
+        schema_overrides={"fips": pl.String},
     )
 
     ax[0, 1].text(  # type: ignore
@@ -768,7 +535,7 @@ if __name__ == "__main__":
     )
     map_fips_code_data(
         df["fips"],
-        df["median_risk_rank"],
+        df["median_unconditioned_risk_rank"],
         fig,
         ax[0, 1],  # type: ignore
         cbar_label="Risk percentile",
@@ -786,7 +553,15 @@ if __name__ == "__main__":
         va="top",
         ha="right",
     )
-    plot_county_risk_fcn_of_coverage(projections, df, fig, ax[1, 0])  # type: ignore
+    map_fips_code_data(
+        df["fips"],
+        df["median_conditioned_risk_rank"],
+        fig,
+        ax[1, 0],  # type: ignore
+        cbar_label="Import-conditioned risk percentile",
+        cbar_type="percentile_risk",
+        point_data=None,
+    )
 
     ax[1, 1].text(  # type: ignore
         -0.05,
@@ -798,8 +573,15 @@ if __name__ == "__main__":
         va="top",
         ha="right",
     )
-
-    plot_state_risk_fcn_of_coverage(projections, df, fig, ax[1, 1])  # type: ignore
+    map_fips_code_data(
+        df["fips"],
+        df["importation_probability_median"],
+        fig,
+        ax[1, 1],  # type: ignore
+        cbar_label="Importation probability",
+        cbar_type="probability",
+        point_data=None,
+    )
 
     plt.tight_layout()
 

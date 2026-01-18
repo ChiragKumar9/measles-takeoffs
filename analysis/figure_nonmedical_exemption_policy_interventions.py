@@ -1,5 +1,4 @@
 import os
-import pickle
 
 import geopandas as gpd
 import matplotlib.colors as mcolors
@@ -26,7 +25,7 @@ with open("params.yml", "r") as f:
 
 
 def setup_plot(nrows, ncols):
-    fig, ax = plt.subplots(nrows, ncols, figsize=(30, 7.5))
+    fig, ax = plt.subplots(nrows, ncols, figsize=(20, 15))
     if nrows * ncols == 1:
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
@@ -313,13 +312,13 @@ if __name__ == "__main__":
     )
 
     # map of risk
-    fig, ax = setup_plot(1, 3)  # type: ignore
+    fig, ax = setup_plot(2, 2)  # type: ignore
 
-    ax[0].text(  # type: ignore
+    ax[0, 0].text(  # type: ignore
         -0.05,
         1.08,
         "a",
-        transform=ax[0].transAxes,  # type: ignore
+        transform=ax[0, 0].transAxes,  # type: ignore
         fontsize=24,
         fontweight="bold",
         va="top",
@@ -329,28 +328,39 @@ if __name__ == "__main__":
         df["fips"],
         df["nonmed_exempt_pct"],
         fig,
-        ax[0],  # type: ignore
+        ax[0, 0],  # type: ignore
         cbar_label="Nonmedical exemption rate (%)",
         cbar_type="exemptions",
         point_data=None,
     )
 
-    ax[1].text(  # type: ignore
+    ax[0, 1].text(  # type: ignore
         -0.05,
         1.08,
         "b",
-        transform=ax[1].transAxes,  # type: ignore
+        transform=ax[0, 1].transAxes,  # type: ignore
         fontsize=24,
         fontweight="bold",
         va="top",
         ha="right",
     )
 
-    ax[2].text(  # type: ignore
+    ax[1, 0].text(  # type: ignore
         -0.05,
         1.08,
         "c",
-        transform=ax[2].transAxes,  # type: ignore
+        transform=ax[1, 0].transAxes,  # type: ignore
+        fontsize=24,
+        fontweight="bold",
+        va="top",
+        ha="right",
+    )
+
+    ax[1, 1].text(  # type: ignore
+        -0.05,
+        1.08,
+        "d",
+        transform=ax[1, 1].transAxes,  # type: ignore
         fontsize=24,
         fontweight="bold",
         va="top",

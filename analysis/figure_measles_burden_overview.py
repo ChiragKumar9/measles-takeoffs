@@ -403,15 +403,107 @@ if __name__ == "__main__":
         schema_overrides={"fips": pl.String},
     )
     # let's just plot Fulton and Gwinnett counties over Fulton county only
-    df = df.with_columns(
-        fips=pl.when(pl.col("county") == "Fulton and Gwynett")
-        .then(pl.lit("13121"))
-        .otherwise(pl.col("fips")),
-        # east tennessee over knox county
-    ).with_columns(
-        fips=pl.when(pl.col("county") == "East tennessee?")
-        .then(pl.lit("47093"))
-        .otherwise(pl.col("fips")),
+    df = (
+        df.with_columns(
+            fips=pl.when(pl.col("county") == "Fulton and Gwynett")
+            .then(pl.lit("13121"))
+            .otherwise(pl.col("fips")),
+            # east tennessee over knox county
+        )
+        .with_columns(
+            fips=pl.when(pl.col("county") == "East tennessee?")
+            .then(pl.lit("47093"))
+            .otherwise(pl.col("fips")),
+        )
+        .with_columns(
+            fips=pl.when(pl.col("county") == "Central, Utah")
+            .then(pl.lit("49039"))
+            .otherwise(pl.col("fips"))
+        )
+        .with_columns(
+            fips=pl.when(pl.col("county") == "Southwest Health District, Utah")
+            .then(pl.lit("49001"))
+            .otherwise(pl.col("fips"))
+        )
+        .with_columns(
+            fips=pl.when(pl.col("county") == "Western, Iowa")
+            .then(pl.lit("19193"))
+            .otherwise(pl.col("fips"))
+        )
+        .with_columns(
+            fips=pl.when(pl.col("county") == "Eastern, Iowa")
+            .then(pl.lit("19061"))
+            .otherwise(pl.col("fips"))
+        )
+        .with_columns(
+            fips=pl.when(
+                pl.col("county") == "Mid-Cumberland Region, Tennessee"
+            )
+            .then(pl.lit("47043"))
+            .otherwise(pl.col("fips"))
+        )
+        .with_columns(
+            fips=pl.when(pl.col("county") == "Bear River, Utah")
+            .then(pl.lit("49003"))
+            .otherwise(pl.col("fips"))
+        )
+        .with_columns(
+            fips=pl.when(pl.col("county") == "Southeast Health District, Utah")
+            .then(pl.lit("49007"))
+            .otherwise(pl.col("fips"))
+        )
+        .with_columns(
+            fips=pl.when(pl.col("county") == "North, Alabama")
+            .then(pl.lit("01019"))
+            .otherwise(pl.col("fips"))
+        )
+        .with_columns(
+            fips=pl.when(
+                pl.col("county") == "Upper Cumberland Region, Tennessee"
+            )
+            .then(pl.lit("47015"))
+            .otherwise(pl.col("fips"))
+        )
+        .with_columns(
+            fips=pl.when(
+                pl.col("county")
+                == "Nashville-Davidson County Region, Tennessee"
+            )
+            .then(pl.lit("47037"))
+            .otherwise(pl.col("fips"))
+        )
+        .with_columns(
+            fips=pl.when(
+                pl.col("county") == "Twin Cities Metro Area, Minnesota"
+            )
+            .then(pl.lit("27003"))
+            .otherwise(pl.col("fips"))
+        )
+        .with_columns(
+            fips=pl.when(pl.col("county") == "Central, Iowa")
+            .then(pl.lit("19179"))
+            .otherwise(pl.col("fips"))
+        )
+        .with_columns(
+            fips=pl.when(pl.col("county") == "Region 9, Louisiana")
+            .then(pl.lit("22063"))
+            .otherwise(pl.col("fips"))
+        )
+        .with_columns(
+            fips=pl.when(pl.col("county") == "Northwest Region, Virginia")
+            .then(pl.lit("51015"))
+            .otherwise(pl.col("fips"))
+        )
+        .with_columns(
+            fips=pl.when(pl.col("county") == "Eastern Region, Virginia")
+            .then(pl.lit("51550"))
+            .otherwise(pl.col("fips"))
+        )
+        .with_columns(
+            fips=pl.when(pl.col("county") == "Upstate, South Carolina")
+            .then(pl.lit("45045"))
+            .otherwise(pl.col("fips"))
+        )
     )
 
     df_by_fips = df.group_by("fips")
