@@ -230,7 +230,7 @@ if __name__ == "__main__":
                             ].to_numpy()
                             * mmr_effectiveness
                             / 100
-                        )
+                        )  # type: ignore
                         susceptible_fraction = 1 - immune
                         # calculate final outbreak size
                         R0 = 15.0  # measles basic reproduction number

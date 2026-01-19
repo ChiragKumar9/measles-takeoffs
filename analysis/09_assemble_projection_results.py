@@ -154,7 +154,7 @@ df = df.with_columns(
     ),
 )
 
-state_df = df.group_by(["state", "year", "type"]).agg(
+state_df = df.group_by(["state", "type"]).agg(
     pl.col("conditioned_projections").map_elements(
         lambda x: np.sum(np.stack([x]), axis=0).tolist(),
         return_dtype=pl.List(pl.Int64),
@@ -298,7 +298,6 @@ df = df.select(
 state_df = state_df.select(
     [
         "state",
-        "year",
         "type",
         # conditioned on importation risk ranks
         "median_conditioned_risk_rank",

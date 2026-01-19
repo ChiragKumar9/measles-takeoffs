@@ -232,3 +232,41 @@ def plot_validation(df, import_df, fig, ax):
     ax.set_xticks([2023, 2024, 2025], labels=[2023, 2024, 2025])
 
     return fig, ax
+
+
+    # get the five states with the highest levels of NMEs
+    top_5_nme_states = df.group_by("state").agg(
+        nme_pct = (pl.col("nonmed_exempt_pct") * pl.col("pop_5_9") / pl.sum("pop_5_9")).sum()
+    ).sort("nme_pct", descending=True).head(5)['state'].to_list()
+    # set the NMEs to 0 for these states
+    for state in top_5_nme_states:
+        state_mask = df['state'] == state
+        df = df.with_columns(
+            estimated_mmr_cov = pl.when(state_mask)
+            .then(
+                pl.col("estimated_mmr_cov") + slope * pl.col("nonmed_exempt_pct") + intercept
+            )
+            .otherwise(pl.col("estimated_mmr_cov")),
+            nonmed_exempt_pct = pl.when(state_mask)
+            .then(pl.lit(0.0))
+            .otherwise(pl.col("nonmed_exempt_pct")),
+        )
+
+    # top 5 highest risk states
+    top_5_risk_states = pl.read_csv(
+        os.path.join(output_dir, "state_assembled_projection_results.csv")
+    ).filter(pl.col("type") == "projection").sort(by = 'median_unconditioned_risk_rank', descending = True).head(5)['state'].to_list()
+
+    # set the NMEs to 0 for these states as well
+    for state in top_5_risk_states:
+        state_mask = df['state'] == state
+        df = df.with_columns(
+            estimated_mmr_cov = pl.when(state_mask)
+            .then(
+                pl.col("estimated_mmr_cov") + slope * pl.col("nonmed_exempt_pct") + intercept
+            )
+            .otherwise(pl.col("estimated_mmr_cov")),
+            nonmed_exempt_pct = pl.when(state_mask)
+            .then(pl.lit(0.0))
+            .otherwise(pl.col("nonmed_exempt_pct")),
+        )

@@ -147,6 +147,8 @@ if __name__ == "__main__":
         type=pl.lit("train"),
     )
 
+    df.write_csv(os.path.join(output_dir, "projection_dataset.csv"))
+
     # now apply the same scaler to our df
     projection_df = df.select(
         [

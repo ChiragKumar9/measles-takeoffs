@@ -30,7 +30,7 @@ if __name__ == "__main__":
         population = df["pop_5_9"].to_numpy()
         # calculate immune fraction based on coverage and effectiveness
         mmr_effectiveness = 0.93
-        immune = df["estimated_mmr_cov"].to_numpy() * mmr_effectiveness / 100
+        immune = df["estimated_mmr_cov"].to_numpy() * mmr_effectiveness / 100  # type: ignore
         susceptible_fraction = 1 - immune
         # calculate final outbreak size
         R0 = 15.0  # measles basic reproduction number

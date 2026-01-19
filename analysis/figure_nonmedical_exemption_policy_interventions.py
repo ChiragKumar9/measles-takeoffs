@@ -27,7 +27,7 @@ with open("params.yml", "r") as f:
 
 
 def setup_plot(nrows, ncols):
-    fig, ax = plt.subplots(nrows, ncols, figsize=(20, 15))
+    fig, ax = plt.subplots(nrows, ncols, figsize=(20, 17))
     if nrows * ncols == 1:
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
@@ -685,10 +685,97 @@ def coverage_increase_nme_policy_change(df, fig, ax):
     return regression_df
 
 
+def scenario_results(df, fig, ax):
+    # make violin plots of the percent change in outbreak risk
+    # the scenarios are
+    scenarios = {
+        "Existing NME bans": "add_nmes_back",
+        "Highest risk states": "top_risk_state_conditioned",
+        "Highest NME states": "top_nme_state",
+        "Highest risk counties": "top_ten_pct_counties",
+    }
+
+    # for idx, (scenario, column) in enumerate(scenarios.items()):
+    #     scenario_df = df.filter(pl.col(column) == True)
+    #     median = np.mean(scenario_df['median_percent_change'].to_numpy() == -100) * 100
+    #     lower = np.mean(scenario_df['lower_percent_change'].to_numpy() == -100) * 100
+    #     upper = np.mean(scenario_df['upper_percent_change'].to_numpy() == -100) * 100
+
+    #     ax.errorbar(
+    #         idx,
+    #         median,
+    #         yerr=[[median - upper], [lower - median]],
+    #         fmt='o',
+    #         color='black',
+    #         capsize=5,
+    #     )
+
+    for idx, (scenario, column) in enumerate(scenarios.items()):
+        scenario_df = df.filter(pl.col(column) == True)
+        violinparts = ax.violinplot(
+            scenario_df["no_outbreak_samples"].drop_nans() * 100,
+            positions=[idx],
+            showextrema=False,
+        )
+
+        for pc in violinparts["bodies"]:
+            pc.set(facecolor="grey", alpha=0.4)
+
+        ax.errorbar(
+            x=[idx],
+            y=scenario_df["no_outbreak_samples"].drop_nans().median() * 100,
+            yerr=100
+            * np.array(
+                [
+                    scenario_df["no_outbreak_samples"].drop_nans().median()
+                    - scenario_df["no_outbreak_samples"]
+                    .drop_nans()
+                    .quantile(0.25),
+                    scenario_df["no_outbreak_samples"]
+                    .drop_nans()
+                    .quantile(0.75)
+                    - scenario_df["no_outbreak_samples"].drop_nans().median(),
+                ]
+            )[:, None],
+            fmt="o",
+            capsize=5,
+            capthick=2,
+            color="grey",
+        )
+
+    ax.set_xticks(range(len(scenarios)))
+    ax.set_xticklabels(list(scenarios.keys()), rotation=-45, ha="left")
+    ax.set_ylabel("Probability of no outbreak (%)")
+
+
+def plot_who_benefits_most(df, fig, ax):
+    df = df.filter(pl.col("top_risk_state_conditioned") == True)
+    ax.scatter(
+        df["nonmed_exempt_pct_raw"],
+        df["no_outbreak_samples"] * 100,
+        alpha=0.7,
+        color="grey",
+    )
+    # cbar = fig.colorbar(
+    #     plt.cm.ScalarMappable(cmap='viridis'),
+    #     ax=ax,
+    #     shrink=0.7,
+    #     aspect=20,
+    #     pad=0.0,
+    #     extend="neither",
+    #     orientation="vertical",
+    # )
+    ax.set_xlabel("Change in MMR coverage (%)")
+    ax.set_ylabel("Increase in probability of no outbreak (%)")
+
+
 if __name__ == "__main__":
     df = pl.read_csv(
         os.path.join(data_dir, "latest_vaccination_data.csv"),
-        schema_overrides={"fips": pl.String},
+        schema_overrides={
+            "fips": pl.String,
+            "estimated_mmr_cov_raw": pl.Float64,
+        },
     )
 
     # map of risk
@@ -740,6 +827,14 @@ if __name__ == "__main__":
         )
     )
 
+    df = pl.read_csv(
+        os.path.join(output_dir, "nme_policy_analysis_assembled_median.csv"),
+        schema_overrides={
+            "estimated_mmr_cov_raw": pl.Float64,
+            "nonmed_exempt_pct_raw": pl.Float64,
+        },
+    )
+
     ax[1, 0].text(  # type: ignore
         -0.05,
         1.08,
@@ -750,6 +845,7 @@ if __name__ == "__main__":
         va="top",
         ha="right",
     )
+    plot_data = scenario_results(df, fig, ax[1, 0])  # type: ignore
 
     ax[1, 1].text(  # type: ignore
         -0.05,
@@ -761,6 +857,7 @@ if __name__ == "__main__":
         va="top",
         ha="right",
     )
+    plot_who_benefits_most(df, fig, ax[1, 1])  # type: ignore
 
     fig.tight_layout()
     # save
