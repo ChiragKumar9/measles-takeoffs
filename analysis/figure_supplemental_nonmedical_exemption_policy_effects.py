@@ -61,7 +61,7 @@ def scenario_results(df, fig, ax, plot_total, remove_overlap):
     # the scenarios are
     scenarios = {
         "Existing NME bans": "add_nmes_back",
-        "Highest risk states": "top_risk_state_conditioned",
+        "Highest risk states": "top_risk_state_unconditioned",
         "Highest NME states": "top_nme_state",
         "Highest risk counties": "top_ten_pct_counties",
     }
@@ -89,7 +89,7 @@ def scenario_results(df, fig, ax, plot_total, remove_overlap):
                     ~(pl.col("top_ten_pct_counties") == True)
                 )
                 scenario_df = scenario_df.filter(
-                    ~(pl.col("top_risk_state_conditioned") == True)
+                    ~(pl.col("top_risk_state_unconditioned") == True)
                 )
         if plot_total:
             metric = "no_outbreak_samples_overall"

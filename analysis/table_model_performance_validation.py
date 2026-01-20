@@ -179,7 +179,6 @@ def performance_table(
                 # we are going to do this via quantile matching
                 # last_quantile_threshold = 0
                 samples_full = np.array(samples_full, dtype=np.float64)
-                samples_full_reference = samples_full.copy()
                 true_full = np.array(true_full, dtype=np.float64)
                 n_quantiles = 3
                 last_quantile_threshold = 0

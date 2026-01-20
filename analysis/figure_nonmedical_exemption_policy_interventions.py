@@ -690,7 +690,7 @@ def scenario_results(df, fig, ax):
     # the scenarios are
     scenarios = {
         "Existing NME bans": "add_nmes_back",
-        "Highest risk states": "top_risk_state_conditioned",
+        "Highest risk states": "top_risk_state_unconditioned",
         "Highest NME states": "top_nme_state",
         "Highest risk counties": "top_ten_pct_counties",
     }

@@ -145,8 +145,8 @@ def plot_immunity_effects_on_vaccine_coverage(df, fig, ax):
     ax.set_xticklabels(
         [
             "Baseline",
-            "No prior\noutbreaks",
-            "Covariate for\nprevious outbreak size",
+            "No prior\ncases",
+            "Covariate for\nprevious cases",
         ]
     )
     ax.set_ylabel(

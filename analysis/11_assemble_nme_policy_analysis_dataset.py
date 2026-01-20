@@ -179,14 +179,14 @@ if __name__ == "__main__":
         state_df = pl.read_csv(
             os.path.join(output_dir, "state_assembled_projection_results.csv")
         ).filter(pl.col("type") == "projection")
-        top_5_risk_states_conditioned = (
-            state_df.sort(by="median_conditioned_risk_rank", descending=True)
+        top_5_risk_states_unconditioned = (
+            state_df.sort(by="median_unconditioned_risk_rank", descending=True)
             .head(5)["state"]
             .to_list()
         )
 
-        top_5_risk_states_unconditioned = (
-            state_df.sort(by="median_unconditioned_risk_rank", descending=True)
+        top_5_risk_states_conditioned = (
+            state_df.sort(by="median_conditioned_risk_rank", descending=True)
             .head(5)["state"]
             .to_list()
         )
@@ -250,8 +250,8 @@ if __name__ == "__main__":
 
         df = df.with_columns(
             top_ten_pct_counties=pl.when(
-                pl.col("median_conditioned_risk_rank")
-                >= pl.max("median_conditioned_risk_rank") * 0.9
+                pl.col("median_unconditioned_risk_rank")
+                >= pl.max("median_unconditioned_risk_rank") * 0.9
             )
             .then(True)
             .otherwise(False)

@@ -403,7 +403,7 @@ if __name__ == "__main__":
     )
     plot_coverage_various_models(df, fig, ax[1])  # type: ignore
 
-    plt.tight_layout()
+    fig.tight_layout()
 
     # save
     fig.savefig(

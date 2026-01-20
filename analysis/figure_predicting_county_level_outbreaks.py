@@ -25,7 +25,7 @@ with open("params.yml", "r") as f:
     params = yaml.safe_load(f)
 
 
-def setup_plot(nrows, ncols, figsize=(30, 7.5)):
+def setup_plot(nrows, ncols, figsize=(30, 12)):
     fig, ax = plt.subplots(nrows, ncols, figsize=figsize)
     if nrows * ncols == 1:
         ax.spines["top"].set_visible(False)
@@ -690,7 +690,7 @@ if __name__ == "__main__":
     ax[1].text(  # type: ignore
         -0.25,
         1.08,
-        "c",
+        "b",
         transform=ax[1].transAxes,  # type: ignore
         fontsize=24,
         fontweight="bold",
@@ -725,7 +725,7 @@ if __name__ == "__main__":
     ax[2].text(  # type: ignore
         -0.25,
         1.08,
-        "d",
+        "c",
         transform=ax[2].transAxes,  # type: ignore
         fontsize=24,
         fontweight="bold",
@@ -740,7 +740,7 @@ if __name__ == "__main__":
         ax[2],  # type: ignore
     )
 
-    plt.tight_layout()
+    fig.tight_layout()
 
     # save
     fig.savefig(

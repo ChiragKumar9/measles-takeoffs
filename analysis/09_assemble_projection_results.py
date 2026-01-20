@@ -13,6 +13,8 @@ output_dir = os.path.join(
     os.path.dirname(os.path.dirname(__file__)), "outputs"
 )
 
+percentile_method = "average"
+
 # read the risk projections
 with open(
     os.path.join(
@@ -46,7 +48,9 @@ df = df.sort("estimated_mmr_cov_raw", descending=True)
 # extract the incidence data in this semi sorted form
 incidence = jnp.array(df["projections"]).T
 # now calculate the rank percentiles
-percentile_projections = rankdata(incidence, method="dense", axis=1) - 1
+percentile_projections = (
+    rankdata(incidence, method=percentile_method, axis=1) - 1
+)
 percentile_projections = (
     percentile_projections
     / (percentile_projections.max(axis=1, keepdims=True) + 1)
@@ -114,7 +118,7 @@ importation_probability_samples = np.vstack(
 unconditioned_risk_samples = importation_probability_samples * incidence
 # calculate the rank percentiles
 unconditioned_percentile_projections = (
-    rankdata(unconditioned_risk_samples, method="dense", axis=1) - 1
+    rankdata(unconditioned_risk_samples, method=percentile_method, axis=1) - 1
 )
 unconditioned_percentile_projections = (
     unconditioned_percentile_projections
@@ -194,7 +198,7 @@ state_df = state_df.with_columns(
 # extract the incidence data to do numpy rank ordering
 conditioned_incidence = np.vstack(state_df["conditioned_incidence"].to_numpy())  # type: ignore
 conditioned_percentile_projections = rankdata(
-    conditioned_incidence, method="dense", axis=0
+    conditioned_incidence, method=percentile_method, axis=0
 )
 conditioned_percentile_projections = (
     conditioned_percentile_projections
@@ -206,7 +210,7 @@ unconditioned_incidence = np.vstack(
     state_df["unconditioned_incidence"].to_numpy()  # type: ignore
 )
 unconditioned_percentile_projections = rankdata(
-    unconditioned_incidence, method="dense", axis=0
+    unconditioned_incidence, method=percentile_method, axis=0
 )
 unconditioned_percentile_projections = (
     unconditioned_percentile_projections

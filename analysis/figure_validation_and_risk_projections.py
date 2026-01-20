@@ -31,7 +31,7 @@ with open("params.yml", "r") as f:
 
 
 def setup_plot(nrows, ncols):
-    fig, ax = plt.subplots(nrows, ncols, figsize=(20, 15))
+    fig, ax = plt.subplots(nrows, ncols, figsize=(30, 7.5))
     if nrows * ncols == 1:
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
@@ -287,12 +287,12 @@ def map_fips_code_data(
             [cmap(i) for i in np.linspace(0.3, 1.0, 5)]
         )
     elif cbar_type == "probability":
-        norm = mcolors.Normalize(vmin=0, vmax=1)
+        norm = mcolors.LogNorm(vmin=counties_with_data["value"].min(), vmax=1)
         breakpoints = [-1, 0.2, 0.4, 0.6, 0.8, 1.01]
         cmap = plt.get_cmap("Reds")
-        cmap = mcolors.ListedColormap(
-            [cmap(i) for i in np.linspace(0.3, 1.0, 5)]
-        )
+        # cmap = mcolors.ListedColormap(
+        #     [cmap(i) for i in np.linspace(0.3, 1.0, 5)]
+        # )
 
     elif cbar_type == "exemptions":
         breakpoints = [-1.0, 2.5, 5.0, 10.0, 15.0, 20.0, 100.0]
@@ -376,8 +376,8 @@ def map_fips_code_data(
             cbar.ax.tick_params(labelsize=24, rotation=-60, length=0)
 
         if cbar_type == "probability":
-            cbar.set_ticks([0.0, 0.2, 0.4, 0.6, 0.8, 1.0])
-            cbar.set_ticklabels(["0.0", "0.2", "0.4", "0.6", "0.8", "1.0"])
+            # cbar.set_ticks([0.0, 0.2, 0.4, 0.6, 0.8, 1.0])
+            # cbar.set_ticklabels(["0.0", "0.2", "0.4", "0.6", "0.8", "1.0"])
             cbar.ax.tick_params(labelsize=24, rotation=-60, length=0)
 
     # Add state borders
@@ -439,13 +439,13 @@ def map_fips_code_data(
 
 
 if __name__ == "__main__":
-    fig, ax = setup_plot(2, 2)  # type: ignore
+    fig, ax = setup_plot(1, 3)  # type: ignore
 
-    ax[0, 0].text(  # type: ignore
+    ax[0].text(  # type: ignore
         -0.05,
         1.08,
         "a",
-        transform=ax[0, 0].transAxes,  # type: ignore
+        transform=ax[0].transAxes,  # type: ignore
         fontsize=24,
         fontweight="bold",
         va="top",
@@ -512,7 +512,7 @@ if __name__ == "__main__":
         with_importation=importation_samples,
         x_label="Case threshold",
         fig=fig,
-        ax=ax[0, 0],  # type: ignore
+        ax=ax[0],  # type: ignore
     )
 
     df = pl.read_csv(
@@ -521,11 +521,11 @@ if __name__ == "__main__":
         schema_overrides={"fips": pl.String},
     )
 
-    ax[0, 1].text(  # type: ignore
+    ax[1].text(  # type: ignore
         -0.05,
         1.08,
         "b",
-        transform=ax[0, 1].transAxes,  # type: ignore
+        transform=ax[1].transAxes,  # type: ignore
         fontsize=24,
         fontweight="bold",
         va="top",
@@ -535,37 +535,37 @@ if __name__ == "__main__":
         df["fips"],
         df["median_unconditioned_risk_rank"],
         fig,
-        ax[0, 1],  # type: ignore
+        ax[1],  # type: ignore
         cbar_label="Risk percentile",
         cbar_type="percentile_risk",
         point_data=None,
     )
 
-    ax[1, 0].text(  # type: ignore
+    # ax[1].text(  # type: ignore
+    #     -0.05,
+    #     1.08,
+    #     "b",
+    #     transform=ax[1].transAxes,  # type: ignore
+    #     fontsize=24,
+    #     fontweight="bold",
+    #     va="top",
+    #     ha="right",
+    # )
+    # map_fips_code_data(
+    #     df["fips"],
+    #     df["median_conditioned_risk_rank"],
+    #     fig,
+    #     ax[1],  # type: ignore
+    #     cbar_label="Import-conditioned risk percentile",
+    #     cbar_type="percentile_risk",
+    #     point_data=None,
+    # )
+
+    ax[2].text(  # type: ignore
         -0.05,
         1.08,
         "c",
-        transform=ax[1, 0].transAxes,  # type: ignore
-        fontsize=24,
-        fontweight="bold",
-        va="top",
-        ha="right",
-    )
-    map_fips_code_data(
-        df["fips"],
-        df["median_conditioned_risk_rank"],
-        fig,
-        ax[1, 0],  # type: ignore
-        cbar_label="Import-conditioned risk percentile",
-        cbar_type="percentile_risk",
-        point_data=None,
-    )
-
-    ax[1, 1].text(  # type: ignore
-        -0.05,
-        1.08,
-        "d",
-        transform=ax[1, 1].transAxes,  # type: ignore
+        transform=ax[2].transAxes,  # type: ignore
         fontsize=24,
         fontweight="bold",
         va="top",
@@ -575,13 +575,13 @@ if __name__ == "__main__":
         df["fips"],
         df["importation_probability_median"],
         fig,
-        ax[1, 1],  # type: ignore
+        ax[2],  # type: ignore
         cbar_label="Importation probability",
         cbar_type="probability",
         point_data=None,
     )
 
-    plt.tight_layout()
+    fig.tight_layout()
 
     # save
     fig.savefig(

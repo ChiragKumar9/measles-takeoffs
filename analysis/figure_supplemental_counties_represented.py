@@ -241,7 +241,7 @@ if __name__ == "__main__":
 
     plot_std_vaccine_coverage(df, fig, ax[2, 1])  # type: ignore
 
-    plt.tight_layout()
+    fig.tight_layout()
 
     # save
     fig.savefig(

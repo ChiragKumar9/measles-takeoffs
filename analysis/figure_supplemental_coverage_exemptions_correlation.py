@@ -136,7 +136,7 @@ if __name__ == "__main__":
         ax[2],  # type: ignore
     )
 
-    plt.tight_layout()
+    fig.tight_layout()
 
     # save
     fig.savefig(
