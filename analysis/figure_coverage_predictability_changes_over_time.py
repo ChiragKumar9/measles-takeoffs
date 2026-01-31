@@ -24,7 +24,7 @@ with open("params.yml", "r") as f:
 
 
 def setup_plot(nrows, ncols):
-    fig, ax = plt.subplots(nrows, ncols, figsize=(20, 15))
+    fig, ax = plt.subplots(nrows, ncols, figsize=(ncols * 10, nrows * 7.5))
     if nrows * ncols == 1:
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
@@ -37,7 +37,7 @@ def setup_plot(nrows, ncols):
             spine.set_position(("outward", 5))
         # put the grid behind
         ax.set_axisbelow(True)
-        return ax
+        return fig, ax
     for temp in ax.flatten():  # type: ignore
         temp.spines["top"].set_visible(False)
         temp.spines["right"].set_visible(False)
@@ -269,7 +269,7 @@ def plot_coverage_distribution(
     ax.legend(
         [violinparts1["bodies"][0], violinparts2["bodies"][0]],
         ["2011-2020", "2021-2025"],
-        loc=(0.45, 0.02),
+        # loc=(0.45, 0.02),
     )
     ax.axhline(y=vaccination_threshold, color="k", linestyle="--")
     ax.set_ylabel("MMR vaccine coverage (%)")
@@ -558,49 +558,15 @@ def plot_effect_over_time(samples, df, years_in_order, fig, ax):
             upper_effect, float(jnp.quantile(samples, 0.975, axis=0))
         )
 
-    median_effect_expanded_cumsum = jnp.cumsum(median_effect)
-
-    median_effect_expanded = jnp.concatenate(
-        [
-            median_effect[:1],
-            median_effect_expanded_cumsum[1:2] / 2,
-            median_effect_expanded_cumsum[2:3] / 3,
-            (
-                median_effect_expanded_cumsum[3:]
-                - median_effect_expanded_cumsum[:-3]
-            )
-            / 3,
-        ]
+    n = 3  # smoothing window size
+    median_effect_expanded = jnp.convolve(
+        median_effect, jnp.ones(n) / n, mode="same"
     )
-
-    lower_effect_expanded_cumsum = jnp.cumsum(lower_effect)
-
-    lower_effect_expanded = jnp.concatenate(
-        [
-            lower_effect[:1],
-            lower_effect_expanded_cumsum[1:2] / 2,
-            lower_effect_expanded_cumsum[2:3] / 3,
-            (
-                lower_effect_expanded_cumsum[3:]
-                - lower_effect_expanded_cumsum[:-3]
-            )
-            / 3,
-        ]
+    lower_effect_expanded = jnp.convolve(
+        lower_effect, jnp.ones(n) / n, mode="same"
     )
-
-    upper_effect_expanded_cumsum = jnp.cumsum(upper_effect)
-
-    upper_effect_expanded = jnp.concatenate(
-        [
-            upper_effect[:1],
-            upper_effect_expanded_cumsum[1:2] / 2,
-            upper_effect_expanded_cumsum[2:3] / 3,
-            (
-                upper_effect_expanded_cumsum[3:]
-                - upper_effect_expanded_cumsum[:-3]
-            )
-            / 3,
-        ]
+    upper_effect_expanded = jnp.convolve(
+        upper_effect, jnp.ones(n) / n, mode="same"
     )
 
     ax.fill_between(
@@ -651,6 +617,28 @@ if __name__ == "__main__":
         vaccination_metric="estimated_mmr_cov",
     )
 
+    fig_r01, ax_r01 = setup_plot(1, 1)  # type: ignore
+    plot_coverage_distribution(
+        df,
+        10,
+        95,
+        fig_r01,
+        ax_r01,  # type: ignore
+        vaccination_metric="estimated_mmr_cov",
+    )
+
+    fig_r01.tight_layout()
+
+    # save
+
+    fig_r01.savefig(
+        os.path.join(
+            fig_dir, "figure_coverage_outbreak_size_distribution_time_r01.png"
+        ),
+        dpi=300,
+        bbox_inches="tight",
+    )
+
     # threshold analysis -- outbreak identification rate for thresholds
     ax[0, 1].text(  # type: ignore
         -0.25,
@@ -689,7 +677,7 @@ if __name__ == "__main__":
     with open(
         os.path.join(
             output_dir,
-            "predictive_random_walk_poisson_CAR_time_and_group_varying_2025_mega_regions=True.pkl",
+            "predictive_random_walk_poisson_CAR_time_and_group_varying_2025_oddities=True.pkl",
         ),
         "rb",
     ) as file:

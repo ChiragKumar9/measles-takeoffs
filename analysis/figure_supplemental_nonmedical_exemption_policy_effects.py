@@ -1,16 +1,10 @@
 import os
 
-import geopandas as gpd
-import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 import polars as pl
 import yaml
 from matplotlib import rc
-from scipy import stats
-from shapely.geometry import MultiPolygon, Polygon
-from sklearn.linear_model import TheilSenRegressor
 
 data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 output_dir = os.path.join(
@@ -27,7 +21,7 @@ with open("params.yml", "r") as f:
 
 
 def setup_plot(nrows, ncols):
-    fig, ax = plt.subplots(nrows, ncols, figsize=(20, 8.5))
+    fig, ax = plt.subplots(nrows, ncols, figsize=(30, 10))
     if nrows * ncols == 1:
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
@@ -56,30 +50,70 @@ def setup_plot(nrows, ncols):
     return fig, ax
 
 
+def median_percent_change(df, fig, ax):
+    # make violin plots of the percent change in outbreak risk
+    # the scenarios are
+    scenarios = {
+        "Existing NME bans": "add_nmes_back",
+        "Highest risk states": "top_risk_state_unconditioned",
+        "Neighboring counties": "bordering_high_risk_state",
+        "Highest NME states": "top_nme_state",
+        "Highest risk counties": "top_ten_pct_counties",
+    }
+
+    for idx, (scenario, column) in enumerate(scenarios.items()):
+        scenario_df = df.filter(pl.col(column) == True)
+        if scenario == "Highest NME states":
+            scenario_df = scenario_df.filter(
+                ~(pl.col("top_ten_pct_counties") == True)
+            )
+            scenario_df = scenario_df.filter(
+                ~(pl.col("top_risk_state_unconditioned") == True)
+            )
+        violinparts = ax.violinplot(
+            scenario_df["median_percent_change"].drop_nans(),
+            positions=[idx],
+            showextrema=False,
+        )
+
+        for pc in violinparts["bodies"]:
+            pc.set(facecolor="grey", alpha=0.4)
+
+        median = np.nanmedian(scenario_df["median_percent_change"].to_numpy())
+        lower = np.nanpercentile(
+            scenario_df["median_percent_change"].to_numpy(), 25
+        )
+        upper = np.nanpercentile(
+            scenario_df["median_percent_change"].to_numpy(), 75
+        )
+
+        ax.errorbar(
+            idx,
+            median,
+            yerr=[[median - lower], [upper - median]],
+            fmt="o",
+            color="grey",
+            capsize=5,
+            capthick=2,
+        )
+
+    ax.set_xticks(range(len(scenarios)))
+    ax.set_xticklabels(list(scenarios.keys()), rotation=-45, ha="left")
+    ax.set_ylabel("Percent change in outbreak size (%)")
+    ax.set_ylim(-100)
+    ax.axhline(0, color="black", linestyle="--")
+
+
 def scenario_results(df, fig, ax, plot_total, remove_overlap):
     # make violin plots of the percent change in outbreak risk
     # the scenarios are
     scenarios = {
         "Existing NME bans": "add_nmes_back",
         "Highest risk states": "top_risk_state_unconditioned",
+        "Neighboring counties": "bordering_high_risk_state",
         "Highest NME states": "top_nme_state",
         "Highest risk counties": "top_ten_pct_counties",
     }
-
-    # for idx, (scenario, column) in enumerate(scenarios.items()):
-    #     scenario_df = df.filter(pl.col(column) == True)
-    #     median = np.mean(scenario_df['median_percent_change'].to_numpy() == -100) * 100
-    #     lower = np.mean(scenario_df['lower_percent_change'].to_numpy() == -100) * 100
-    #     upper = np.mean(scenario_df['upper_percent_change'].to_numpy() == -100) * 100
-
-    #     ax.errorbar(
-    #         idx,
-    #         median,
-    #         yerr=[[median - upper], [lower - median]],
-    #         fmt='o',
-    #         color='black',
-    #         capsize=5,
-    #     )
 
     for idx, (scenario, column) in enumerate(scenarios.items()):
         scenario_df = df.filter(pl.col(column) == True)
@@ -125,11 +159,12 @@ def scenario_results(df, fig, ax, plot_total, remove_overlap):
     ax.set_xticks(range(len(scenarios)))
     ax.set_xticklabels(list(scenarios.keys()), rotation=-45, ha="left")
     ax.set_ylabel("Probability of no outbreak (%)")
+    ax.set_ylim(0)
 
 
 if __name__ == "__main__":
     # map of risk
-    fig, ax = setup_plot(1, 2)  # type: ignore
+    fig, ax = setup_plot(1, 3)  # type: ignore
 
     df = pl.read_csv(
         os.path.join(output_dir, "nme_policy_analysis_assembled_median.csv"),
@@ -149,12 +184,10 @@ if __name__ == "__main__":
         va="top",
         ha="right",
     )
-    plot_data = scenario_results(
+    plot_data = median_percent_change(
         df,
         fig,
         ax[0],  # type: ignore
-        plot_total=False,
-        remove_overlap=True,
     )
 
     ax[1].text(  # type: ignore
@@ -171,6 +204,24 @@ if __name__ == "__main__":
         df,
         fig,
         ax[1],  # type: ignore
+        plot_total=False,
+        remove_overlap=True,
+    )
+
+    ax[2].text(  # type: ignore
+        -0.05,
+        1.08,
+        "c",
+        transform=ax[2].transAxes,  # type: ignore
+        fontsize=24,
+        fontweight="bold",
+        va="top",
+        ha="right",
+    )
+    plot_data = scenario_results(
+        df,
+        fig,
+        ax[2],  # type: ignore
         plot_total=True,
         remove_overlap=False,
     )

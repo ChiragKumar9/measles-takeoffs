@@ -46,6 +46,9 @@ def read_outbreaks(data_dir=data_dir) -> pl.DataFrame:
         ),
         schema_overrides={"location_id": pl.String},
     )
+    # we can't do anything with the 2026 data because we don't have 2025 vaccination
+    # coverage
+    df_2025 = df_2025.filter(pl.col("date").str.starts_with("2025"))
     # rename columns to match the main df
     df_2025 = df_2025.rename(
         {
@@ -967,7 +970,7 @@ def assemble_analysis_dataset(
         cases_outbreak=pl.when(
             pl.col("imported").is_null() | pl.col("imported") == 0
         )
-        .then(pl.col("cases") - 1)  # if we don't know imports, assume 1 import
+        .then(pl.col("cases"))
         .otherwise(pl.col("cases") - pl.col("imported")),
         # Since we'll need it, make a total pct exempt
         total_exempt_pct=pl.col("nonmed_exempt_pct")
@@ -1014,7 +1017,7 @@ if __name__ == "__main__":
         log_scale=True,
         bins=[1, 2, 3, 4, 5, 10, 20, 50, 750],
     )
-    plt.show()
+    # plt.show()
 
     # Compare distribution of timing of outbreaks with and without vaccination data
     fig, ax = compare_distributions(
@@ -1025,7 +1028,7 @@ if __name__ == "__main__":
         label2="With vaccination data",
         log_scale=False,
     )
-    plt.show()
+    # plt.show()
 
     # %% VACCINATION COVERAGE AND OUTBREAK SIZE
     # add population variables to make it easy to consider population-dependent
@@ -1142,7 +1145,7 @@ if __name__ == "__main__":
         density=True,
         cumulative=True,
     )
-    plt.show()
+    # plt.show()
 
     # MMR vaccination coverage
     fig, ax = compare_distributions(
@@ -1156,7 +1159,7 @@ if __name__ == "__main__":
         density=True,
         cumulative=True,
     )
-    plt.show()
+    # plt.show()
 
     # MMR vaccination coverage
     fig, ax = compare_distributions(
@@ -1170,7 +1173,7 @@ if __name__ == "__main__":
         density=True,
         cumulative=True,
     )
-    plt.show()
+    # plt.show()
 
     # 5 year MMR vaccination coverage
     # add new columns
@@ -1236,7 +1239,7 @@ if __name__ == "__main__":
             density=True,
             cumulative=True,
         )
-        plt.show()
+        # plt.show()
 
         fig, ax = compare_distributions(
             merged_df.filter(pl.col("cases_outbreak") == 0)[
@@ -1253,7 +1256,7 @@ if __name__ == "__main__":
             density=True,
             cumulative=True,
         )
-        plt.show()
+        # plt.show()
 
         fig, ax = compare_distributions(
             merged_df.filter(pl.col("cases_outbreak") == 0)[
@@ -1270,7 +1273,7 @@ if __name__ == "__main__":
             density=True,
             cumulative=True,
         )
-        plt.show()
+        # plt.show()
 
     fig, ax, _ = pairplot(
         merged_df["estimated_mmr_cov"],
@@ -1279,7 +1282,7 @@ if __name__ == "__main__":
         alpha=0.5,
         log=True,
     )
-    plt.show()
+    # plt.show()
 
     if five_year:
         fig, ax, _ = pairplot(
@@ -1290,7 +1293,7 @@ if __name__ == "__main__":
             alpha=0.5,
             log=True,
         )
-        plt.show()
+        # plt.show()
 
     # %% NONMEDICAL VACCINATION EXEMPTIONS AND OUTBREAK SIZE
     # Nonmedical vaccination exemptions
@@ -1307,7 +1310,7 @@ if __name__ == "__main__":
         density=True,
         cumulative=True,
     )
-    plt.show()
+    # plt.show()
 
     # 5 year nonmedical vaccination exemptions
     if five_year:
@@ -1326,7 +1329,7 @@ if __name__ == "__main__":
             density=True,
             cumulative=True,
         )
-        plt.show()
+        # plt.show()
 
     # %% TOTAL VACCINATION EXEMPTIONS AND OUTBREAK SIZE
     # Total vaccination exemptions
@@ -1343,7 +1346,7 @@ if __name__ == "__main__":
         density=True,
         cumulative=True,
     )
-    plt.show()
+    # plt.show()
 
     # 5 year total vaccination exemptions
     if five_year:
@@ -1362,7 +1365,7 @@ if __name__ == "__main__":
             density=True,
             cumulative=True,
         )
-        plt.show()
+        # plt.show()
 
     # %% POPULATION SIZE AND OUTBREAK SIZE
     fig, ax = compare_distributions(
@@ -1378,7 +1381,7 @@ if __name__ == "__main__":
         density=True,
         cumulative=True,
     )
-    plt.show()
+    # plt.show()
 
     # %% POPULATION DENSITY AND OUTBREAK SIZE
     fig, ax = compare_distributions(
@@ -1394,7 +1397,7 @@ if __name__ == "__main__":
         density=True,
         cumulative=True,
     )
-    plt.show()
+    # plt.show()
 
     # %% FRACTION PUBLIC SCHOOL AND OUTBREAK SIZE
     fig, ax = compare_distributions(
@@ -1410,7 +1413,7 @@ if __name__ == "__main__":
         density=True,
         cumulative=True,
     )
-    plt.show()
+    # plt.show()
 
     # %% FRACTION PRIVATE SCHOOL AND OUTBREAK SIZE
     fig, ax = compare_distributions(
@@ -1426,7 +1429,7 @@ if __name__ == "__main__":
         density=True,
         cumulative=True,
     )
-    plt.show()
+    # plt.show()
 
     # %% INTERACTION BETWEEN VACCINATION COVERAGE AND PUBLIC SCHOOL
     merged_df = merged_df.with_columns(
@@ -1448,7 +1451,7 @@ if __name__ == "__main__":
         density=True,
         cumulative=True,
     )
-    plt.show()
+    # plt.show()
 
     # %% INTERACTION BETWEEN VACCINATION EXEMPTIONS AND PUBLIC SCHOOL
     merged_df = merged_df.with_columns(
@@ -1470,7 +1473,7 @@ if __name__ == "__main__":
         density=True,
         cumulative=True,
     )
-    plt.show()
+    # plt.show()
 
     # %% EXEMPTIONS VS COVERAGE
     fig, ax, scatter = pairplot(
@@ -1484,7 +1487,7 @@ if __name__ == "__main__":
     )
     ax.plot(np.arange(75, 101), np.arange(75, 101), c="black", ls="--", lw=2)
     fig.colorbar(scatter, ax=ax, label="Log10(Outbreak cases + 1)")
-    plt.show()
+    # plt.show()
 
     # %% COVERAGE VS FRACTION PUBLIC SCHOOL
     fig, ax, scatter = pairplot(
@@ -1497,7 +1500,7 @@ if __name__ == "__main__":
         cmap="viridis",
     )
     fig.colorbar(scatter, ax=ax, label="Log10(Outbreak cases + 1)")
-    plt.show()
+    # plt.show()
 
     # %% EXEMPTIONS VS FRACTION PUBLIC SCHOOL
     fig, ax, scatter = pairplot(
@@ -1510,7 +1513,7 @@ if __name__ == "__main__":
         cmap="viridis",
     )
     fig.colorbar(scatter, ax=ax, label="Log10(Outbreak cases + 1)")
-    plt.show()
+    # plt.show()
 
     # %% COVERAGE*PUBLIC SCHOOL INTERACTION VS CASES
     fig, ax, scatter = pairplot(
@@ -1523,7 +1526,7 @@ if __name__ == "__main__":
         cmap="viridis",
     )
     fig.colorbar(scatter, ax=ax, label="Log10(Outbreak cases + 1)")
-    plt.show()
+    # plt.show()
 
     # %% INCOME AND OUTBREAK SIZE
     fig, ax = compare_distributions(
@@ -1540,7 +1543,7 @@ if __name__ == "__main__":
         density=True,
         cumulative=True,
     )
-    plt.show()
+    # plt.show()
 
     # income-exemptions correlation?
     fig, ax, scatter = pairplot(
@@ -1553,7 +1556,7 @@ if __name__ == "__main__":
         cmap="viridis",
     )
     fig.colorbar(scatter, ax=ax, label="Log10(Outbreak cases + 1)")
-    plt.show()
+    # plt.show()
 
     # income-exemptions interaction?
     merged_df = merged_df.with_columns(
@@ -1574,7 +1577,7 @@ if __name__ == "__main__":
         density=True,
         cumulative=True,
     )
-    plt.show()
+    # plt.show()
 
     # %% EDUCATION AND OUTBREAK SIZE
     fig, ax = compare_distributions(
@@ -1591,7 +1594,7 @@ if __name__ == "__main__":
         density=True,
         cumulative=True,
     )
-    plt.show()
+    # plt.show()
 
     # %% EDUCATION-EXEMPTIONS AND OUTBREAK SIZE
     fig, ax, scatter = pairplot(
@@ -1604,7 +1607,7 @@ if __name__ == "__main__":
         cmap="viridis",
     )
     fig.colorbar(scatter, ax=ax, label="Log10(Outbreak cases + 1)")
-    plt.show()
+    # plt.show()
 
     # %% RACE AND OUTBREAK SIZE
     fig, ax = compare_distributions(
@@ -1619,7 +1622,7 @@ if __name__ == "__main__":
         density=True,
         cumulative=True,
     )
-    plt.show()
+    # plt.show()
 
     # %% RACE-EXEMPTIONS AND OUTBREAK SIZE
     fig, ax, scatter = pairplot(
@@ -1632,7 +1635,7 @@ if __name__ == "__main__":
         cmap="viridis",
     )
     fig.colorbar(scatter, ax=ax, label="Log10(Outbreak cases + 1)")
-    plt.show()
+    # plt.show()
 
     # medical vs nonmedical exemptions
     fig, ax, scatter = pairplot(
@@ -1645,7 +1648,7 @@ if __name__ == "__main__":
         cmap="viridis",
     )
     fig.colorbar(scatter, ax=ax, label="Log10(Outbreak cases + 1)")
-    plt.show()
+    # plt.show()
 
     # histogram of county counts
     fig, ax = compare_distributions(
@@ -1657,7 +1660,7 @@ if __name__ == "__main__":
         log_scale=False,
         bins=range(1, 11),
     )
-    plt.show()
+    # plt.show()
 
     # histogram of variances of county case counts
     fig, ax = compare_distributions(
@@ -1671,7 +1674,7 @@ if __name__ == "__main__":
         log_scale=True,
         bins=np.arange(0, 225, 1),
     )
-    plt.show()
+    # plt.show()
 
     # %% SYNTHETIC POPULATION CLUSTERS
     # let's make a geoid for easy merging later
@@ -1735,7 +1738,7 @@ if __name__ == "__main__":
         log=True,
         c=merged_df["estimated_mmr_cov"],
     )
-    plt.show()
+    # plt.show()
 
     # %% EXPORT DATA FOR DOWNSTREAM ANALYSIS
     # save the cleaned dataset

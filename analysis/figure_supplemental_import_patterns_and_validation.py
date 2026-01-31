@@ -89,14 +89,24 @@ def plot_state_std_imports(df, fig, ax):
         alpha=0.3,
         label="Excluding 2020-2021",
     )
-    ax.set_xlabel("Standard deviation in yearly imported cases by state (N)")
+    ax.set_xlabel("Standard deviation in yearly imported cases\nby state (N)")
+    ax.set_xlim(0)
     ax.set_ylabel("Counts")
     ax.legend()
 
 
 def plot_importation_probability_roc_validation(df, fig, ax):
     # precision-recall curve
-    tpr, fpr, thresholds = roc_curve(
+    tpr_log, fpr_log, _ = roc_curve(
+        (df["imported"] >= 1).cast(pl.Int64).to_numpy(),
+        df["probability_at_least_one_import_log"].to_numpy(),
+    )
+    score_log = roc_auc_score(
+        (df["imported"] >= 1).cast(pl.Int64).to_numpy(),
+        df["probability_at_least_one_import_log"].to_numpy(),
+    )
+
+    tpr, fpr, _ = roc_curve(
         (df["imported"] >= 1).cast(pl.Int64).to_numpy(),
         df["probability_at_least_one_import"].to_numpy(),
     )
@@ -104,13 +114,27 @@ def plot_importation_probability_roc_validation(df, fig, ax):
         (df["imported"] >= 1).cast(pl.Int64).to_numpy(),
         df["probability_at_least_one_import"].to_numpy(),
     )
-    ax.plot(tpr * 100, fpr * 100, color="black", lw=2)
+
+    ax.plot(
+        tpr_log * 100,
+        fpr_log * 100,
+        color="purple",
+        lw=2,
+        label=f"Log10-pop weighted\nAUC: {score_log:.2f}",
+    )
+    ax.plot(
+        tpr * 100,
+        fpr * 100,
+        color="salmon",
+        lw=2,
+        label=f"Pop weighted\nAUC: {score:.2f}",
+    )
     ax.plot([0, 100], [0, 100], color="gray", lw=1, linestyle="--")
     ax.set_xlabel("True positive rate (%)")
     ax.set_ylabel("False positive rate (%)")
     ax.set_xlim([0, 100])
     ax.set_ylim([0, 100])
-    ax.text(60, 90, f"AUC = {score:.2f}", fontsize=32)
+    ax.legend(loc="lower right")
     return fig, ax
 
 
@@ -207,21 +231,42 @@ if __name__ == "__main__":
     )
 
     counties_with_known_imports = counties_with_known_imports.filter(
-        pl.col("posterior_alpha").is_not_null()
-        & pl.col("posterior_beta").is_not_null()
+        pl.col("posterior_alpha_pre_2023").is_not_null()
+        & pl.col("posterior_beta_pre_2023").is_not_null()
+        & pl.col("posterior_alpha_pre_2023_log").is_not_null()
+    )
+    counties_with_known_imports = counties_with_known_imports.filter(
+        pl.col("year") >= 2022
     )
     counties_with_known_imports = counties_with_known_imports.with_columns(
         # recall that gamma-poisson mixture is a negative binomial
         # so P(X >= 1) can be calculated using a neg binomial PMF
-        probability_at_least_one_import=pl.struct(
-            ["posterior_alpha", "posterior_beta"]
+        probability_at_least_one_import_log=pl.struct(
+            ["posterior_alpha_pre_2023_log", "posterior_beta_pre_2023"]
         ).map_elements(
             lambda x: 1
             - (
-                x["posterior_beta"]
-                / (x["posterior_alpha"] + x["posterior_beta"])
+                x["posterior_beta_pre_2023"]
+                / (
+                    x["posterior_alpha_pre_2023_log"]
+                    + x["posterior_beta_pre_2023"]
+                )
             )
-            ** x["posterior_alpha"],
+            ** x["posterior_alpha_pre_2023_log"],
+            return_dtype=pl.Float64,
+        ),
+        probability_at_least_one_import=pl.struct(
+            ["posterior_alpha_pre_2023", "posterior_beta_pre_2023"]
+        ).map_elements(
+            lambda x: 1
+            - (
+                x["posterior_beta_pre_2023"]
+                / (
+                    x["posterior_alpha_pre_2023"]
+                    + x["posterior_beta_pre_2023"]
+                )
+            )
+            ** x["posterior_alpha_pre_2023"],
             return_dtype=pl.Float64,
         ),
     )

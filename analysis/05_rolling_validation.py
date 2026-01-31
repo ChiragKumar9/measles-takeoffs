@@ -6,6 +6,7 @@ import polars as pl
 import statsmodels.api as sm
 import yaml
 from jax.random import PRNGKey
+from numpyro import distributions as dist
 from numpyro import enable_x64, set_host_device_count
 from scipy import stats
 from sklearn.preprocessing import StandardScaler
@@ -77,9 +78,85 @@ if __name__ == "__main__":
 
                 # train on progressing windows of time
                 train_years = [
+                    [
+                        2011,
+                        2012,
+                        2013,
+                        2014,
+                        2015,
+                        2016,
+                        2017,
+                        2018,
+                        2019,
+                        2020,
+                    ],
+                    [
+                        2011,
+                        2012,
+                        2013,
+                        2014,
+                        2015,
+                        2016,
+                        2017,
+                        2018,
+                        2019,
+                        2020,
+                        2021,
+                    ],
+                    [
+                        2011,
+                        2012,
+                        2013,
+                        2014,
+                        2015,
+                        2016,
+                        2017,
+                        2018,
+                        2019,
+                        2020,
+                        2021,
+                        2022,
+                    ],
+                    [
+                        2011,
+                        2012,
+                        2013,
+                        2014,
+                        2015,
+                        2016,
+                        2017,
+                        2018,
+                        2019,
+                        2020,
+                        2021,
+                        2022,
+                        2023,
+                    ],
+                    [
+                        2011,
+                        2012,
+                        2013,
+                        2014,
+                        2015,
+                        2016,
+                        2017,
+                        2018,
+                        2019,
+                        2020,
+                        2021,
+                        2022,
+                        2023,
+                        2024,
+                    ],
+                    [2019, 2020],
+                    [2019, 2020, 2021],
+                    [2019, 2020, 2021, 2022],
+                    [2019, 2020, 2021, 2022, 2023],
+                    [2019, 2020, 2021, 2022, 2023, 2024],
+                    [2020, 2021],
                     [2021, 2022],
-                    [2021, 2022, 2023],
-                    [2021, 2022, 2023, 2024],
+                    [2022, 2023],
+                    [2023, 2024],
                 ]
 
                 for years in train_years:
@@ -157,6 +234,7 @@ if __name__ == "__main__":
                         spatial=car,
                         spatial_units=train_df["geoid"],
                         adjacency_matrix=adjacency_matrix,
+                        spatial_sigma=dist.HalfNormal(1.5),
                     )
 
                     # fit model
@@ -208,7 +286,7 @@ if __name__ == "__main__":
                     with open(
                         os.path.join(
                             output_dir,
-                            f"samples_partial_pooled_poisson_validation_testing_{years[-1] + 1}_pool={pool}_CAR={car}_{model_name}.pkl",
+                            f"samples_partial_pooled_poisson_validation_testing_{years}_pool={pool}_CAR={car}_{model_name}.pkl",
                         ),
                         "wb",
                     ) as file:
@@ -309,7 +387,7 @@ if __name__ == "__main__":
                         with open(
                             os.path.join(
                                 output_dir,
-                                f"final_outbreak_size_predictions_{years[-1] + 1}.pkl",
+                                f"final_outbreak_size_predictions_{years}.pkl",
                             ),
                             "wb",
                         ) as f:

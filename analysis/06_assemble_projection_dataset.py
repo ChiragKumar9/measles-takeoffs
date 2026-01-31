@@ -94,8 +94,8 @@ if __name__ == "__main__":
     # remove any places with fips codes greater than five digits
     df = df.filter(pl.col("fips").str.len_chars() == 5)
 
-    # drop any years pre 2021
-    df = df.filter(pl.col("year") >= 2021)
+    # drop any years pre 2019
+    df = df.filter(pl.col("year") >= 2019)
 
     # now add the relevant census data
     census_key = os.getenv("CENSUS_API_KEY")
@@ -109,7 +109,7 @@ if __name__ == "__main__":
     )
 
     train_df = train_df.filter(
-        pl.col("year").is_in([2021, 2022, 2023, 2024, 2025])
+        pl.col("year").is_in([2019, 2020, 2021, 2022, 2023, 2024, 2025])
     )
 
     train_df_to_scale = train_df.select(

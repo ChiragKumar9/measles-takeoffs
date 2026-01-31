@@ -113,7 +113,7 @@ def plot_predictions(
     ax.set_yticks([0, 1, 10, 100], labels=["0", "1", "10", "100"])
     ax.set_xticks([0, 1, 10, 100], labels=["0", "1", "10", "100"])
 
-    ax.legend(loc=(0.0, 0.83))
+    ax.legend(loc=(0.0, 1.0))
 
     # Manually set minor tick locations on the x-axis
     minor_x_ticks = [
@@ -168,8 +168,8 @@ def plot_predictions(
         R2 = jnp.corrcoef(df["cases_outbreak"].to_jax(), median)[0, 1] ** 2
         R2 = R2 * 100  # as a percentage
         ax.text(
-            0.12 * max(df["cases_outbreak"].max(), upper.max()),
-            0.003 * max(df["cases_outbreak"].max(), upper.max()),
+            0.0001 * max(df["cases_outbreak"].max(), upper.max()),
+            0.35 * max(df["cases_outbreak"].max(), upper.max()),
             f"$R^2$ = {R2:.2f}%",
             fontsize=26,
             color="green",
@@ -184,8 +184,8 @@ def plot_predictions(
         )
         R2 = R2 * 100  # as a percentage
         ax.text(
-            0.12 * max(df["cases_outbreak"].max(), upper.max()),
-            0.002 * max(df["cases_outbreak"].max(), upper.max()),
+            0.0001 * max(df["cases_outbreak"].max(), upper.max()),
+            0.63 * max(df["cases_outbreak"].max(), upper.max()),
             f"$R^2$ = {R2:.2f}%",
             fontsize=26,
             color="red",
@@ -617,7 +617,7 @@ if __name__ == "__main__":
     with open(
         os.path.join(
             output_dir,
-            "predictive_partial_pooled_poisson_state_fixed_effect=True_pool=True_five_year=False_CAR=True_All covariates_[2021, 2022, 2023, 2024, 2025].pkl",
+            "predictive_partial_pooled_poisson_state_fixed_effect=True_pool=True_five_year=False_CAR=False_All covariates_[2021, 2022, 2023, 2024, 2025].pkl",
         ),
         "rb",
     ) as file:
@@ -659,12 +659,14 @@ if __name__ == "__main__":
         naive_model,
         fig_r01,
         ax_r01,
-        label_naive="Vaccine coverage",
-        label_statistical="Vaccine coverage + covariates",
+        label_naive="Naive mechanistic model (vaccine coverage only)",
+        label_statistical="Statistical model",
         show_r2=True,
     )
     fig_r01.savefig(
-        os.path.join(fig_dir, "figure_county_level_predictions_r01.png"),
+        os.path.join(
+            fig_dir, f"figure_county_level_predictions_r01_no_CAR.png"
+        ),
         dpi=300,
         bbox_inches="tight",
     )

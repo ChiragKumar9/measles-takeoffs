@@ -77,7 +77,7 @@ if __name__ == "__main__":
         exposure=df["pop"].to_jax(),
         groups=df["state"],
         group_fixed_effect=False,
-        spatial=False,
+        spatial=True,
         spatial_units=df["geoid"],
         adjacency_matrix=adjacency,
         spatial_sigma=dist.HalfNormal(1.0),

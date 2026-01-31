@@ -1,3 +1,4 @@
+from matplotlib.ticker import ScalarFormatter
 from numpyro import enable_x64
 
 enable_x64()
@@ -61,97 +62,63 @@ def setup_plot(nrows, ncols):
 
 
 def plot_metric_over_values(df, samples, with_importation, x_label, fig, ax):
-    colors = ["chartreuse", "forestgreen", "darkgreen"]
-    shapes = ["o", "s", "^"]
-    for idx, year in enumerate([2023, 2024, 2025]):
-        year_mask = (df["year"] == year).to_jax()
-        df_year = df.filter(pl.col("year") == year)
-        if with_importation is None:
-            outcome = "cases_outbreak"
-        else:
-            outcome = "cases"
-        cases_sorted = df_year[outcome].sort().unique().to_list()
-        metric_median = jnp.array([])
-        metric_lower = jnp.array([])
-        metric_upper = jnp.array([])
-        metric_p_values_median = jnp.array([])
-        for val in cases_sorted:
-            mask = df_year[outcome].to_jax() >= val
-            true = df_year.filter(pl.col(outcome) >= float(val))[
-                outcome
-            ].to_jax()
-            samples_year = samples[idx][:, mask]
-            # get the averages to match
-            if with_importation is not None:
-                samples_year *= with_importation[:, year_mask][:, mask]
-            # samples_year = samples_year - jnp.mean(samples_year, axis=1, keepdims=True)
-            # samples_year = samples_year / jnp.std(samples_year, axis=1, keepdims=True) * jnp.std(true)
-            # samples_year = samples_year + jnp.mean(true)
-            # metric_values = jnp.array([])
-            # metric_p_values = jnp.array([])
-            metric_values = jnp.array(
-                [jnp.corrcoef(true, c)[0, 1] ** 2 * 100 for c in samples_year]
-            )
-
-            # metric_p_values_median = jnp.append(metric_p_values_median, jnp.nanmedian(metric_p_values))
-            metric_median = jnp.append(
-                metric_median, jnp.nanmedian(metric_values)
-            )
-            metric_lower = jnp.append(
-                metric_lower, jnp.nanpercentile(metric_values, 2.5)
-            )
-            metric_upper = jnp.append(
-                metric_upper, jnp.nanpercentile(metric_values, 97.5)
-            )
-        # truncate cases_sorted because some of the metric_values may have been nan
-        # cases_sorted = cases_sorted[: len(metric_median)]
-        ax.errorbar(
-            cases_sorted,
-            metric_median,
-            yerr=np.array(
-                [
-                    [metric_median.__array__() - metric_lower.__array__()],
-                    [metric_upper.__array__() - metric_median.__array__()],
-                ]
-            )[:, 0, :],
-            label=f"{year}",
-            capsize=0,
-            fmt=shapes[idx],
-            alpha=0.6,
-            ecolor=colors[idx],
-            color=colors[idx],
+    # because df is in descending time order
+    # and samples is in ascending time order
+    samples.reverse()
+    samples = jnp.concat(samples, axis=1)
+    year_mask = df["year"].is_in([2021, 2022, 2023, 2024, 2025]).to_jax()
+    df_year = df.filter(pl.col("year").is_in([2021, 2022, 2023, 2024, 2025]))
+    if with_importation is None:
+        outcome = "cases_outbreak"
+    else:
+        outcome = "cases"
+    cases_sorted = df_year[outcome].sort().unique().to_list()
+    metric_median = jnp.array([])
+    metric_lower = jnp.array([])
+    metric_upper = jnp.array([])
+    for val in cases_sorted:
+        mask = df_year[outcome].to_jax() >= val
+        true = df_year.filter(pl.col(outcome) >= float(val))[outcome].to_jax()
+        samples_year = samples[:, mask]
+        if with_importation is not None:
+            samples_year *= with_importation[:, year_mask][:, mask]
+        metric_values = jnp.array(
+            [
+                jnp.corrcoef(true, c)[0, 1] ** 2 * 100
+                for c in jnp.sort(samples_year, axis=0)
+            ]
         )
-        # ax.errorbar(
-        #     cases_sorted,
-        #     metric_median,
-        #     yerr=np.array([[metric_median.__array__() - metric_lower.__array__()], [metric_upper.__array__() - metric_median.__array__()]])[:, 0, :],
-        #     capsize=0,
-        #     fmt = 'none',
-        #     alpha = 0.6,
-        #     ecolor = 'grey',
-        # )
-        # ax.scatter(
-        #     cases_sorted,
-        #     metric_median,
-        #     label=f"{year}",
-        #     marker=shapes[idx],
-        #     c=metric_p_values_median,
-        #     cmap = 'viridis',
-        #     vmin = 0,
-        #     vmax = 1,
-        # )
-    # add colorbar
-    # norm = Normalize(vmin = 0, vmax = 1)
-    # fig.colorbar(plt.cm.ScalarMappable(norm=norm, cmap='viridis'), ax=ax, label='Median p-value')
+        metric_median = jnp.append(metric_median, jnp.nanmedian(metric_values))
+        metric_lower = jnp.append(
+            metric_lower, jnp.nanpercentile(metric_values, 2.5)
+        )
+        metric_upper = jnp.append(
+            metric_upper, jnp.nanpercentile(metric_values, 97.5)
+        )
+    ax.errorbar(
+        cases_sorted,
+        metric_median,
+        yerr=np.array(
+            [
+                [metric_median.__array__() - metric_lower.__array__()],
+                [metric_upper.__array__() - metric_median.__array__()],
+            ]
+        )[:, 0, :],
+        capsize=0,
+        fmt="o",
+        markersize=7,
+        ecolor="grey",
+        color="grey",
+    )
     ax.set_xlabel(x_label)
     ax.set_ylabel(r"$R^2$ (%)")
-    ax.legend()
-    ax.set_ylim([0, 103])
+    ax.set_ylim(0, 101)
     if with_importation is None:
         ax.set_xscale("symlog")
     else:
         ax.set_xscale("log")
         ax.set_xlim(0.9)
+        ax.xaxis.set_major_formatter(ScalarFormatter())
 
 
 def map_fips_code_data(
@@ -289,7 +256,7 @@ def map_fips_code_data(
     elif cbar_type == "probability":
         norm = mcolors.LogNorm(vmin=counties_with_data["value"].min(), vmax=1)
         breakpoints = [-1, 0.2, 0.4, 0.6, 0.8, 1.01]
-        cmap = plt.get_cmap("Reds")
+        cmap = plt.get_cmap("Blues")
         # cmap = mcolors.ListedColormap(
         #     [cmap(i) for i in np.linspace(0.3, 1.0, 5)]
         # )
@@ -376,8 +343,8 @@ def map_fips_code_data(
             cbar.ax.tick_params(labelsize=24, rotation=-60, length=0)
 
         if cbar_type == "probability":
-            # cbar.set_ticks([0.0, 0.2, 0.4, 0.6, 0.8, 1.0])
-            # cbar.set_ticklabels(["0.0", "0.2", "0.4", "0.6", "0.8", "1.0"])
+            cbar.set_ticks([1e-4, 0.001, 0.01, 0.1, 1.0])
+            cbar.set_ticklabels(["0.0001", "0.001", "0.01", "0.1", "1.0"])
             cbar.ax.tick_params(labelsize=24, rotation=-60, length=0)
 
     # Add state borders
@@ -493,11 +460,19 @@ if __name__ == "__main__":
     ).T
 
     samples = []
-    for idx, year in enumerate([2023, 2024, 2025]):
+    for idx, year in enumerate(
+        [
+            [2019, 2020],
+            [2019, 2020, 2021],
+            [2019, 2020, 2021, 2022],
+            [2019, 2020, 2021, 2022, 2023],
+            [2019, 2020, 2021, 2022, 2023, 2024],
+        ]
+    ):
         with open(
             os.path.join(
                 output_dir,
-                f"samples_partial_pooled_poisson_validation_testing_{year}_pool=True_CAR=False_All covariates.pkl",
+                f"samples_partial_pooled_poisson_validation_testing_{year}_pool=True_CAR=True_All covariates.pkl",
             ),
             "rb",
         ) as f:

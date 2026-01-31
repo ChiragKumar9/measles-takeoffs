@@ -66,9 +66,9 @@ if __name__ == "__main__":
     )
     exclude_16_17.write_csv(os.path.join(output_dir, "exclude_16_17.csv"))
     for exclusions_16_17 in [True, False]:
-        for mega_regions in [True, False]:
+        for oddities_2025 in [True, False]:
             additional_info = ""
-            if mega_regions:
+            if oddities_2025:
                 if exclusions_16_17:
                     df = df.with_columns(
                         year_county_state=pl.col("year").cast(pl.String)
@@ -98,14 +98,14 @@ if __name__ == "__main__":
                         delimiter=",",
                     )
             else:
-                # we only want to run without mega regions if we are including 16-17
+                # we only want to run without 2025 oddities if we are including 16-17
                 # we don't want to both remove 16-17 and exclude mega regions
                 if not exclusions_16_17:
-                    df_model = df.filter(pl.col("mega_region_2025") == False)
+                    df_model = df.filter(pl.col("oddities_2025") == False)
                     assembled_adjacency_matrix = np.genfromtxt(
                         os.path.join(
                             data_dir,
-                            "county_adjacency_matrix_no_2025_mega_regions.csv",
+                            "county_adjacency_matrix_no_2025_oddities.csv",
                         ),
                         delimiter=",",
                     )
@@ -217,7 +217,7 @@ if __name__ == "__main__":
                 with open(
                     os.path.join(
                         output_dir,
-                        f"samples_random_walk_poisson_CAR_{mode}_2025_mega_regions={mega_regions}{additional_info}.pkl",
+                        f"samples_random_walk_poisson_CAR_{mode}_2025_oddities={oddities_2025}{additional_info}.pkl",
                     ),
                     "wb",
                 ) as file:
@@ -334,7 +334,7 @@ if __name__ == "__main__":
                 with open(
                     os.path.join(
                         output_dir,
-                        f"predictive_random_walk_poisson_CAR_{mode}_2025_mega_regions={mega_regions}{additional_info}.pkl",
+                        f"predictive_random_walk_poisson_CAR_{mode}_2025_oddities={oddities_2025}{additional_info}.pkl",
                     ),
                     "wb",
                 ) as file:

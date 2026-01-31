@@ -79,20 +79,27 @@ if __name__ == "__main__":
     )
 
     df = df.with_columns(
-        mega_region_2025=pl.when(
-            (
-                (pl.col("state") == "South Carolina")
-                | (pl.col("state") == "Utah")
-                | (pl.col("state") == "Virginia")
-                | (pl.col("state") == "Louisiana")
-                | (pl.col("state") == "Minnesota")
-                | (pl.col("state") == "Tennessee")
-                | (pl.col("state") == "Alabama")
-            )
+        oddities_2025=pl.when(
+            (pl.col("pop_density") <= 10)
+            # pl.when(
+            #     (
+            #         (pl.col("state") == "South Carolina")
+            #         | (pl.col("state") == "Utah")
+            #         | (pl.col("state") == "Virginia")
+            #         | (pl.col("state") == "Louisiana")
+            #         | (pl.col("state") == "Minnesota")
+            #         | (pl.col("state") == "Tennessee")
+            #         | (pl.col("state") == "Alabama")
+            #     )
             & (pl.col("year") == 2025)
         )
-        .then(True)
-        .otherwise(pl.col("mega_region_2025"))
+        .then(pl.lit(True))
+        .otherwise(pl.lit(False))
+    )
+
+    df = df.with_columns(
+        # oddities_2025 = ((pl.col("cases_outbreak") < 10)) & (pl.col("estimated_mmr_cov") < 90) & (pl.col("year") == 2025)
+        oddities_2025=(pl.col("year") == 2025) & (pl.col("pop") <= 50000)
     )
 
     counties = df["fips"].unique(maintain_order=True).to_list()
@@ -100,9 +107,9 @@ if __name__ == "__main__":
         adjacency_matrix, counties
     )
 
-    assembled_adjacency_matrix_no_mega_regions = assemble_adjacency_matrix(
+    assembled_adjacency_matrix_no_2025_oddities = assemble_adjacency_matrix(
         adjacency_matrix,
-        df.filter(pl.col("mega_region_2025") == False)["fips"]
+        df.filter(pl.col("oddities_2025") == False)["fips"]
         .unique(maintain_order=True)
         .to_list(),
     )
@@ -166,9 +173,7 @@ if __name__ == "__main__":
         delimiter=",",
     )
     np.savetxt(
-        os.path.join(
-            data_dir, "county_adjacency_matrix_no_2025_mega_regions.csv"
-        ),
-        assembled_adjacency_matrix_no_mega_regions,
+        os.path.join(data_dir, "county_adjacency_matrix_no_2025_oddities.csv"),
+        assembled_adjacency_matrix_no_2025_oddities,
         delimiter=",",
     )

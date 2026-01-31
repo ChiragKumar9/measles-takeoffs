@@ -9,6 +9,8 @@ import os
 
 import yaml
 
+from outbreak_size import adjacency
+
 data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 output_dir = os.path.join(
     os.path.dirname(os.path.dirname(__file__)), "outputs"
@@ -20,13 +22,15 @@ with open("params.yml", "r") as f:
 if __name__ == "__main__":
     for name in ["median", "lower", "upper"]:
         no_nme_df = pl.read_csv(
-            os.path.join(output_dir, "nme_policy_analysis.csv"),
+            os.path.join(
+                output_dir, "nme_policy_analysis_broken_up_by_scenario.csv"
+            ),
             schema_overrides={
                 "fips": pl.String,
                 "estimated_mmr_cov_raw": pl.Float64,
                 "nonmed_exempt_pct_raw": pl.Float64,
             },
-        ).filter(pl.col("in_train") == 0)
+        )
 
         # read the df used to make the risk projections
         risk_df = pl.read_csv(
@@ -57,10 +61,6 @@ if __name__ == "__main__":
         ) as f:
             risk_samples = pickle.load(f)
 
-        # make incidence measures
-        no_nme_samples = no_nme_samples / no_nme_df["pop"].to_jax()
-        risk_samples = risk_samples / risk_df["pop"].to_jax()
-
         # merge the two
         no_nme_df = no_nme_df.with_columns(
             no_nme_projections=pl.Series(no_nme_samples.T.__array__()),
@@ -87,9 +87,6 @@ if __name__ == "__main__":
         # extract back out our samples
         no_nme_samples = df["no_nme_projections"].to_numpy().T
         risk_samples = df["risk_projections"].to_numpy().T
-
-        # risk_samples = np.median(risk_samples, axis=0, keepdims=True)
-        # no_nme_samples = np.median(no_nme_samples, axis=0, keepdims=True)
 
         # calculate the percent change in incidence
         percent_change_samples = np.where(
@@ -175,88 +172,6 @@ if __name__ == "__main__":
             .otherwise(pl.col("no_outbreak_samples_overall")),
         )
 
-        # label a column based on whether it is a top risk state
-        state_df = pl.read_csv(
-            os.path.join(output_dir, "state_assembled_projection_results.csv")
-        ).filter(pl.col("type") == "projection")
-        top_5_risk_states_unconditioned = (
-            state_df.sort(by="median_unconditioned_risk_rank", descending=True)
-            .head(5)["state"]
-            .to_list()
-        )
-
-        top_5_risk_states_conditioned = (
-            state_df.sort(by="median_conditioned_risk_rank", descending=True)
-            .head(5)["state"]
-            .to_list()
-        )
-
-        df = df.with_columns(
-            top_risk_state_conditioned=pl.when(
-                pl.col("state").is_in(top_5_risk_states_conditioned)
-            )
-            .then(True)
-            .otherwise(False),
-            top_risk_state_unconditioned=pl.when(
-                pl.col("state").is_in(top_5_risk_states_unconditioned)
-            )
-            .then(True)
-            .otherwise(False),
-        )
-
-        # label a column based on whether it is a top nme state
-        top_5_nme_states = (
-            no_nme_df.filter(pl.col("remove_nmes") == True)
-            .group_by("state")
-            .agg(
-                nme_pct=(
-                    pl.col("nonmed_exempt_pct_raw")
-                    * pl.col("pop_5_9")
-                    / pl.sum("pop_5_9")
-                ).sum()
-            )
-            .sort("nme_pct", descending=True)
-            .head(5)["state"]
-            .to_list()
-        )
-        df = df.with_columns(
-            top_nme_state=pl.when(pl.col("state").is_in(top_5_nme_states))
-            .then(True)
-            .otherwise(False),
-        )
-
-        # add a column for the county's risk level
-        risk_df = pl.read_csv(
-            os.path.join(output_dir, "assembled_projection_results.csv"),
-            schema_overrides={"fips": pl.String},
-        )
-
-        risk_df = risk_df[
-            [
-                "fips",
-                "state",
-                "county",
-                "year",
-                "median_conditioned_risk_rank",
-                "median_unconditioned_risk_rank",
-            ]
-        ]
-
-        df = df.join(
-            risk_df,
-            on=["fips", "state", "county", "year"],
-            how="left",
-        )
-
-        df = df.with_columns(
-            top_ten_pct_counties=pl.when(
-                pl.col("median_unconditioned_risk_rank")
-                >= pl.max("median_unconditioned_risk_rank") * 0.9
-            )
-            .then(True)
-            .otherwise(False)
-        )
-
         df.drop(["no_nme_projections", "risk_projections"]).write_csv(
             os.path.join(
                 output_dir, f"nme_policy_analysis_assembled_{name}.csv"
@@ -303,11 +218,6 @@ if __name__ == "__main__":
         df_upper,
         on=["fips", "state", "county", "year", "add_nmes_back"],
         suffix="_upper_nme_coverage_effect",
-    )
-    df = df.with_columns(
-        add_nmes_back=pl.when(pl.col("add_nmes_back") == True)
-        .then(pl.lit(True))
-        .otherwise(pl.lit(False))
     )
 
     df.write_csv(

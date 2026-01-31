@@ -72,7 +72,7 @@ us_states = [
 
 def read_outbreaks(
     data_dir=data_dir,
-) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
+) -> tuple[pl.DataFrame, pl.DataFrame]:
     df = pl.read_excel(os.path.join(data_dir, "Combined Measles Dataset.xlsx"))
 
     # to ensure consistent lower case column names
@@ -98,6 +98,8 @@ def read_outbreaks(
             "value": "cases",
         }
     )
+
+    df_2025 = df_2025.filter(pl.col("date").str.starts_with("2025"))
 
     df_2025 = df_2025.with_columns(
         year=pl.lit(2025),
@@ -126,7 +128,11 @@ def read_outbreaks(
     # if importeds is 0, it must be at the county level
     # (since we add in 0 importeds at the state level below when we join with
     # all state data)
-    df = df.filter(~((pl.col("imported") == 0) & pl.col("county").is_null()))
+    df = df.filter(
+        pl.when(pl.col("imported") == 0)
+        .then(pl.col("county").is_not_null())
+        .otherwise(True)
+    )
     # cases also can't be 0
     df = df.filter(pl.col("cases") > 0)
     # also remove counties with bogus county names
@@ -136,23 +142,15 @@ def read_outbreaks(
     # state can't be null
     df = df.filter(pl.col("state").is_not_null())
 
-    counties_present_by_year = df.group_by(["year", "state"]).agg(
-        num_counties=pl.col("county")
-        .filter(pl.col("imported").is_null())
-        .n_unique()
-    )
-
-    df = df.with_columns(imported=pl.col("imported").fill_null(1))
-
     counties_with_known_imports = df.filter(
         pl.col("imported").is_not_null() & pl.col("county").is_not_null()
     ).select(["year", "state", "county", "imported"])
 
-    return counties_with_known_imports, df_2025, counties_present_by_year
+    return counties_with_known_imports, df_2025
 
 
 def tally_state_importations(
-    df_2025, counties_present_by_year, data_dir=data_dir
+    df_2025, data_dir=data_dir
 ) -> tuple[pl.DataFrame, int]:
     # group by state
     df = pl.read_excel(
@@ -192,14 +190,21 @@ def tally_state_importations(
         how="diagonal_relaxed",
     )
 
-    df = df.join(counties_present_by_year, on=["year", "state"], how="left")
-    df = df.with_columns(
-        num_counties=pl.col("num_counties").fill_null(0)
-    ).with_columns(imported=pl.col("imported") + pl.col("num_counties"))
+    # df = df.join(counties_present_by_year, on=["year", "state"], how="left")
+    # df = df.with_columns(
+    # num_counties=pl.col("num_counties").fill_null(0)
+    # ).with_columns(imported=pl.col("imported") + pl.col("num_counties"))
 
     years_of_data = df["year"].n_unique()
 
     df = df.group_by("state").agg(
+        [
+            pl.col("imported")
+            .filter(pl.col("year") < i)
+            .sum()
+            .alias(f"imported_pre_{i}")
+            for i in [2021, 2022, 2023, 2024, 2025]
+        ],
         imported=pl.sum("imported"),
     )
 
@@ -216,6 +221,7 @@ def calculate_yearly_import_probability(
     # we know the missing states had no years with imports
     df = df.with_columns(
         imported=pl.col("imported").fill_null(0),
+        imported_pre_2022=pl.col("imported_pre_2022").fill_null(0),
         # and were not observed
         observed=pl.col("observed").fill_null(False),
     )
@@ -228,23 +234,20 @@ def calculate_yearly_import_probability(
 
     # use a distribution with uniform prior to calculate import probability
     df = df.with_columns(
+        *[
+            (pl.col(f"imported_pre_{i}") + prior_alpha).alias(
+                f"posterior_alpha_pre_{i}"
+            )
+            for i in [2021, 2022, 2023, 2024, 2025]
+        ],
+        *[
+            (pl.lit(years_of_data + (2026 - i)) + prior_beta).alias(
+                f"posterior_beta_pre_{i}"
+            )
+            for i in [2021, 2022, 2023, 2024, 2025]
+        ],
         posterior_alpha=pl.col("imported") + prior_alpha,
         posterior_beta=pl.lit(years_of_data) + prior_beta,
-    )
-
-    # get samples from the posterior
-    df = df.with_columns(
-        # calculate a bunch of samples for later use
-        importation_probability_samples=pl.struct(
-            ["posterior_alpha", "posterior_beta"]
-        ).map_elements(
-            lambda x: stats.gamma.rvs(
-                a=x["posterior_alpha"],
-                scale=1 / x["posterior_beta"],
-                size=8000,
-            ).tolist(),  # type: ignore
-            pl.List(pl.Float64),
-        ),
     )
 
     return df
@@ -256,21 +259,60 @@ def distribute_state_level_risk_to_county(
     # each state has a population-weighted value of the county's importation probability
     # join state level data to county data
     # note that this drops all counties not in the projection dataset
+
     df = county_data.join(df_state, on="state", how="left")
-    # check that there are no missing importation probabilities
-    assert (
-        df.filter(pl.col("importation_probability_samples").is_null()).height
-        == 0
-    ), "Some states are missing importation probabilities!"
+
+    # get samples from the posterior
+    df = df.with_columns(
+        # calculate a bunch of samples for later use
+        importation_probability_samples=pl.struct(
+            [
+                *["posterior_alpha", "posterior_beta", "year", "type"],
+                *[
+                    f"posterior_alpha_pre_{i}"
+                    for i in [2021, 2022, 2023, 2024, 2025]
+                ],
+                *[
+                    f"posterior_beta_pre_{i}"
+                    for i in [2021, 2022, 2023, 2024, 2025]
+                ],
+            ]
+        ).map_elements(
+            lambda x: stats.gamma.rvs(
+                a=x["posterior_alpha_pre_" + str(x["year"])],
+                scale=1 / x["posterior_beta_pre_" + str(x["year"])],
+                size=8000,
+            ).tolist()
+            if x["type"] == "train" and x["year"] >= 2021
+            else stats.gamma.rvs(  # type: ignore
+                a=x["posterior_alpha"],
+                scale=1 / x["posterior_beta"],
+                size=8000,
+            ).tolist(),  # type: ignore
+            pl.List(pl.Float64),
+        ),
+    )
     # calculate the population weight
     df = df.with_columns(
         pop_weight=pl.col("pop")
         / pl.col("pop").sum().over(["state", "year", "type"]),
-        pop_weight_log=pl.col("pop").log()
-        / pl.col("pop").log().sum().over(["state", "year", "type"]),
+        pop_weight_log=pl.col("pop").log10()
+        / pl.col("pop").log10().sum().over(["state", "year", "type"]),
     )
     # distribute the state level importation probability to counties based on population weight
     df = df.with_columns(
+        *[
+            (pl.col(f"posterior_alpha_pre_{i}") * pl.col("pop_weight")).alias(
+                f"posterior_alpha_pre_{i}"
+            )
+            for i in [2021, 2022, 2023, 2024, 2025]
+        ],
+        *[
+            (
+                pl.col(f"posterior_alpha_pre_{i}") * pl.col("pop_weight_log")
+            ).alias(f"posterior_alpha_pre_{i}_log")
+            for i in [2021, 2022, 2023, 2024, 2025]
+        ],
         importation_probability_samples=pl.struct(
             ["pop_weight", "importation_probability_samples"]
         ).map_elements(
@@ -280,8 +322,9 @@ def distribute_state_level_risk_to_county(
             ).tolist(),
             pl.List(pl.Float64),
         ),
-        posterior_beta=pl.col("posterior_beta") / pl.col("pop_weight"),
-        posterior_beta_log=pl.col("posterior_beta") / pl.col("pop_weight_log"),
+        posterior_alpha=pl.col("posterior_alpha") * pl.col("pop_weight"),
+        posterior_alpha_log=pl.col("posterior_alpha")
+        * pl.col("pop_weight_log"),
     )
 
     # calculate summary statistics on the importation probabilities
@@ -313,20 +356,34 @@ def distribute_state_level_risk_to_county(
     # take only the quantities we need
     df = df.select(
         [
-            "fips",
-            "state",
-            "county",
-            "year",
-            "type",
-            "observed",
-            "posterior_alpha",
-            "posterior_beta",
-            "posterior_beta_log",
-            "importation_probability_samples",
-            "importation_probability_mean",
-            "importation_probability_median",
-            "importation_probability_lower",
-            "importation_probability_upper",
+            *[
+                f"posterior_alpha_pre_{i}"
+                for i in [2021, 2022, 2023, 2024, 2025]
+            ],
+            *[
+                f"posterior_alpha_pre_{i}_log"
+                for i in [2021, 2022, 2023, 2024, 2025]
+            ],
+            *[
+                f"posterior_beta_pre_{i}"
+                for i in [2021, 2022, 2023, 2024, 2025]
+            ],
+            *[
+                "fips",
+                "state",
+                "county",
+                "year",
+                "type",
+                "observed",
+                "posterior_alpha",
+                "posterior_beta",
+                "posterior_alpha_log",
+                "importation_probability_samples",
+                "importation_probability_mean",
+                "importation_probability_median",
+                "importation_probability_lower",
+                "importation_probability_upper",
+            ],
         ]
     )
 
@@ -395,13 +452,9 @@ def distribute_state_level_risk_to_county(
 
 
 if __name__ == "__main__":
-    counties_with_known_imports, df_2025, counties_present_by_year = (
-        read_outbreaks()
-    )
+    counties_with_known_imports, df_2025 = read_outbreaks()
 
-    df, years_of_data = tally_state_importations(
-        df_2025, counties_present_by_year
-    )
+    df, years_of_data = tally_state_importations(df_2025)
     df = calculate_yearly_import_probability(df, years_of_data)
     # read in our county data
     county_data = pl.read_csv(

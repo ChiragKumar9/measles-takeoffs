@@ -691,29 +691,15 @@ def scenario_results(df, fig, ax):
     scenarios = {
         "Existing NME bans": "add_nmes_back",
         "Highest risk states": "top_risk_state_unconditioned",
+        "Neighboring counties": "bordering_high_risk_state",
         "Highest NME states": "top_nme_state",
         "Highest risk counties": "top_ten_pct_counties",
     }
 
-    # for idx, (scenario, column) in enumerate(scenarios.items()):
-    #     scenario_df = df.filter(pl.col(column) == True)
-    #     median = np.mean(scenario_df['median_percent_change'].to_numpy() == -100) * 100
-    #     lower = np.mean(scenario_df['lower_percent_change'].to_numpy() == -100) * 100
-    #     upper = np.mean(scenario_df['upper_percent_change'].to_numpy() == -100) * 100
-
-    #     ax.errorbar(
-    #         idx,
-    #         median,
-    #         yerr=[[median - upper], [lower - median]],
-    #         fmt='o',
-    #         color='black',
-    #         capsize=5,
-    #     )
-
     for idx, (scenario, column) in enumerate(scenarios.items()):
         scenario_df = df.filter(pl.col(column) == True)
         violinparts = ax.violinplot(
-            scenario_df["no_outbreak_samples"].drop_nans() * 100,
+            scenario_df["median_percent_change"].drop_nans(),
             positions=[idx],
             showextrema=False,
         )
@@ -721,52 +707,61 @@ def scenario_results(df, fig, ax):
         for pc in violinparts["bodies"]:
             pc.set(facecolor="grey", alpha=0.4)
 
+        median = np.nanmedian(scenario_df["median_percent_change"].to_numpy())
+        lower = np.nanpercentile(
+            scenario_df["median_percent_change"].to_numpy(), 25
+        )
+        upper = np.nanpercentile(
+            scenario_df["median_percent_change"].to_numpy(), 75
+        )
+
         ax.errorbar(
-            x=[idx],
-            y=scenario_df["no_outbreak_samples"].drop_nans().median() * 100,
-            yerr=100
-            * np.array(
-                [
-                    scenario_df["no_outbreak_samples"].drop_nans().median()
-                    - scenario_df["no_outbreak_samples"]
-                    .drop_nans()
-                    .quantile(0.25),
-                    scenario_df["no_outbreak_samples"]
-                    .drop_nans()
-                    .quantile(0.75)
-                    - scenario_df["no_outbreak_samples"].drop_nans().median(),
-                ]
-            )[:, None],
+            idx,
+            median,
+            yerr=[[median - lower], [upper - median]],
             fmt="o",
+            color="grey",
             capsize=5,
             capthick=2,
-            color="grey",
         )
 
     ax.set_xticks(range(len(scenarios)))
     ax.set_xticklabels(list(scenarios.keys()), rotation=-45, ha="left")
-    ax.set_ylabel("Probability of no outbreak (%)")
+    ax.set_ylabel("Percent change in outbreak size (%)")
+    ax.set_ylim(-100)
+    ax.axhline(0, color="black", linestyle="--")
 
 
 def plot_who_benefits_most(df, fig, ax):
-    df = df.filter(pl.col("top_risk_state_conditioned") == True)
-    ax.scatter(
-        df["nonmed_exempt_pct_raw"],
-        df["no_outbreak_samples"] * 100,
-        alpha=0.7,
-        color="grey",
+    df = df.filter(
+        (pl.col("top_risk_state_unconditioned") == True)
+        | (pl.col("bordering_high_risk_state") == True)
     )
-    # cbar = fig.colorbar(
-    #     plt.cm.ScalarMappable(cmap='viridis'),
-    #     ax=ax,
-    #     shrink=0.7,
-    #     aspect=20,
-    #     pad=0.0,
-    #     extend="neither",
-    #     orientation="vertical",
-    # )
-    ax.set_xlabel("Change in MMR coverage (%)")
-    ax.set_ylabel("Increase in probability of no outbreak (%)")
+    ax.scatter(
+        df["estimated_mmr_cov_raw"],
+        df["change_in_mmr_cov"],
+        alpha=0.7,
+        c=df["median_percent_change"],
+    )
+    cbar = fig.colorbar(
+        plt.cm.ScalarMappable(cmap="viridis"),
+        ax=ax,
+        shrink=0.7,
+        aspect=20,
+        pad=0.0,
+        extend="neither",
+        orientation="vertical",
+    )
+    cbar.set_label(
+        "Percent change in outbreak size (%)",
+        rotation=90,
+        labelpad=15,
+        fontsize=28,
+    )
+    cbar.ax.tick_params(labelsize=24)
+    ax.set_xlabel("Initial MMR coverage (%)")
+    ax.set_ylabel("Change in MMR coverage (%)")
+    ax.set_ylim(0)
 
 
 if __name__ == "__main__":

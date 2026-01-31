@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 from matplotlib import rc
+from matplotlib.ticker import ScalarFormatter
 
 data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 output_dir = os.path.join(
@@ -87,49 +88,15 @@ def plot_time_varying_vaccine_effect(
             )
 
         if rolling_average:
-            median_effect_expanded_cumsum = jnp.cumsum(median_effect)
-
-            median_effect_expanded = jnp.concatenate(
-                [
-                    median_effect[:1],
-                    median_effect_expanded_cumsum[1:2] / 2,
-                    median_effect_expanded_cumsum[2:3] / 3,
-                    (
-                        median_effect_expanded_cumsum[3:]
-                        - median_effect_expanded_cumsum[:-3]
-                    )
-                    / 3,
-                ]
+            n = 3
+            median_effect_expanded = jnp.convolve(
+                median_effect, jnp.ones(n) / n, mode="same"
             )
-
-            lower_effect_expanded_cumsum = jnp.cumsum(lower_effect)
-
-            lower_effect_expanded = jnp.concatenate(
-                [
-                    lower_effect[:1],
-                    lower_effect_expanded_cumsum[1:2] / 2,
-                    lower_effect_expanded_cumsum[2:3] / 3,
-                    (
-                        lower_effect_expanded_cumsum[3:]
-                        - lower_effect_expanded_cumsum[:-3]
-                    )
-                    / 3,
-                ]
+            lower_effect_expanded = jnp.convolve(
+                lower_effect, jnp.ones(n) / n, mode="same"
             )
-
-            upper_effect_expanded_cumsum = jnp.cumsum(upper_effect)
-
-            upper_effect_expanded = jnp.concatenate(
-                [
-                    upper_effect[:1],
-                    upper_effect_expanded_cumsum[1:2] / 2,
-                    upper_effect_expanded_cumsum[2:3] / 3,
-                    (
-                        upper_effect_expanded_cumsum[3:]
-                        - upper_effect_expanded_cumsum[:-3]
-                    )
-                    / 3,
-                ]
+            upper_effect_expanded = jnp.convolve(
+                upper_effect, jnp.ones(n) / n, mode="same"
             )
         else:
             median_effect_expanded = median_effect
@@ -179,7 +146,7 @@ def plot_time_variance_group_variance_distributions(
         bins=30,
         label="Year-to-year",
     )
-    ax.legend(loc=(0.0, 0.75))
+    ax.legend(loc="lower right")
     ax.set_xlabel("Standard deviation in vaccine effect")
     ax.set_ylabel("Density")
     ax.set_xlim(0)
@@ -202,6 +169,27 @@ def plot_time_variance_vs_group_variance(rw_sigma, state_sigma, fig, ax):
     )
 
 
+def plot_coverage_cases(df1, df2, label1, label2, loc, fig, ax):
+    ax.scatter(
+        df1["estimated_mmr_cov"],
+        df1["cases_outbreak"],
+        color="grey",
+        label=label1,
+    )
+    ax.scatter(
+        df2["estimated_mmr_cov"],
+        df2["cases_outbreak"],
+        color="red",
+        label=label2,
+    )
+    ax.set_xlabel("MMR coverage (%)")
+    ax.set_ylabel("Reported cases (N)")
+    ax.set_yscale("symlog")
+    ax.set_ylim(-0.1)
+    ax.yaxis.set_major_formatter(ScalarFormatter())
+    ax.legend(loc=loc)
+
+
 if __name__ == "__main__":
     fig, ax = setup_plot(4, 2)  # type: ignore
 
@@ -220,7 +208,7 @@ if __name__ == "__main__":
     with open(
         os.path.join(
             output_dir,
-            "predictive_random_walk_poisson_CAR_time_and_group_varying_2025_mega_regions=True.pkl",
+            "predictive_random_walk_poisson_CAR_time_and_group_varying_2025_oddities=True.pkl",
         ),
         "rb",
     ) as file:
@@ -231,7 +219,7 @@ if __name__ == "__main__":
     with open(
         os.path.join(
             output_dir,
-            "predictive_random_walk_poisson_CAR_time_varying_only_2025_mega_regions=True.pkl",
+            "predictive_random_walk_poisson_CAR_time_varying_only_2025_oddities=True.pkl",
         ),
         "rb",
     ) as file:
@@ -242,7 +230,7 @@ if __name__ == "__main__":
     with open(
         os.path.join(
             output_dir,
-            "predictive_random_walk_poisson_CAR_group_varying_only_2025_mega_regions=True.pkl",
+            "predictive_random_walk_poisson_CAR_group_varying_only_2025_oddities=True.pkl",
         ),
         "rb",
     ) as file:
@@ -253,7 +241,7 @@ if __name__ == "__main__":
     with open(
         os.path.join(
             output_dir,
-            "predictive_random_walk_poisson_CAR_constant_2025_mega_regions=True.pkl",
+            "predictive_random_walk_poisson_CAR_constant_2025_oddities=True.pkl",
         ),
         "rb",
     ) as file:
@@ -301,7 +289,7 @@ if __name__ == "__main__":
     with open(
         os.path.join(
             output_dir,
-            "samples_random_walk_poisson_CAR_time_and_group_varying_2025_mega_regions=True.pkl",
+            "samples_random_walk_poisson_CAR_time_and_group_varying_2025_oddities=True.pkl",
         ),
         "rb",
     ) as file:
@@ -351,7 +339,7 @@ if __name__ == "__main__":
     with open(
         os.path.join(
             output_dir,
-            "predictive_random_walk_poisson_CAR_time_and_group_varying_2025_mega_regions=True_exclude_16_17.pkl",
+            "predictive_random_walk_poisson_CAR_time_and_group_varying_2025_oddities=True_exclude_16_17.pkl",
         ),
         "rb",
     ) as file:
@@ -362,7 +350,7 @@ if __name__ == "__main__":
     with open(
         os.path.join(
             output_dir,
-            "predictive_random_walk_poisson_CAR_time_varying_only_2025_mega_regions=True_exclude_16_17.pkl",
+            "predictive_random_walk_poisson_CAR_time_varying_only_2025_oddities=True_exclude_16_17.pkl",
         ),
         "rb",
     ) as file:
@@ -373,7 +361,7 @@ if __name__ == "__main__":
     with open(
         os.path.join(
             output_dir,
-            "predictive_random_walk_poisson_CAR_group_varying_only_2025_mega_regions=True_exclude_16_17.pkl",
+            "predictive_random_walk_poisson_CAR_group_varying_only_2025_oddities=True_exclude_16_17.pkl",
         ),
         "rb",
     ) as file:
@@ -384,7 +372,7 @@ if __name__ == "__main__":
     with open(
         os.path.join(
             output_dir,
-            "predictive_random_walk_poisson_CAR_constant_2025_mega_regions=True_exclude_16_17.pkl",
+            "predictive_random_walk_poisson_CAR_constant_2025_oddities=True_exclude_16_17.pkl",
         ),
         "rb",
     ) as file:
@@ -410,15 +398,26 @@ if __name__ == "__main__":
         va="top",
         ha="right",
     )
-    plot_time_varying_vaccine_effect(
-        sample_dict_wh,
+    plot_coverage_cases(
         df.filter(
-            ~pl.col("year_county_state").is_in(
-                exclude_16_17["year_county_state"].to_list()
+            (pl.col("year") == 2017)
+            & (
+                ~pl.col("year_county_state").is_in(
+                    exclude_16_17["year_county_state"].to_list()
+                )
             )
         ),
-        years_in_order,
-        True,
+        df.filter(
+            (pl.col("year") == 2017)
+            & (
+                pl.col("year_county_state").is_in(
+                    exclude_16_17["year_county_state"].to_list()
+                )
+            )
+        ),
+        "2017 cases",
+        "2017 Minnesota Hennepin\nOutbreak",
+        (0.2, 0.5),
         fig,
         ax[2, 0],  # type: ignore
     )
@@ -453,7 +452,7 @@ if __name__ == "__main__":
     with open(
         os.path.join(
             output_dir,
-            "predictive_random_walk_poisson_CAR_time_and_group_varying_2025_mega_regions=False.pkl",
+            "predictive_random_walk_poisson_CAR_time_and_group_varying_2025_oddities=False.pkl",
         ),
         "rb",
     ) as file:
@@ -464,7 +463,7 @@ if __name__ == "__main__":
     with open(
         os.path.join(
             output_dir,
-            "predictive_random_walk_poisson_CAR_time_varying_only_2025_mega_regions=False.pkl",
+            "predictive_random_walk_poisson_CAR_time_varying_only_2025_oddities=False.pkl",
         ),
         "rb",
     ) as file:
@@ -475,7 +474,7 @@ if __name__ == "__main__":
     with open(
         os.path.join(
             output_dir,
-            "predictive_random_walk_poisson_CAR_group_varying_only_2025_mega_regions=False.pkl",
+            "predictive_random_walk_poisson_CAR_group_varying_only_2025_oddities=False.pkl",
         ),
         "rb",
     ) as file:
@@ -486,7 +485,7 @@ if __name__ == "__main__":
     with open(
         os.path.join(
             output_dir,
-            "predictive_random_walk_poisson_CAR_constant_2025_mega_regions=False.pkl",
+            "predictive_random_walk_poisson_CAR_constant_2025_oddities=False.pkl",
         ),
         "rb",
     ) as file:
@@ -503,11 +502,12 @@ if __name__ == "__main__":
         va="top",
         ha="right",
     )
-    plot_time_varying_vaccine_effect(
-        sample_dict_wh,
-        df.filter(~pl.col("mega_region_2025")),
-        years_in_order,
-        True,
+    plot_coverage_cases(
+        df.filter((pl.col("year") == 2025) & (~pl.col("oddities_2025"))),
+        df.filter((pl.col("year") == 2025) & (pl.col("oddities_2025"))),
+        "2025 cases",
+        "Counties < 10,000 pop",
+        (0.2, 0.5),
         fig,
         ax[3, 0],  # type: ignore
     )
@@ -524,7 +524,7 @@ if __name__ == "__main__":
     )
     plot_time_varying_vaccine_effect(
         sample_dict_wh,
-        df.filter(~pl.col("mega_region_2025")),
+        df.filter(~pl.col("oddities_2025")),
         years_in_order,
         False,
         fig,
