@@ -7,6 +7,7 @@ import os
 import pickle
 
 import geopandas as gpd
+import jax
 import jax.numpy as jnp
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
@@ -29,6 +30,8 @@ rc("font", **font)
 # read analysis params yaml
 with open("params.yml", "r") as f:
     params = yaml.safe_load(f)
+
+key = jax.random.PRNGKey(params["seed"])
 
 
 def setup_plot(nrows, ncols):
@@ -508,33 +511,13 @@ if __name__ == "__main__":
     )
     map_fips_code_data(
         df["fips"],
-        df["median_unconditioned_risk_rank"],
+        df["importation_probability_median"],
         fig,
         ax[1],  # type: ignore
-        cbar_label="Risk percentile",
-        cbar_type="percentile_risk",
+        cbar_label="Importation probability",
+        cbar_type="probability",
         point_data=None,
     )
-
-    # ax[1].text(  # type: ignore
-    #     -0.05,
-    #     1.08,
-    #     "b",
-    #     transform=ax[1].transAxes,  # type: ignore
-    #     fontsize=24,
-    #     fontweight="bold",
-    #     va="top",
-    #     ha="right",
-    # )
-    # map_fips_code_data(
-    #     df["fips"],
-    #     df["median_conditioned_risk_rank"],
-    #     fig,
-    #     ax[1],  # type: ignore
-    #     cbar_label="Import-conditioned risk percentile",
-    #     cbar_type="percentile_risk",
-    #     point_data=None,
-    # )
 
     ax[2].text(  # type: ignore
         -0.05,
@@ -548,11 +531,11 @@ if __name__ == "__main__":
     )
     map_fips_code_data(
         df["fips"],
-        df["importation_probability_median"],
+        df["median_unconditioned_risk_rank"],
         fig,
         ax[2],  # type: ignore
-        cbar_label="Importation probability",
-        cbar_type="probability",
+        cbar_label="Risk percentile",
+        cbar_type="percentile_risk",
         point_data=None,
     )
 

@@ -99,7 +99,11 @@ if __name__ == "__main__":
 
     df = df.with_columns(
         # oddities_2025 = ((pl.col("cases_outbreak") < 10)) & (pl.col("estimated_mmr_cov") < 90) & (pl.col("year") == 2025)
-        oddities_2025=(pl.col("year") == 2025) & (pl.col("pop") <= 50000)
+        oddities_2025=(pl.col("year") == 2025)
+        & (
+            (pl.col("cases_outbreak") <= 10)
+            & (pl.col("estimated_mmr_cov") < 85)
+        )
     )
 
     counties = df["fips"].unique(maintain_order=True).to_list()

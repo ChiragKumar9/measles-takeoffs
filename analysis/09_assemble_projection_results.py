@@ -34,6 +34,8 @@ df = pl.read_csv(
 df = df.filter(pl.col("in_train") == 0)
 
 # make into an incidence measure
+# clip at population size
+projections = jnp.minimum(projections, jnp.array(df["pop"]).reshape(1, -1))
 incidence = projections / df["pop"].to_numpy()
 
 # concatenate to dataframe so we can print out counties by risk

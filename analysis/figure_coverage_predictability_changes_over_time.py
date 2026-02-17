@@ -56,7 +56,6 @@ def setup_plot(nrows, ncols):
 # plot for the vaccination coverage in county-years with >= 10 cases
 def plot_coverage_distribution(
     df,
-    cases_threshold,
     vaccination_threshold,
     fig,
     ax,
@@ -65,23 +64,32 @@ def plot_coverage_distribution(
     # want to make violin plots by outbreak size category and then subfaceted by year
     df = df.with_columns(
         outbreak_size_buckets=pl.col("cases_outbreak").cut(
-            [0, 1, 4, cases_threshold, 1000000000],
-            labels=["-1", "0", "1", "2", "3", "4"],
-            left_closed=True,
+            [0, 4, 9, 19],
+            labels=["-1", "0", "1", "2", "3"],
+            left_closed=False,
         ),
         year_of_interest=pl.col("year").is_in([2021, 2022, 2023, 2024, 2025]),
     )
+    df_correlation = df.filter(pl.col("cases_outbreak") >= 1)
     print(
         stats.spearmanr(
-            df.filter(pl.col("year_of_interest") == False)[vaccination_metric],
-            df.filter(pl.col("year_of_interest") == False)["cases_outbreak"],
+            df_correlation.filter(pl.col("year_of_interest") == False)[
+                vaccination_metric
+            ],
+            df_correlation.filter(pl.col("year_of_interest") == False)[
+                "cases_outbreak"
+            ],
         )
     )
 
     print(
         stats.spearmanr(
-            df.filter(pl.col("year_of_interest") == True)[vaccination_metric],
-            df.filter(pl.col("year_of_interest") == True)["cases_outbreak"],
+            df_correlation.filter(pl.col("year_of_interest") == True)[
+                vaccination_metric
+            ],
+            df_correlation.filter(pl.col("year_of_interest") == True)[
+                "cases_outbreak"
+            ],
         )
     )
     df = df.group_by(["outbreak_size_buckets", "year_of_interest"]).agg(
@@ -156,7 +164,7 @@ def plot_coverage_distribution(
     )
     ks_stat, p_value = stats.ks_2samp(
         df.filter(pl.col("year_of_interest") == False).filter(
-            pl.col("outbreak_size_buckets") == "3"
+            pl.col("outbreak_size_buckets") == "2"
         )[vaccination_metric][0],
         df.filter(pl.col("year_of_interest") == False).filter(
             pl.col("outbreak_size_buckets") == "0"
@@ -171,10 +179,10 @@ def plot_coverage_distribution(
     )
     ks_stat, p_value = stats.ks_2samp(
         df.filter(pl.col("year_of_interest") == False).filter(
-            pl.col("outbreak_size_buckets") == "3"
+            pl.col("outbreak_size_buckets") == "2"
         )[vaccination_metric][0],
         df.filter(pl.col("year_of_interest") == True).filter(
-            pl.col("outbreak_size_buckets") == "3"
+            pl.col("outbreak_size_buckets") == "2"
         )[vaccination_metric][0],
         method="exact",
         alternative="less",
@@ -186,7 +194,7 @@ def plot_coverage_distribution(
     )
     ks_stat, p_value = stats.ks_2samp(
         df.filter(pl.col("year_of_interest") == True).filter(
-            pl.col("outbreak_size_buckets") == "3"
+            pl.col("outbreak_size_buckets") == "2"
         )[vaccination_metric][0],
         df.filter(pl.col("year_of_interest") == True).filter(
             pl.col("outbreak_size_buckets") == "0"
@@ -260,20 +268,22 @@ def plot_coverage_distribution(
     ax.set_xticklabels(
         [
             "0",
-            "1-3",
-            "4-9",
-            f"≥{cases_threshold}",
+            "1-4",
+            "5-9",
+            "10-19",
+            "≥20",
         ]
     )
 
     ax.legend(
         [violinparts1["bodies"][0], violinparts2["bodies"][0]],
         ["2011-2020", "2021-2025"],
-        # loc=(0.45, 0.02),
+        loc=(0.6, 0.01),
     )
     ax.axhline(y=vaccination_threshold, color="k", linestyle="--")
     ax.set_ylabel("MMR vaccine coverage (%)")
     ax.set_xlabel("Outbreak size (cases)")
+    ax.set_ylim(top=100)
 
     return fig, ax
 
@@ -378,7 +388,7 @@ def plot_outbreak_identification_rate(df, fig, ax):
     ax.legend(loc=(0.40, 0.0))
     ax.set_xlabel("MMR vaccine coverage (%)")
     ax.set_ylabel("Identification rate (sensitivity) (%)")
-    ax.set_ylim(0)
+    ax.set_ylim(0, 100)
 
     return df_identification, fig, ax
 
@@ -517,7 +527,7 @@ def plot_coverage_various_models(df, fig, ax):
     ax.set_ylabel(
         "% change in incidence rate per 1%\nincrease in MMR vaccine coverage"
     )
-    ax.legend(loc=(0.2, 0.65))
+    ax.legend(loc=(0.2, 0.68))
 
     return fig, ax
 
@@ -610,33 +620,10 @@ if __name__ == "__main__":
     )
     plot_coverage_distribution(
         df,
-        10,
         95,
         fig,
         ax[0, 0],  # type: ignore
         vaccination_metric="estimated_mmr_cov",
-    )
-
-    fig_r01, ax_r01 = setup_plot(1, 1)  # type: ignore
-    plot_coverage_distribution(
-        df,
-        10,
-        95,
-        fig_r01,
-        ax_r01,  # type: ignore
-        vaccination_metric="estimated_mmr_cov",
-    )
-
-    fig_r01.tight_layout()
-
-    # save
-
-    fig_r01.savefig(
-        os.path.join(
-            fig_dir, "figure_coverage_outbreak_size_distribution_time_r01.png"
-        ),
-        dpi=300,
-        bbox_inches="tight",
     )
 
     # threshold analysis -- outbreak identification rate for thresholds

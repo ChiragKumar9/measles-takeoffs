@@ -164,15 +164,29 @@ if __name__ == "__main__":
                     print(f"Running rolling validation for years: {years}")
                     # filter dataset to only include the training years
                     train_df = df.filter(pl.col("year").is_in(years))
-                    # concatenate with the next year for testing
-                    train_df = pl.concat(
-                        [train_df, df.filter(pl.col("year") == years[-1] + 1)]
-                    )
-                    # denote whether the row is for training or testing
+                    # denote as training
                     train_df = train_df.with_columns(
-                        cases_train=pl.when(pl.col("year") == years[-1] + 1)
-                        .then(0)
-                        .otherwise(1)
+                        type=pl.lit("train"), cases_train=pl.lit(1)
+                    )
+
+                    # grab the test data as the entire projection dataset
+                    test_df = pl.read_csv(
+                        os.path.join(
+                            output_dir,
+                            f"scaled_projection_dataset_{years[-1] + 1}.csv",
+                        ),
+                        schema_overrides={"fips": pl.String},
+                    )
+
+                    # label this data with type and cases_train
+                    test_df = test_df.with_columns(
+                        type=pl.lit("projection"),
+                        cases_train=pl.lit(0),
+                    )
+
+                    # concatenate the train and test data
+                    train_df = pl.concat(
+                        [train_df, test_df], how="diagonal_relaxed"
                     )
 
                     # assemble the adjacency matrix
@@ -192,15 +206,13 @@ if __name__ == "__main__":
                     covariates_scaled = scaler.fit_transform(
                         covariates.to_numpy()
                     )
-                    # add the test data
+                    # add the test data -- recall the test data is already scaled
                     covariates_scaled = np.vstack(
                         [
                             covariates_scaled,
-                            scaler.transform(
-                                train_df.filter(pl.col("cases_train") == 0)
-                                .select(vars)
-                                .to_numpy()
-                            ),
+                            train_df.filter(pl.col("cases_train") == 0)
+                            .select(vars)
+                            .to_numpy(),
                         ]
                     )
                     # append year variables
@@ -301,7 +313,7 @@ if __name__ == "__main__":
                             pl.col("cases_train") == 1
                         )["pop_5_9"].to_numpy()
                         # calculate immune fraction based on coverage and effectiveness
-                        mmr_effectiveness = 0.93
+                        mmr_effectiveness = 0.97
                         immune = (
                             train_df.filter(pl.col("cases_train") == 1)[
                                 "estimated_mmr_cov"

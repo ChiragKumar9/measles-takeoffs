@@ -443,12 +443,61 @@ def higher_level_regions() -> dict[str, list[str]]:
     return assignment_special_places
 
 
+def exclude_county_state_year(df, county, state, year):
+    return df.filter(
+        ~(
+            (pl.col("county") == county)
+            & (pl.col("state") == state)
+            & (pl.col("year") == year)
+        )
+    )
+
+
 def read_vaccinations(data_dir=data_dir) -> pl.DataFrame:
     df = pl.read_excel(
         os.path.join(
             data_dir, "Compiled_Vaccine_Exemption_Data_R1_110225_Hawaiied.xlsx"
         )
     )
+
+    # remove the funky places lauren found in her QC
+    # exclude Butts, Georgia, 2024
+    df = exclude_county_state_year(df, "Butts", "Georgia", 2024)
+    # exclude Jasper, Georgia 2024
+    df = exclude_county_state_year(df, "Jasper", "Georgia", 2024)
+    # exclude Lumpkin, Georgia 2024
+    df = exclude_county_state_year(df, "Lumpkin", "Georgia", 2024)
+    # exclude Richmond, Georgia 2024
+    df = exclude_county_state_year(df, "Richmond", "Georgia", 2024)
+    # exclude schley, georgia 2024
+    df = exclude_county_state_year(df, "Schley", "Georgia", 2024)
+    # exclude baltimore city, maryland 2019
+    df = exclude_county_state_year(df, "Baltimore City", "Maryland", 2019)
+    # drop slope county 2021
+    df = exclude_county_state_year(df, "Slope", "North Dakota", 2021)
+    # for Cocke, Tennessee 2024, number should be corrected from 4.5 to 94.5
+    df = df.with_columns(
+        MMR_cov=pl.when(
+            (pl.col("county") == "Cocke")
+            & (pl.col("state") == "Tennessee")
+            & (pl.col("year") == 2024)
+        )
+        .then(pl.lit(94.5))
+        .otherwise(pl.col("nonmed_exempt_pct"))
+    )
+    # fill in states that did not report medical exemptions separately
+    # as having medical exemptions of 0
+    # these two states are wyoming and louisiana
+    # whenever medical exemptions for these states are null, fill them with 0
+    df = df.with_columns(
+        med_exempt_pct=pl.when(
+            (pl.col("state").is_in(["Wyoming", "Louisiana"]))
+            & pl.col("med_exempt_pct").is_null()
+        )
+        .then(pl.lit(0))
+        .otherwise(pl.col("med_exempt_pct"))
+    )
+
     # upper case lower case seem to be inconsistent across datasets
     df = df.rename({col: col.lower() for col in df.columns})
 
@@ -551,25 +600,6 @@ def process_vaccinations_df(vaccinations_df: pl.DataFrame) -> pl.DataFrame:
         estimated_mmr_cov=pl.when(pl.col("mmr_cov").is_null())
         .then(pl.col("all_vacc_cov"))
         .otherwise(pl.col("mmr_cov"))
-    )
-    # for baltimore city in 2019, mmr coverage is 0%, but other years have data
-    # so we average the surroundings years together to get an estimate
-    vaccinations_df = vaccinations_df.with_columns(
-        estimated_mmr_cov=pl.when(
-            (pl.col("state") == "Maryland")
-            & (pl.col("county") == "Baltimore City")
-            & (pl.col("year") == 2019)
-        )
-        .then(
-            pl.lit(
-                vaccinations_df.filter(
-                    (pl.col("state") == "Maryland")
-                    & (pl.col("county") == "Baltimore City")
-                    & ((pl.col("year") == 2018) | (pl.col("year") == 2020))
-                )["estimated_mmr_cov"].mean()
-            )
-        )
-        .otherwise(pl.col("estimated_mmr_cov"))
     )
 
     # align namings of places

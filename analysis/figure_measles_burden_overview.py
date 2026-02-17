@@ -396,6 +396,16 @@ def plot_cases_over_time(df, fig, ax):
     return fig, ax
 
 
+def exclude_county_state_year(df, county, state, year):
+    return df.filter(
+        ~(
+            (pl.col("county") == county)
+            & (pl.col("state") == state)
+            & (pl.col("year") == year)
+        )
+    )
+
+
 if __name__ == "__main__":
     df = pl.read_csv(
         os.path.join(data_dir, "analysis_dataset.csv"),
@@ -546,9 +556,47 @@ if __name__ == "__main__":
 
     vaccination_data = pl.read_excel(
         os.path.join(
-            data_dir, "Compiled_Vaccine_Exemption_Data_Final_v1_092425.xlsx"
+            data_dir, "Compiled_Vaccine_Exemption_Data_R1_110225_Hawaiied.xlsx"
         ),
         schema_overrides={"FIPS": pl.String},
+    )
+
+    # remove the funky places lauren found in her QC
+    # exclude Butts, Georgia, 2024
+    df = exclude_county_state_year(df, "Butts", "Georgia", 2024)
+    # exclude Jasper, Georgia 2024
+    df = exclude_county_state_year(df, "Jasper", "Georgia", 2024)
+    # exclude Lumpkin, Georgia 2024
+    df = exclude_county_state_year(df, "Lumpkin", "Georgia", 2024)
+    # exclude Richmond, Georgia 2024
+    df = exclude_county_state_year(df, "Richmond", "Georgia", 2024)
+    # exclude schley, georgia 2024
+    df = exclude_county_state_year(df, "Schley", "Georgia", 2024)
+    # exclude baltimore city, maryland 2019
+    df = exclude_county_state_year(df, "Baltimore City", "Maryland", 2019)
+    # drop slope county 2021
+    df = exclude_county_state_year(df, "Slope", "North Dakota", 2021)
+    # for Cocke, Tennessee 2024, number should be corrected from 4.5 to 94.5
+    df = df.with_columns(
+        MMR_cov=pl.when(
+            (pl.col("county") == "Cocke")
+            & (pl.col("state") == "Tennessee")
+            & (pl.col("year") == 2024)
+        )
+        .then(pl.lit(94.5))
+        .otherwise(pl.col("nonmed_exempt_pct"))
+    )
+    # fill in states that did not report medical exemptions separately
+    # as having medical exemptions of 0
+    # these two states are wyoming and louisiana
+    # whenever medical exemptions for these states are null, fill them with 0
+    df = df.with_columns(
+        med_exempt_pct=pl.when(
+            (pl.col("state").is_in(["Wyoming", "Louisiana"]))
+            & pl.col("med_exempt_pct").is_null()
+        )
+        .then(pl.lit(0))
+        .otherwise(pl.col("med_exempt_pct"))
     )
 
     # Ad hoc adjustment to some odd fips codes
@@ -571,25 +619,6 @@ if __name__ == "__main__":
             pl.Float64, strict=False
         )
     ).filter(pl.col("estimated_mmr_cov").is_not_null())
-
-    # correct the baltimore oddity
-    vaccination_data = vaccination_data.with_columns(
-        estimated_mmr_cov=pl.when(
-            (pl.col("state") == "Maryland")
-            & (pl.col("county") == "Baltimore City")
-            & (pl.col("year") == 2019)
-        )
-        .then(
-            pl.lit(
-                vaccination_data.filter(
-                    (pl.col("state") == "Maryland")
-                    & (pl.col("county") == "Baltimore City")
-                    & ((pl.col("year") == 2018) | (pl.col("year") == 2020))
-                )["estimated_mmr_cov"].mean()
-            )
-        )
-        .otherwise(pl.col("estimated_mmr_cov"))
-    )
 
     # rename "FIPS" for "fips"
     vaccination_data = vaccination_data.rename({"FIPS": "fips"})
@@ -867,28 +896,34 @@ if __name__ == "__main__":
     # filter
     vaccination_data_latest = vaccination_data.filter(pl.col("year") == 2023)
 
-    # grab the latest available vaccination data
-    vaccination_data_export = (
-        vaccination_data.filter(
-            (pl.col("estimated_mmr_cov").is_not_null())
-            & (pl.col("nonmed_exempt_pct").is_not_null())
-            & (pl.col("med_exempt_pct").is_not_null())
+    # what we want to do is really grab the latest available data not to exceed
+    # a given year for all counties
+    # we validate on 2021, 2022, 2023, 2024, and 2025
+    validation_years = [2021, 2022, 2023, 2024, 2025]
+    for year in validation_years:
+        # grab the latest available vaccination data
+        vaccination_data_export = (
+            vaccination_data.filter(pl.col("year") <= year)
+            .filter(
+                (pl.col("estimated_mmr_cov").is_not_null())
+                & (pl.col("nonmed_exempt_pct").is_not_null())
+                & (pl.col("med_exempt_pct").is_not_null())
+            )
+            .sort(["fips", "year"], descending=True)
+            .group_by("fips", maintain_order=True)
+            .agg(
+                pl.first("year"),
+                pl.first("estimated_mmr_cov"),
+                pl.first("nonmed_exempt_pct"),
+                pl.first("med_exempt_pct"),
+                pl.first("state"),
+                pl.first("county"),
+            )
         )
-        .sort(["fips", "year"], descending=True)
-        .group_by("fips", maintain_order=True)
-        .agg(
-            pl.first("year"),
-            pl.first("estimated_mmr_cov"),
-            pl.first("nonmed_exempt_pct"),
-            pl.first("med_exempt_pct"),
-            pl.first("state"),
-            pl.first("county"),
-        )
-    )
 
-    vaccination_data_export.write_csv(
-        os.path.join(data_dir, "latest_vaccination_data.csv")
-    )
+        vaccination_data_export.write_csv(
+            os.path.join(data_dir, f"{year}_vaccination_data.csv")
+        )
 
     # map
     ax[1, 0].text(  # type: ignore

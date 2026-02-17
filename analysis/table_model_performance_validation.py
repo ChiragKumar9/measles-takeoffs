@@ -55,7 +55,10 @@ def performance_table(
                 MAE=pl.lit(None),
                 MAE_lower=pl.lit(None),
                 MAE_upper=pl.lit(None),
-                AUROC=pl.lit(None),
+                AUROC2=pl.lit(None),
+                AUROC5=pl.lit(None),
+                AUROC10=pl.lit(None),
+                AUROC20=pl.lit(None),
                 Year=pl.lit(year),
                 n=pl.lit(None),
                 n_full=pl.lit(None),
@@ -80,35 +83,41 @@ def performance_table(
                 MAE_lower=pl.lit(None),
                 MAE_upper=pl.lit(None),
                 Year=pl.lit(year),
-                AUROC=pl.lit(None),
-                average_precision=pl.lit(None),
+                AUROC2=pl.lit(None),
+                AUROC5=pl.lit(None),
+                AUROC10=pl.lit(None),
+                AUROC20=pl.lit(None),
+                average_precision2=pl.lit(None),
+                average_precision5=pl.lit(None),
+                average_precision10=pl.lit(None),
+                average_precision20=pl.lit(None),
                 n=pl.lit(None),
                 n_full=pl.lit(None),
             ).with_columns(
-                pl.lit(None).alias("Sensitivity, 10+"),
-                pl.lit(None).alias("Sensitivity, 10+_lower"),
-                pl.lit(None).alias("Sensitivity, 10+_upper"),
-                pl.lit(None).alias("Specificity, 10+"),
-                pl.lit(None).alias("Specificity, 10+_lower"),
-                pl.lit(None).alias("Specificity, 10+_upper"),
                 pl.lit(None).alias("Sensitivity, 2+"),
-                pl.lit(None).alias("Sensitivity, 2+_lower"),
-                pl.lit(None).alias("Sensitivity, 2+_upper"),
+                # pl.lit(None).alias("Sensitivity, 2+_lower"),
+                # pl.lit(None).alias("Sensitivity, 2+_upper"),
                 pl.lit(None).alias("Specificity, 2+"),
-                pl.lit(None).alias("Specificity, 2+_lower"),
-                pl.lit(None).alias("Specificity, 2+_upper"),
+                # pl.lit(None).alias("Specificity, 2+_lower"),
+                # pl.lit(None).alias("Specificity, 2+_upper"),
                 pl.lit(None).alias("Sensitivity, 5+"),
-                pl.lit(None).alias("Sensitivity, 5+_lower"),
-                pl.lit(None).alias("Sensitivity, 5+_upper"),
+                # pl.lit(None).alias("Sensitivity, 5+_lower"),
+                # pl.lit(None).alias("Sensitivity, 5+_upper"),
                 pl.lit(None).alias("Specificity, 5+"),
-                pl.lit(None).alias("Specificity, 5+_lower"),
-                pl.lit(None).alias("Specificity, 5+_upper"),
+                # pl.lit(None).alias("Specificity, 5+_lower"),
+                # pl.lit(None).alias("Specificity, 5+_upper"),
+                pl.lit(None).alias("Sensitivity, 10+"),
+                # pl.lit(None).alias("Sensitivity, 10+_lower"),
+                # pl.lit(None).alias("Sensitivity, 10+_upper"),
+                pl.lit(None).alias("Specificity, 10+"),
+                # pl.lit(None).alias("Specificity, 10+_lower"),
+                # pl.lit(None).alias("Specificity, 10+_upper"),
                 pl.lit(None).alias("Sensitivity, 20+"),
-                pl.lit(None).alias("Sensitivity, 20+_lower"),
-                pl.lit(None).alias("Sensitivity, 20+_upper"),
+                # pl.lit(None).alias("Sensitivity, 20+_lower"),
+                # pl.lit(None).alias("Sensitivity, 20+_upper"),
                 pl.lit(None).alias("Specificity, 20+"),
-                pl.lit(None).alias("Specificity, 20+_lower"),
-                pl.lit(None).alias("Specificity, 20+_upper"),
+                # pl.lit(None).alias("Specificity, 20+_lower"),
+                # pl.lit(None).alias("Specificity, 20+_upper"),
             )
 
         if with_importation is None:
@@ -198,141 +207,146 @@ def performance_table(
                 mae_upper = round(float(np.nanpercentile(mae, 97.5)), 2)
 
             if model_selection is not None or include_classification:
-                y_true = true_full >= 10
-                y_true = y_true.astype(np.int64)
-                samples_full = np.sort(samples_full, axis=0)
-                # we want to calculate the sensitivity, specificity, auroc, and auprc
-                # we need to figure out the best cutoff point for each draw from the posterior
-                for i in range(samples_full.shape[0]):
-                    temp = samples_full[i, :]
-                    precision, recall, thresholds = precision_recall_curve(
-                        y_true, temp
-                    )
-                    # f1_scores = 2 * (precision * recall) / (precision + recall)
-                    # f1_scores = np.nan_to_num(f1_scores, nan=-np.inf)
-                    distances = np.sqrt(
-                        (1 - precision) ** 2 + (1 - recall) ** 2
-                    )
-                    optimal_idx = np.argmin(distances)
-                    # fpr, tpr, thresholds = roc_curve(y_true, temp)
-                    # youdens_j = tpr - fpr
-                    # optimal_idx = np.argmax(youdens_j)
-                    if optimal_idx >= len(thresholds):
-                        # this means every value is negative
-                        if np.max(temp) != 0:
-                            temp = temp / np.max(temp) * 10 - 1e-6
-                    else:
-                        optimal_threshold = thresholds[optimal_idx]
-                        if optimal_threshold <= 0:
-                            # we want to classify every value as positive
-                            temp = temp + 10
-                        elif optimal_threshold == np.inf:
-                            # we want to classify every value as negative
+                for classification_threshold in [2, 5, 10, 20]:
+                    y_true = true_full >= classification_threshold
+                    y_true = y_true.astype(np.int64)
+                    samples_full_threshold = samples_full.copy()
+                    # we want to calculate the sensitivity, specificity, auroc, and auprc
+                    # we need to figure out the best cutoff point for each draw from the posterior
+                    for i in range(samples_full.shape[0]):
+                        temp = samples_full_threshold[i, :]
+                        precision, recall, thresholds = precision_recall_curve(
+                            y_true, temp
+                        )
+                        distances = np.sqrt(
+                            (1 - precision) ** 2 + (1 - recall) ** 2
+                        )
+                        optimal_idx = np.argmin(distances)
+                        if optimal_idx >= len(thresholds):
+                            # this means every value is negative
+                            # because precision is 1, meaning we have no false positives
                             if np.max(temp) != 0:
-                                temp = temp / np.max(temp) * 10 - 1e-6
+                                temp = (
+                                    temp
+                                    / np.max(temp)
+                                    * classification_threshold
+                                    - 1e-6
+                                )
                         else:
-                            temp = temp / optimal_threshold
-                            temp = temp * 10
-                    samples_full[i, :] = temp
+                            optimal_threshold = thresholds[optimal_idx]
+                            if optimal_threshold <= 0:
+                                # we want to classify every value as positive
+                                temp = temp + classification_threshold
+                            elif optimal_threshold == np.inf:
+                                # we want to classify every value as negative
+                                if np.max(temp) != 0:
+                                    temp = (
+                                        temp
+                                        / np.max(temp)
+                                        * classification_threshold
+                                        - 1e-6
+                                    )
+                            else:
+                                temp = temp / optimal_threshold
+                                temp = temp * classification_threshold
+                        samples_full_threshold[i, :] = temp
 
-                for threshold in [2, 5, 10, 20]:
-                    cases_geq = samples_full >= threshold
-                    # sensitivity asks for how many times is true >= 10 that cases is also
-                    sensitivity = 100 * cases_geq[
-                        :, true_full >= threshold
-                    ].mean(axis=1)
-                    sensitivity_median = np.nanmedian(sensitivity)
-                    sensitivity_median = round(float(sensitivity_median), 2)
-                    sensitivity_lower = round(
-                        float(np.nanpercentile(sensitivity, 2.5)), 2
-                    )
-                    sensitivity_upper = round(
-                        float(np.nanpercentile(sensitivity, 97.5)), 2
-                    )
-                    # specificity asks for how many times is true < 10 that cases is also
-                    cases_le = samples_full < threshold
-                    specificity = 100 * (
-                        1 - cases_le[:, true_full < threshold]
-                    ).mean(axis=1)
-                    specificity_median = np.nanmedian(specificity)
-                    specificity_median = round(float(specificity_median), 2)
-                    specificity_lower = round(
-                        float(np.nanpercentile(specificity, 2.5)), 2
-                    )
-                    specificity_upper = round(
-                        float(np.nanpercentile(specificity, 97.5)), 2
+                    y_scores = (
+                        samples_full_threshold >= classification_threshold
+                    ).mean(axis=0)
+
+                    fpr, tpr, _ = roc_curve(y_true, y_scores)
+
+                    # find the maximum sensitivity given that specificity is >= cutoff
+                    allowable_fpr = fpr <= 0.4
+                    # because the tprs and fprs are sorted in increasing order,
+                    # the greatest tpr at the allowable fpr is the last one
+                    specificity = round(100 * (1 - fpr[allowable_fpr][-1]), 2)
+                    sensitivity = round(100 * tpr[allowable_fpr][-1], 2)
+
+                    auc = round(100 * roc_auc_score(y_true, y_scores), 2)
+                    average_precision = round(
+                        100 * average_precision_score(y_true, y_scores), 2
                     )
 
                     # set the values
                     if model_selection is None:
                         performance = performance.with_columns(
                             pl.when(pl.col("Model") == model)
-                            .then(pl.lit(sensitivity_median))
-                            .otherwise(pl.col(f"Sensitivity, {threshold}+"))
-                            .alias(f"Sensitivity, {threshold}+"),
-                            pl.when(pl.col("Model") == model)
-                            .then(pl.lit(sensitivity_lower))
+                            .then(pl.lit(sensitivity))
                             .otherwise(
-                                pl.col(f"Sensitivity, {threshold}+_lower")
+                                pl.col(
+                                    f"Sensitivity, {classification_threshold}+"
+                                )
                             )
-                            .alias(f"Sensitivity, {threshold}+_lower"),
+                            .alias(
+                                f"Sensitivity, {classification_threshold}+"
+                            ),
+                            # pl.when(pl.col("Model") == model)
+                            # .then(pl.lit(sensitivity_lower))
+                            # .otherwise(
+                            # pl.col(f"Sensitivity, {classification_threshold}+_lower")
+                            # )
+                            # .alias(f"Sensitivity, {classification_threshold}+_lower"),
+                            # pl.when(pl.col("Model") == model)
+                            # .then(pl.lit(sensitivity_upper))
+                            # .otherwise(
+                            # pl.col(f"Sensitivity, {classification_threshold}+_upper")
+                            # )
+                            # .alias(f"Sensitivity, {classification_threshold}+_upper"),
                             pl.when(pl.col("Model") == model)
-                            .then(pl.lit(sensitivity_upper))
+                            .then(pl.lit(specificity))
                             .otherwise(
-                                pl.col(f"Sensitivity, {threshold}+_upper")
+                                pl.col(
+                                    f"Specificity, {classification_threshold}+"
+                                )
                             )
-                            .alias(f"Sensitivity, {threshold}+_upper"),
-                            pl.when(pl.col("Model") == model)
-                            .then(pl.lit(specificity_median))
-                            .otherwise(pl.col(f"Specificity, {threshold}+"))
-                            .alias(f"Specificity, {threshold}+"),
-                            pl.when(pl.col("Model") == model)
-                            .then(pl.lit(specificity_lower))
-                            .otherwise(
-                                pl.col(f"Specificity, {threshold}+_lower")
-                            )
-                            .alias(f"Specificity, {threshold}+_lower"),
-                            pl.when(pl.col("Model") == model)
-                            .then(pl.lit(specificity_upper))
-                            .otherwise(
-                                pl.col(f"Specificity, {threshold}+_upper")
-                            )
-                            .alias(f"Specificity, {threshold}+_upper"),
+                            .alias(
+                                f"Specificity, {classification_threshold}+"
+                            ),
+                            # pl.when(pl.col("Model") == model)
+                            # .then(pl.lit(specificity_lower))
+                            # .otherwise(
+                            # pl.col(f"Specificity, {classification_threshold}+_lower")
+                            # )
+                            # .alias(f"Specificity, {classification_threshold}+_lower"),
+                            # pl.when(pl.col("Model") == model)
+                            # .then(pl.lit(specificity_upper))
+                            # .otherwise(
+                            # pl.col(f"Specificity, {classification_threshold}+_upper")
+                            # )
+                            # .alias(f"Specificity, {classification_threshold}+_upper"),
                         )
-                auc = round(
-                    100
-                    * roc_auc_score(
-                        y_true, np.mean(samples_full >= 10, axis=0)
-                    ),
-                    2,
-                )
-                average_precision = round(
-                    100
-                    * average_precision_score(
-                        y_true, np.mean(samples_full >= 10, axis=0)
-                    ),
-                    2,
-                )
 
-                # set the values
-                if model_selection is None:
-                    performance = performance.with_columns(
-                        pl.when(pl.col("Model") == model)
-                        .then(pl.lit(auc))
-                        .otherwise(pl.col("AUROC"))
-                        .alias("AUROC"),
-                        pl.when(pl.col("Model") == model)
-                        .then(pl.lit(average_precision))
-                        .otherwise(pl.col("average_precision"))
-                        .alias("average_precision"),
-                    )
-                else:
-                    performance = performance.with_columns(
-                        pl.when(pl.col("Model") == model)
-                        .then(pl.lit(auc))
-                        .otherwise(pl.col("AUROC"))
-                        .alias("AUROC"),
-                    )
+                    # set the values
+                    if model_selection is None:
+                        performance = performance.with_columns(
+                            pl.when(pl.col("Model") == model)
+                            .then(pl.lit(auc))
+                            .otherwise(
+                                pl.col(f"AUROC{classification_threshold}")
+                            )
+                            .alias(f"AUROC{classification_threshold}"),
+                            pl.when(pl.col("Model") == model)
+                            .then(pl.lit(average_precision))
+                            .otherwise(
+                                pl.col(
+                                    f"average_precision{classification_threshold}"
+                                )
+                            )
+                            .alias(
+                                f"average_precision{classification_threshold}"
+                            ),
+                        )
+                    else:
+                        performance = performance.with_columns(
+                            pl.when(pl.col("Model") == model)
+                            .then(pl.lit(auc))
+                            .otherwise(
+                                pl.col(f"AUROC{classification_threshold}")
+                            )
+                            .alias(f"AUROC{classification_threshold}"),
+                        )
             if not classification_only:
                 performance = performance.with_columns(
                     R2=pl.when(pl.col("Model") == model)
@@ -480,8 +494,17 @@ def performance_table(
                 MAE_upper=(
                     pl.col("MAE_upper") * pl.col("n") / pl.sum("n")
                 ).sum(),
-                AUROC=(
-                    pl.col("AUROC") * pl.col("n_full") / pl.sum("n_full")
+                AUROC2=(
+                    pl.col("AUROC2") * pl.col("n_full") / pl.sum("n_full")
+                ).sum(),
+                AUROC5=(
+                    pl.col("AUROC5") * pl.col("n_full") / pl.sum("n_full")
+                ).sum(),
+                AUROC10=(
+                    pl.col("AUROC10") * pl.col("n_full") / pl.sum("n_full")
+                ).sum(),
+                AUROC20=(
+                    pl.col("AUROC20") * pl.col("n_full") / pl.sum("n_full")
                 ).sum(),
             )
             .with_columns(Year=pl.lit("Overall"))
@@ -505,20 +528,23 @@ def performance_table(
             [
                 "Model",
                 "Year",
+                "AUROC10",
                 "R2",
                 "R2_lower",
                 "R2_upper",
                 "MAE",
                 "MAE_lower",
                 "MAE_upper",
-                "AUROC",
+                "AUROC2",
+                "AUROC5",
+                "AUROC20",
             ]
         ]
         performance = performance.sort(
-            ["Year", "AUROC", "R2"], descending=[False, True, True]
+            ["Year", "AUROC10", "R2"], descending=[False, True, True]
         )
         performance = performance.with_columns(
-            # round everythin that is numeric to two decimal places
+            # round everything that is numeric to two decimal places
             [
                 pl.col(x).round(2)
                 for x in performance.columns
@@ -527,7 +553,6 @@ def performance_table(
         )
 
     else:
-        n_full_metrics = ["AUROC", "average_precision"]
         agg = []
         for metric in performance.columns:
             if (
@@ -553,14 +578,36 @@ def performance_table(
                     )
                 else:
                     if (
-                        metric in n_full_metrics
+                        "AUROC" in metric
+                        or "average_precision" in metric
                         or "Sensitivity" in metric
                         or "Specificity" in metric
                     ):
-                        n = "n_full"
+                        agg.append(
+                            (
+                                pl.col(metric).filter(
+                                    pl.col(metric)
+                                    .cast(pl.Float64)
+                                    .is_not_nan()
+                                )
+                                * pl.col("n_full").filter(
+                                    pl.col(metric)
+                                    .cast(pl.Float64)
+                                    .is_not_nan()
+                                )
+                                / pl.col("n_full")
+                                .filter(
+                                    pl.col(metric)
+                                    .cast(pl.Float64)
+                                    .is_not_nan()
+                                )
+                                .sum()
+                            ).sum()
+                        )
                     else:
-                        n = "n"
-                    agg.append((pl.col(metric) * pl.col(n) / pl.sum(n)).sum())
+                        agg.append(
+                            (pl.col(metric) * pl.col("n") / pl.sum("n")).sum()
+                        )
 
         performance_grouped = performance.group_by("Model").agg(agg)
         performance_grouped = performance_grouped.with_columns(
@@ -587,8 +634,22 @@ def performance_table(
         and x
         not in [
             "Model",
-            "AUROC",
-            "average_precision",
+            "AUROC2",
+            "AUROC5",
+            "AUROC10",
+            "AUROC20",
+            "average_precision2",
+            "average_precision5",
+            "average_precision10",
+            "average_precision20",
+            "Sensitivity, 10+",
+            "Specificity, 10+",
+            "Sensitivity, 2+",
+            "Specificity, 2+",
+            "Sensitivity, 5+",
+            "Specificity, 5+",
+            "Sensitivity, 20+",
+            "Specificity, 20+",
             "Year",
             "n",
             "n_full",
@@ -629,8 +690,15 @@ def performance_table(
             "RMSE": "RMSE (cases)",
             "MAE": "MAE (cases)",
             "R2": "R² (%)",
-            "AUROC": "AU-ROC, 10+ cases (%)",
-            "average_precision": "Average precision, 10+ cases (%)",
+            "AUROC2": "AU-ROC, 2+ cases (%)",
+            "AUROC5": "AU-ROC, 5+ cases (%)",
+            "AUROC10": "AU-ROC, 10+ cases (%)",
+            "AUROC20": "AU-ROC, 20+ cases (%)",
+            "average_precision2": "Average precision, 2+ cases (%)",
+            "average_precision5": "Average precision, 5+ cases (%)",
+            "average_precision10": "Average precision, 10+ cases (%)",
+            "average_precision20": "Average precision, 20+ cases (%)",
+            "Year": "Projection year",
         },
         strict=False,
     )
@@ -690,7 +758,7 @@ if __name__ == "__main__":
         model_selection[0, idx] = 2
 
         mechanistic.append(m["cases"])
-    models["Mechanistic: MMR coverage, starting 2019"] = mechanistic
+    models["Mechanistic: MMR coverage, trained starting 2019"] = mechanistic
 
     mechanistic = []
     for idx, year in enumerate(
@@ -715,7 +783,9 @@ if __name__ == "__main__":
         model_selection[0, idx] = 2
 
         mechanistic.append(m["cases"])
-    models["Mechanistic: MMR coverage, last two years"] = mechanistic
+    models["Mechanistic: MMR coverage, trained over the last two years"] = (
+        mechanistic
+    )
 
     mechanistic = []
     for idx, year in enumerate(
@@ -782,7 +852,7 @@ if __name__ == "__main__":
         model_selection[0, idx] = 2
 
         mechanistic.append(m["cases"])
-    models["Mechanistic: MMR coverage, starting 2011"] = mechanistic
+    models["Mechanistic: MMR coverage, trained starting 2011"] = mechanistic
 
     # we now have to read the different poisson models
     # the model options are covariate versions, with/without pooling, with and without car
@@ -842,7 +912,7 @@ if __name__ == "__main__":
 
                     model_selection[model_counter, idx] = k
 
-                additional_info = ", starting 2019"
+                additional_info = ", trained starting 2019"
                 if pool:
                     additional_info += ", partial pooled"
                 if car:
@@ -904,7 +974,7 @@ if __name__ == "__main__":
 
                     model_selection[model_counter, idx] = k
 
-                additional_info = ", last two years"
+                additional_info = ", trained over the last two years"
                 if pool:
                     additional_info += ", partial pooled"
                 if car:
@@ -1031,7 +1101,7 @@ if __name__ == "__main__":
 
                     model_selection[model_counter, idx] = k
 
-                additional_info = ", starting 2011"
+                additional_info = ", trained starting 2011"
                 if pool:
                     additional_info += ", partial pooled"
                 if car:
@@ -1074,6 +1144,18 @@ if __name__ == "__main__":
         np.vstack(df["importation_probability_samples"].to_numpy())  # type: ignore
     ).T
 
+    model_selection = model_selection[:2, :]
+
+    models = {
+        k: v
+        for k, v in models.items()
+        if k
+        in [
+            "Mechanistic: MMR coverage, trained starting 2019",
+            "Statistical: All covariates, trained starting 2019, partial pooled, spatial",
+        ]
+    }
+
     _, model_selection_results = performance_table(
         df,
         models,
@@ -1083,6 +1165,13 @@ if __name__ == "__main__":
         include_classification=True,
         classification_only=False,
         model_selection=model_selection,
+    )
+    model_selection_results = model_selection_results.drop(
+        [
+            "AU-ROC, 2+ cases (%)",
+            "AU-ROC, 5+ cases (%)",
+            "AU-ROC, 20+ cases (%)",
+        ]
     )
 
     model_selection_results.write_csv(
@@ -1126,10 +1215,10 @@ if __name__ == "__main__":
     )
 
     subset_models = [
-        "Mechanistic: MMR coverage, last two years",
-        "Statistical: MMR coverage, starting 2019, partial pooled, spatial",
-        "Statistical: MMR coverage + exemptions, last two years, spatial",
-        "Statistical: All covariates, starting 2019, partial pooled, spatial",
+        "Mechanistic: MMR coverage, trained starting 2019",
+        "Statistical: MMR coverage, trained starting 2019, partial pooled, spatial",
+        "Statistical: MMR coverage + exemptions, trained over the last two years, spatial",
+        "Statistical: All covariates, trained starting 2019, partial pooled, spatial",
     ]
 
     _, main_text_table = performance_table(
@@ -1146,7 +1235,7 @@ if __name__ == "__main__":
     main_text_table = main_text_table[
         [
             "Model",
-            "Year",
+            "Projection year",
             "R² (%)",
             "MAE (cases)",
             "RMSE (cases)",
@@ -1157,8 +1246,10 @@ if __name__ == "__main__":
             "Average precision, 10+ cases (%)",
         ]
     ]
-    main_text_table = main_text_table.filter(pl.col("Year") == "Overall")
-    main_text_table = main_text_table.drop("Year")
+    main_text_table = main_text_table.filter(
+        pl.col("Projection year") == "Overall"
+    )
+    main_text_table = main_text_table.drop("Projection year")
     main_text_table = main_text_table.sort("Model")
 
     main_text_table.write_csv(
@@ -1174,7 +1265,7 @@ if __name__ == "__main__":
             if importation is None:
                 vars_ordered = [
                     "Model",
-                    "Year",
+                    "Projection year",
                     "R² (%)",
                     "MAE (cases)",
                     "RMSE (cases)",
@@ -1183,7 +1274,7 @@ if __name__ == "__main__":
             else:
                 vars_ordered = [
                     "Model",
-                    "Year",
+                    "Projection year",
                     "R² (%)",
                     "MAE (cases)",
                     "RMSE (cases)",

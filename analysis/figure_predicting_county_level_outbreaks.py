@@ -297,10 +297,10 @@ def plot_ecological_determinants(samples_pre, samples_post, df, fig, ax):
             samples_of_interest = samples_of_interest - 100
             median_effects.append(jnp.median(samples_of_interest, axis=0))
             lower_effects.append(
-                jnp.quantile(samples_of_interest, 0.025, axis=0)
+                jnp.quantile(samples_of_interest, 0.5, axis=0)
             )
             upper_effects.append(
-                jnp.quantile(samples_of_interest, 0.975, axis=0)
+                jnp.quantile(samples_of_interest, 0.95, axis=0)
             )
 
         ax.errorbar(
@@ -617,7 +617,7 @@ if __name__ == "__main__":
     with open(
         os.path.join(
             output_dir,
-            "predictive_partial_pooled_poisson_state_fixed_effect=True_pool=True_five_year=False_CAR=False_All covariates_[2021, 2022, 2023, 2024, 2025].pkl",
+            "predictive_partial_pooled_poisson_state_fixed_effect=True_pool=True_five_year=False_CAR=True_All covariates_[2021, 2022, 2023, 2024, 2025].pkl",
         ),
         "rb",
     ) as file:

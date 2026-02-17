@@ -1,13 +1,20 @@
 import os
 
+from numpyro import enable_x64
+
+enable_x64()
+import pickle
+
 import geopandas as gpd
+import jax.numpy as jnp
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import polars as pl
 import yaml
-from matplotlib import rc
+from matplotlib import rc, ticker
+from matplotlib.patches import Patch
 from scipy import stats
 from shapely.geometry import MultiPolygon, Polygon
 from sklearn.linear_model import TheilSenRegressor
@@ -686,82 +693,331 @@ def coverage_increase_nme_policy_change(df, fig, ax):
 
 
 def scenario_results(df, fig, ax):
-    # make violin plots of the percent change in outbreak risk
-    # the scenarios are
+    # read the risk projections
+    with open(
+        os.path.join(
+            output_dir,
+            "risk_projections.pkl",
+        ),
+        "rb",
+    ) as f:
+        projections = pickle.load(f)
+
+    # read the df used to make the risk projections
+    df = pl.read_csv(
+        os.path.join(output_dir, "scaled_projection_dataset.csv"),
+        # make sure we read fips codes as strings
+        schema_overrides={
+            "fips": pl.String,
+            "estimated_mmr_cov_raw": pl.Float64,
+        },
+    )
+    df = df.filter(pl.col("in_train") == 0)
+
+    # make into an incidence measure
+    # clip at population size
+    projections = jnp.minimum(projections, jnp.array(df["pop"]).reshape(1, -1))
+    incidence = projections  # / df["pop"].to_numpy()
+
+    # concatenate to dataframe so we can print out counties by risk
+    df = df.with_columns(
+        projections=pl.Series(incidence.T.__array__()),
+    )
+
+    # add in import probability
+    with open(
+        os.path.join(
+            output_dir, "empirical_importation_probability_samples.pkl"
+        ),
+        "rb",
+    ) as f:
+        samples = pickle.load(f)
+    import_df = pl.read_csv(
+        os.path.join(output_dir, "empirical_importation_probability.csv"),
+        # make sure we read fips codes as strings
+        schema_overrides={"fips": pl.String},
+    )
+    import_df = import_df.with_columns(
+        importation_probability_samples=pl.Series(
+            samples["importation_probability_samples"].__array__()
+        )
+    )
+    # join with main dataframe
+    df = df.join(
+        import_df.select(
+            [
+                "fips",
+                "year",
+                "type",
+                "importation_probability_samples",
+            ]
+        ),
+        on=["fips", "year", "type"],
+        how="left",
+    )
+    # multiply the importation probability samples with the incidence projections
+    importation_probability_samples = np.vstack(
+        df["importation_probability_samples"].to_numpy()  # type: ignore
+    ).T
+    unconditioned_risk_samples = importation_probability_samples * incidence
+
+    # sum over all counties to get expected number of yearly cases
+    expected_cases_samples = unconditioned_risk_samples.sum(axis=1)
+    # violin plot this
+    # violinparts = ax.violinplot(
+    # expected_cases_samples,
+    # positions=[0],
+    # showextrema=False,
+    # widths=0.6,
+    # )
+    # for pc in violinparts["bodies"]:
+    # pc.set(facecolor="grey", alpha=0.4)
+    # print(expected_cases_samples.min(), expected_cases_samples.max())
+
+    # add error bars for the median and interquartile range
+    median = np.median(expected_cases_samples)
+    lower = np.percentile(expected_cases_samples, 25)
+    upper = np.percentile(expected_cases_samples, 75)
+    ax.errorbar(
+        0,
+        median,
+        yerr=[[median - lower], [upper - median]],
+        fmt="o",
+        color="grey",
+        capsize=5,
+        capthick=2,
+    )
+    # dashed grey line at this median
+    # ax.axhline(
+    # median,
+    # color="grey",
+    # linestyle="--",
+    # linewidth=1,
+    # )
+
+    # add the runs for each of the scenarios
     scenarios = {
-        "Existing NME bans": "add_nmes_back",
-        "Highest risk states": "top_risk_state_unconditioned",
-        "Neighboring counties": "bordering_high_risk_state",
-        "Highest NME states": "top_nme_state",
-        "Highest risk counties": "top_ten_pct_counties",
+        "Remove existing NME bans": "add_nmes_back",
+        "NME bans in highest risk states": "top_risk_state_unconditioned",
+        "NME bans in highest NME states": "top_nme_state",
+        "NME bans in highest risk counties": "top_ten_pct_counties",
     }
+    # read sims
+    with open(
+        os.path.join(
+            output_dir,
+            f"nme_policy_analysis_median.pkl",
+        ),
+        "rb",
+    ) as f:
+        results = pickle.load(f)
 
-    for idx, (scenario, column) in enumerate(scenarios.items()):
-        scenario_df = df.filter(pl.col(column) == True)
-        violinparts = ax.violinplot(
-            scenario_df["median_percent_change"].drop_nans(),
-            positions=[idx],
-            showextrema=False,
+    no_nme_df = pl.read_csv(
+        os.path.join(
+            output_dir, "nme_policy_analysis_broken_up_by_scenario.csv"
+        ),
+        schema_overrides={
+            "fips": pl.String,
+            "estimated_mmr_cov_raw": pl.Float64,
+            "nonmed_exempt_pct_raw": pl.Float64,
+        },
+    )
+
+    results = jnp.minimum(results, jnp.array(no_nme_df["pop"]).reshape(1, -1))
+    no_nme_df = no_nme_df.with_columns(
+        projections=pl.Series(results.T.__array__()),
+    )
+
+    # join no nme_df with results and import probability samples
+    no_nme_df = no_nme_df.join(
+        import_df.select(
+            [
+                "fips",
+                "year",
+                "importation_probability_samples",
+            ]
+        ),
+        on=["fips", "year"],
+        how="left",
+    )
+
+    # join with the baseline
+    no_nme_df = no_nme_df.join(
+        df.select(["fips", "year", "projections"]).rename(
+            {"projections": "baseline_projections"}
+        ),
+        on=["fips", "year"],
+        how="left",
+    )
+
+    # make violin plots for each scenario
+    num_per_scenario = no_nme_df.shape[0] // len(scenarios)
+    for idx, (scenario, column) in enumerate(scenarios.items(), start=1):
+        # first we want to plot the baseline without including neighbors
+        temp = no_nme_df[
+            (idx - 1) * num_per_scenario : idx * num_per_scenario, :
+        ]
+        # we need to make two violins
+        # one for the scenario itself
+        scenario_df = temp.with_columns(
+            projections_direct=pl.when(pl.col(column) == True)
+            .then(pl.col("projections"))
+            .otherwise(pl.col("baseline_projections")),
         )
-
-        for pc in violinparts["bodies"]:
-            pc.set(facecolor="grey", alpha=0.4)
-
-        median = np.nanmedian(scenario_df["median_percent_change"].to_numpy())
-        lower = np.nanpercentile(
-            scenario_df["median_percent_change"].to_numpy(), 25
+        # extract the projections
+        scenario_projections = jnp.vstack(
+            scenario_df["projections_direct"].to_numpy()
+        ).T
+        # multiply with importation probability samples
+        scenario_importation_probability_samples = np.vstack(
+            scenario_df["importation_probability_samples"].to_numpy()  # type: ignore
+        ).T
+        scenario_risk_samples = (
+            scenario_importation_probability_samples * scenario_projections
         )
-        upper = np.nanpercentile(
-            scenario_df["median_percent_change"].to_numpy(), 75
+        # sum over all counties to get expected number of yearly cases
+        scenario_expected_cases_samples = scenario_risk_samples.sum(axis=1)
+        # make a violin plot of this
+        # violinparts = ax.violinplot(
+        # scenario_expected_cases_samples,
+        # positions=[idx - 0.2],
+        # showextrema=False,
+        # widths=0.3,
+        # )
+        # for pc in violinparts["bodies"]:
+        # pc.set(facecolor="#298C8C", alpha=0.4)
+        # add error bars for the median and interquartile range
+        median = np.median(scenario_expected_cases_samples)
+        lower = np.percentile(scenario_expected_cases_samples, 25)
+        upper = np.percentile(scenario_expected_cases_samples, 75)
+        print(
+            scenario_expected_cases_samples.min(),
+            scenario_expected_cases_samples.max(),
         )
-
+        print(scenario, median, lower, upper)
         ax.errorbar(
-            idx,
+            idx - 0.2,
             median,
             yerr=[[median - lower], [upper - median]],
             fmt="o",
-            color="grey",
+            color="#298C8C",
             capsize=5,
             capthick=2,
         )
 
-    ax.set_xticks(range(len(scenarios)))
-    ax.set_xticklabels(list(scenarios.keys()), rotation=-45, ha="left")
-    ax.set_ylabel("Percent change in outbreak size (%)")
-    ax.set_ylim(-100)
-    ax.axhline(0, color="black", linestyle="--")
+        # now similar thing but for the whole scenario including neighbors
+        # here we just use the full projections since the neighbors are already included
+        scenario_projections = jnp.vstack(temp["projections"].to_numpy()).T
+        # multiply with importation probability samples
+        scenario_importation_probability_samples = np.vstack(
+            temp["importation_probability_samples"].to_numpy()  # type: ignore
+        ).T
+        scenario_risk_samples = (
+            scenario_importation_probability_samples * scenario_projections
+        )
+        # sum over all counties to get expected number of yearly cases
+        scenario_expected_cases_samples = scenario_risk_samples.sum(axis=1)
+        # make a violin plot of this
+        # violinparts = ax.violinplot(
+        # scenario_expected_cases_samples,
+        # positions=[idx + 0.2],
+        # showextrema=False,
+        # widths=0.3,
+        # )
+        # for pc in violinparts["bodies"]:
+        # pc.set(facecolor="#800074", alpha=0.4)
+        # add error bars for the median and interquartile range
+        print(
+            scenario_expected_cases_samples.min(),
+            scenario_expected_cases_samples.max(),
+        )
+        median = np.median(scenario_expected_cases_samples)
+        lower = np.percentile(scenario_expected_cases_samples, 25)
+        upper = np.percentile(scenario_expected_cases_samples, 75)
+        ax.errorbar(
+            idx + 0.2,
+            median,
+            yerr=[[median - lower], [upper - median]],
+            fmt="o",
+            color="#800074",
+            capsize=5,
+            capthick=2,
+        )
+
+    # add a legend
+    legend_elements = [
+        Patch(
+            facecolor="grey",
+            edgecolor="grey",
+            alpha=0.4,
+            label="No intervention",
+        ),
+        Patch(
+            facecolor="#298C8C",
+            edgecolor="#298C8C",
+            alpha=0.4,
+            label="Direct effects",
+        ),
+        Patch(
+            facecolor="#800074",
+            edgecolor="#800074",
+            alpha=0.4,
+            label="Spillover effects",
+        ),
+    ]
+    ax.legend(
+        handles=legend_elements,
+    )
+
+    ax.set_xticks(range(len(scenarios) + 1))
+    ax.set_xticklabels(
+        ["No intervention"] + list(scenarios.keys()), rotation=-45, ha="left"
+    )
+    ax.set_ylabel("Annual measles cases (N)")
+    # ax.set_ylim(2000, 15000)
+    # ax.set_yscale("log")
+    # set y minor ticks
+    # ax.yaxis.set_minor_locator(
+    #     ticker.LogLocator(
+    #         base=10.0,
+    #         subs=np.arange(1.0, 10.0),  # type: ignore
+    #                                              numticks=10))
+    # ax.set_ylim(top = 100000)
 
 
 def plot_who_benefits_most(df, fig, ax):
     df = df.filter(
-        (pl.col("top_risk_state_unconditioned") == True)
-        | (pl.col("bordering_high_risk_state") == True)
+        (
+            pl.col("top_risk_state_unconditioned") == True
+            # | (pl.col("bordering_high_risk_state") == True)
+        )
     )
+    df = df.filter(pl.col("median_percent_change") <= 0)
     ax.scatter(
-        df["estimated_mmr_cov_raw"],
-        df["change_in_mmr_cov"],
+        x=df["estimated_mmr_cov_not_scaled"],
+        # df["change_in_mmr_cov"],
         alpha=0.7,
-        c=df["median_percent_change"],
+        y=df["median_percent_change"],
     )
-    cbar = fig.colorbar(
-        plt.cm.ScalarMappable(cmap="viridis"),
-        ax=ax,
-        shrink=0.7,
-        aspect=20,
-        pad=0.0,
-        extend="neither",
-        orientation="vertical",
-    )
-    cbar.set_label(
-        "Percent change in outbreak size (%)",
-        rotation=90,
-        labelpad=15,
-        fontsize=28,
-    )
-    cbar.ax.tick_params(labelsize=24)
+    # cbar = fig.colorbar(
+    # plt.cm.ScalarMappable(cmap="viridis"),
+    # ax=ax,
+    # shrink=0.7,
+    # aspect=20,
+    # pad=0.0,
+    # extend="neither",
+    # orientation="vertical",
+    # )
+    # cbar.set_label(
+    # "Percent change in outbreak size (%)",
+    # rotation=90,
+    # labelpad=15,
+    # fontsize=28,
+    # )
+    # cbar.ax.tick_params(labelsize=24)
     ax.set_xlabel("Initial MMR coverage (%)")
-    ax.set_ylabel("Change in MMR coverage (%)")
-    ax.set_ylim(0)
+    ax.set_ylabel("Change in median outbreak size (%)")
+    ax.set_xlim(50)
 
 
 if __name__ == "__main__":
@@ -827,6 +1083,8 @@ if __name__ == "__main__":
         schema_overrides={
             "estimated_mmr_cov_raw": pl.Float64,
             "nonmed_exempt_pct_raw": pl.Float64,
+            "change_in_mmr_cov": pl.Float64,
+            "fips": pl.String,
         },
     )
 
@@ -841,6 +1099,72 @@ if __name__ == "__main__":
         ha="right",
     )
     plot_data = scenario_results(df, fig, ax[1, 0])  # type: ignore
+
+    # read the df used to make the risk projections
+    df_raw = pl.read_csv(
+        os.path.join(output_dir, "projection_dataset.csv"),
+        # make sure we read fips codes as strings
+        schema_overrides={
+            "fips": pl.String,
+            "estimated_mmr_cov_raw": pl.Float64,
+        },
+    )
+
+    df_raw = df_raw.drop_nans()
+
+    # read the risk projections
+    with open(
+        os.path.join(
+            output_dir,
+            "risk_projections.pkl",
+        ),
+        "rb",
+    ) as f:
+        projections = pickle.load(f)
+
+    df_raw = df_raw.with_columns(
+        baseline=pl.Series(projections.T.__array__()),
+    )
+
+    # merge
+    df = df.join(
+        df_raw.select(["fips", "estimated_mmr_cov", "baseline"]),
+        on="fips",
+        how="left",
+        suffix="_not_scaled",
+    )
+
+    # read sims
+    with open(
+        os.path.join(
+            output_dir,
+            f"nme_policy_analysis_median.pkl",
+        ),
+        "rb",
+    ) as f:
+        results = pickle.load(f)
+
+    results = jnp.minimum(results, jnp.array(df["pop"]).reshape(1, -1))
+    df = df.with_columns(
+        projections=pl.Series(results.T.__array__()),
+    )
+
+    df = df[2765 : (2765 * 2), :]
+
+    # extract the median percent change in outbreak size for the top risk state scenario
+    df = df.with_columns(
+        median_percent_change=(pl.col("projections") - pl.col("baseline"))
+        / pl.col("baseline")
+        * 100
+    )
+    # summarize by taking the median
+    # extract the values
+    median_percent_change = df["median_percent_change"].to_numpy()
+    # take the median
+    median_percent_change = np.median(median_percent_change, axis=1)
+    df = df.with_columns(
+        median_percent_change=pl.Series(median_percent_change)
+    )
 
     ax[1, 1].text(  # type: ignore
         -0.05,

@@ -15,60 +15,6 @@ output_dir = os.path.join(
 with open("params.yml", "r") as f:
     params = yaml.safe_load(f)
 
-us_states = [
-    "Alabama",
-    "Alaska",
-    "Arizona",
-    "Arkansas",
-    "California",
-    "Colorado",
-    "Connecticut",
-    "Delaware",
-    "District of Columbia",
-    "Florida",
-    "Georgia",
-    "Hawaii",
-    "Idaho",
-    "Illinois",
-    "Indiana",
-    "Iowa",
-    "Kansas",
-    "Kentucky",
-    "Louisiana",
-    "Maine",
-    "Maryland",
-    "Massachusetts",
-    "Michigan",
-    "Minnesota",
-    "Mississippi",
-    "Missouri",
-    "Montana",
-    "Nebraska",
-    "Nevada",
-    "New Hampshire",
-    "New Jersey",
-    "New Mexico",
-    "New York",
-    "North Carolina",
-    "North Dakota",
-    "Ohio",
-    "Oklahoma",
-    "Oregon",
-    "Pennsylvania",
-    "Rhode Island",
-    "South Carolina",
-    "South Dakota",
-    "Tennessee",
-    "Texas",
-    "Utah",
-    "Vermont",
-    "Virginia",
-    "Washington",
-    "West Virginia",
-    "Wisconsin",
-    "Wyoming",
-]
-
 
 def read_outbreaks(
     data_dir=data_dir,
@@ -190,11 +136,6 @@ def tally_state_importations(
         how="diagonal_relaxed",
     )
 
-    # df = df.join(counties_present_by_year, on=["year", "state"], how="left")
-    # df = df.with_columns(
-    # num_counties=pl.col("num_counties").fill_null(0)
-    # ).with_columns(imported=pl.col("imported") + pl.col("num_counties"))
-
     years_of_data = df["year"].n_unique()
 
     df = df.group_by("state").agg(
@@ -214,16 +155,14 @@ def tally_state_importations(
 def calculate_yearly_import_probability(
     df, years_of_data, prior_alpha=1, prior_beta=1
 ):
-    # join up with all states to ensure we have all states represented
-    df_all_states = pl.DataFrame({"state": us_states})
     df = df.with_columns(observed=pl.lit(True))
-    df = df_all_states.join(df, on="state", how="left")
-    # we know the missing states had no years with imports
+    # we now observe all states because we have cdc importations data
+    # but we still want to flag them as unobserved because we did not observe
+    # an import in those states
     df = df.with_columns(
-        imported=pl.col("imported").fill_null(0),
-        imported_pre_2022=pl.col("imported_pre_2022").fill_null(0),
-        # and were not observed
-        observed=pl.col("observed").fill_null(False),
+        observed=pl.when(pl.col("imported") == 0)
+        .then(pl.lit(False))
+        .otherwise(pl.col("observed"))
     )
 
     # the number of imports is a Poisson process, and we want to fit the rate
@@ -258,7 +197,6 @@ def distribute_state_level_risk_to_county(
 ) -> tuple[pl.DataFrame, pl.DataFrame]:
     # each state has a population-weighted value of the county's importation probability
     # join state level data to county data
-    # note that this drops all counties not in the projection dataset
 
     df = county_data.join(df_state, on="state", how="left")
 
@@ -282,9 +220,9 @@ def distribute_state_level_risk_to_county(
                 a=x["posterior_alpha_pre_" + str(x["year"])],
                 scale=1 / x["posterior_beta_pre_" + str(x["year"])],
                 size=8000,
-            ).tolist()
+            ).tolist()  # type: ignore
             if x["type"] == "train" and x["year"] >= 2021
-            else stats.gamma.rvs(  # type: ignore
+            else stats.gamma.rvs(
                 a=x["posterior_alpha"],
                 scale=1 / x["posterior_beta"],
                 size=8000,
@@ -457,10 +395,17 @@ if __name__ == "__main__":
     df, years_of_data = tally_state_importations(df_2025)
     df = calculate_yearly_import_probability(df, years_of_data)
     # read in our county data
-    county_data = pl.read_csv(
-        os.path.join(output_dir, "scaled_projection_dataset.csv"),
-        schema_overrides={"fips": pl.String},
-    )
+    validation_years = [2021, 2022, 2023, 2024, 2025]
+    county_data_all_years = []
+    for year in validation_years:
+        county_data = pl.read_csv(
+            os.path.join(output_dir, f"scaled_projection_dataset_{year}.csv"),
+            schema_overrides={"fips": pl.String},
+        )
+        county_data_all_years.append(county_data)
+
+    county_data = pl.concat(county_data_all_years, how="diagonal_relaxed")
+
     # also join in our regular pre 2020 train data
     pre_df = pl.read_csv(
         os.path.join(data_dir, "analysis_dataset.csv"),
