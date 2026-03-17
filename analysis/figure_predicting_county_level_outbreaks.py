@@ -716,8 +716,8 @@ def plot_spatial_importance(
     ax.legend(
         [
             violinparts1["bodies"][0],  # type: ignore
-            violinparts2["bodies"][0],
-        ],  # type: ignore
+            violinparts2["bodies"][0],  # type: ignore
+        ],
         ["2011-2020", "2021-2025"],
     )
     ax.set_xlabel("Outbreak size (N)")

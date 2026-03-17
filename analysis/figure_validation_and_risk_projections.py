@@ -51,7 +51,7 @@ def setup_plot(nrows, ncols, figsize=None):
             spine.set_position(("outward", 5))
         ax.set_axisbelow(True)
         return fig, ax
-    for temp in ax.flatten():
+    for temp in ax.flatten():  # type: ignore
         temp.spines["top"].set_visible(False)
         temp.spines["right"].set_visible(False)
         temp.get_xaxis().tick_bottom()
@@ -129,7 +129,7 @@ def plot_total_cases_over_time(df_observed, all_counties, samples, fig, ax):
 
     ax.legend(
         [
-            vln1["bodies"][0],
+            vln1["bodies"][0],  # type: ignore
             mlines.Line2D(
                 [], [], color="purple", marker="*", linestyle="", markersize=15
             ),
@@ -338,7 +338,7 @@ def plot_future_scenario_cases(
             )
 
         labels.append(scenario_labels[scenario])
-        vlns.append(vln)
+        vlns.append(vln)  # type: ignore
 
     # Annotation brackets: sit just above the tops of the two violins being compared
     # Bracket height is the max of the two violin tops plus a small padding
@@ -436,10 +436,13 @@ def plot_future_scenario_cases(
                 violin_tops[("baseline", y)],
             )
             + pad
-            + tier_spacing
+            + tier_spacing  # type: ignore
             for y in future_years
         )
-    ax.set_ylim(0, highest_bracket + pad + text_pad + y_range * 0.12)
+    ax.set_ylim(
+        0,
+        highest_bracket + pad + text_pad + y_range * 0.12,  # type: ignore
+    )
 
     ax.legend(
         handles=[
@@ -1033,7 +1036,7 @@ if __name__ == "__main__":
     )
 
     importation_samples_future = jnp.array(
-        np.vstack(future_base["importation_probability_samples"].to_numpy())
+        np.vstack(future_base["importation_probability_samples"].to_numpy())  # type: ignore
     ).T
 
     all_future_samples = {}
