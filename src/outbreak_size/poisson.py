@@ -22,6 +22,7 @@ class PartialPooledPoisson:
         spatial=True,
         spatial_correlation=dist.Beta(2, 2),
         spatial_sigma=dist.HalfNormal(1.0),
+        car_sigma=dist.HalfNormal(1.0),
     ):
         self.iv = iv
         self.num_observations = iv.shape[0]
@@ -66,6 +67,7 @@ class PartialPooledPoisson:
         self.is_adjacency_empty = self.adjacency_matrix.shape[0] == 0
         self.adjacency_matrix = sp.sparse.csr_matrix(self.adjacency_matrix)
         self.spatial = spatial
+        self.car_sigma = car_sigma
 
     def fit(self, is_observed, cases=None):
         baseline_rate = numpyro.sample("baseline_rate", self.baseline)
@@ -126,16 +128,14 @@ class PartialPooledPoisson:
                 spatial_random_effects = numpyro.sample(
                     "spatial_random_effects", dist.Normal(0, 1)
                 )
-            full_spatial_effect = spatial_random_sigma * spatial_random_effects
+            full_spatial_effect = spatial_random_effects * spatial_random_sigma
 
             if not self.is_adjacency_empty:
                 # add spatial correlation
                 correlation = numpyro.sample(
                     "spatial_correlation", self.spatial_correlation
                 )
-                spatial_sigma = numpyro.sample(
-                    "spatial_sigma", self.spatial_sigma
-                )
+                spatial_sigma = numpyro.sample("spatial_sigma", self.car_sigma)
                 car_distribution = dist.CAR(
                     loc=0,
                     correlation=(2 * correlation - 1),  # type: ignore
@@ -157,6 +157,8 @@ class PartialPooledPoisson:
             mu = mu + full_spatial_effect
         mu = jnp.exp(mu)
         mu = mu + jnp.finfo(jnp.float64).eps
+        # truncate mu at the population size to avoid overflow errors in the Poisson log prob
+        mu = jnp.minimum(mu, self.exposure)
 
         numpyro.deterministic("mu", mu)
 

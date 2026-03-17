@@ -10,7 +10,6 @@ from sklearn.preprocessing import StandardScaler
 enable_x64()
 set_host_device_count(4)  # use all cores for MCMC
 
-import numpy as np
 import numpyro.distributions as dist
 from jax.random import PRNGKey
 from numpyro.infer import MCMC, NUTS, Predictive, init_to_median
@@ -50,15 +49,13 @@ if __name__ == "__main__":
         [slope_median, slope_lower, slope_upper], ["median", "lower", "upper"]
     ):
         df = pl.read_csv(
-            os.path.join(output_dir, "projection_dataset.csv"),
+            os.path.join(output_dir, "projection_dataset_2025.csv"),
             schema_overrides={"fips": pl.String},
         )
 
         # we want to make different "versions" of df based on our scenarios
         # we want to run one scenario where we set NMEs to 0 for every county
         # and evaluate what happens
-        # this is equivalent to setting NMEs to 0 in the top 5 highest risk states
-        # and top 5 highest NME states and top 250 counties
         mmr = df["estimated_mmr_cov"]
         nme = df["nonmed_exempt_pct"]
         df_no_nmes = df.with_columns(
@@ -68,6 +65,8 @@ if __name__ == "__main__":
             + intercept,
             estimated_mmr_cov_raw=mmr,
             nonmed_exempt_pct_raw=nme,
+            estimated_mmr_cov_raw_keep=mmr,
+            nonmed_exempt_pct_raw_keep=nme,
         ).with_columns(
             change_in_mmr_cov=pl.col("estimated_mmr_cov")
             - pl.col("estimated_mmr_cov_raw")
@@ -360,7 +359,7 @@ if __name__ == "__main__":
             .group_by("state")
             .agg(
                 nme_pct=(
-                    pl.col("nonmed_exempt_pct_raw")
+                    pl.col("nonmed_exempt_pct_raw_keep")
                     * pl.col("pop_5_9")
                     / pl.sum("pop_5_9")
                 ).sum()
@@ -555,8 +554,8 @@ if __name__ == "__main__":
                 iv=df_temp.select(
                     [
                         "estimated_mmr_cov",
-                        "nonmed_exempt_pct",
-                        "med_exempt_pct",
+                        # "nonmed_exempt_pct",
+                        # "med_exempt_pct",
                     ]
                 ).to_jax(),
                 pool=True,
@@ -579,14 +578,15 @@ if __name__ == "__main__":
                 spatial=True,
                 spatial_units=df_temp["geoid"],
                 adjacency_matrix=adj_matrix,
-                spatial_sigma=dist.HalfNormal(1.0),
+                spatial_sigma=dist.HalfNormal(0.25),
+                car_sigma=dist.HalfNormal(0.25),
             )
 
             # fit model
             nuts_kernel = NUTS(
                 model.fit,
                 init_strategy=init_to_median(),
-                target_accept_prob=0.99,
+                target_accept_prob=0.95,
             )
             mcmc = MCMC(
                 nuts_kernel,

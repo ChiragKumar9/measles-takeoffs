@@ -197,18 +197,18 @@ def plot_num_points_average_coverage(df, fig, ax):
 
     ax.scatter(df["num_points"], df["mean_mmr_cov"], c="k", alpha=0.7)
 
-    # put a line of best fit through the data to highlight the trend
-    z = np.polyfit(
-        df["num_points"].to_numpy(), df["mean_mmr_cov"].to_numpy(), 1
-    )
-    ax.plot(
-        df["num_points"].to_numpy(),
-        np.polyval(
-            z,  # type: ignore
-            df["num_points"].to_numpy(),
-        ),
-        color="red",
-    )
+    # # put a line of best fit through the data to highlight the trend
+    # z = np.polyfit(
+    #     df["num_points"].to_numpy(), df["mean_mmr_cov"].to_numpy(), 1
+    # )
+    # ax.plot(
+    #     df["num_points"].to_numpy(),
+    #     np.polyval(
+    #         z,  # type: ignore
+    #         df["num_points"].to_numpy(),
+    #     ),
+    #     color="red",
+    # )
     # get R2 and print out
     r2 = (
         np.corrcoef(

@@ -34,7 +34,7 @@ if __name__ == "__main__":
 
         # read the df used to make the risk projections
         risk_df = pl.read_csv(
-            os.path.join(output_dir, "scaled_projection_dataset.csv"),
+            os.path.join(output_dir, "scaled_projection_dataset_2026.csv"),
             # make sure we read fips codes as strings
             schema_overrides={
                 "fips": pl.String,

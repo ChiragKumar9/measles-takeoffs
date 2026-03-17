@@ -282,7 +282,7 @@ def plot_coverage_distribution(
     )
     ax.axhline(y=vaccination_threshold, color="k", linestyle="--")
     ax.set_ylabel("MMR vaccine coverage (%)")
-    ax.set_xlabel("Outbreak size (cases)")
+    ax.set_xlabel("Outbreak size (N)")
     ax.set_ylim(top=100)
 
     return fig, ax
@@ -302,9 +302,23 @@ def plot_outbreak_identification_rate(df, fig, ax):
         below_96=pl.col("estimated_mmr_cov") <= 96,
         below_97=pl.col("estimated_mmr_cov") <= 97,
         below_98=pl.col("estimated_mmr_cov") <= 98,
+        below_99=pl.col("estimated_mmr_cov") <= 99,
+        below_100=pl.col("estimated_mmr_cov") <= 100,
         cases_10=pl.col("cases_outbreak") >= 10,
         cases_5=pl.col("cases_outbreak") >= 5,
         cases_3=pl.col("cases_outbreak") >= 3,
+    )
+
+    # get the coverages across the two time periods
+    coverage_old = (
+        df.filter(pl.col("recent") == False)
+        .select("estimated_mmr_cov")
+        .to_numpy()
+    )
+    coverage_new = (
+        df.filter(pl.col("recent") == True)
+        .select("estimated_mmr_cov")
+        .to_numpy()
     )
 
     df = df.with_columns(
@@ -314,7 +328,7 @@ def plot_outbreak_identification_rate(df, fig, ax):
     )
 
     df_identification = pl.DataFrame()
-    for coverage in range(90, 99):
+    for coverage in range(90, 101):
         df_temp = (
             df.group_by(["recent", f"below_{coverage}"])
             .agg(
@@ -385,10 +399,59 @@ def plot_outbreak_identification_rate(df, fig, ax):
         linestyle="--",
     )
 
-    ax.legend(loc=(0.40, 0.0))
+    # add a cdf of the coverage distribution across all county-years in the two time periods
+    # add a second axis
+    min_coverage = min(coverage_old.min(), coverage_new.min())
+    ax2 = ax.twinx()
+    coverage_old_hist = np.histogram(
+        coverage_old, range=(min_coverage, 100), bins=200, density=True
+    )
+    coverage_new_hist = np.histogram(
+        coverage_new, range=(min_coverage, 100), bins=200, density=True
+    )
+
+    ax2.bar(
+        coverage_old_hist[1][:-1],
+        np.cumsum(coverage_old_hist[0] / coverage_old_hist[0].sum()) * 100,
+        width=np.diff(coverage_old_hist[1]),
+        color="blue",
+        alpha=0.2,
+    )
+    ax2.bar(
+        coverage_new_hist[1][:-1],
+        np.cumsum(coverage_new_hist[0] / coverage_new_hist[0].sum()) * 100,
+        width=np.diff(coverage_new_hist[1]),
+        color="green",
+        alpha=0.2,
+    )
+
+    # set some x axis limits
+    ax2.set_xlim(89.7, 100.0)
+    ax2.set_ylim(0, 101)
+    # set ticks at every two integer coverage values
+    ax2.set_xticks(range(90, 102, 2))
+    # make ax2 look good
+    ax2.set_ylabel(
+        "County-years with MMR vaccine\n" + r"coverage less than $x$ (%)",
+        rotation=-90,
+        labelpad=45,
+    )
+    ax2.spines["top"].set_visible(False)
+    ax2.spines["left"].set_visible(False)
+    ax2.get_xaxis().tick_bottom()
+    ax2.get_yaxis().tick_right()
+    ax2.tick_params(axis="x", direction="out")
+    ax2.tick_params(axis="y", direction="out")
+    # offset the spines
+    for spine in ax2.spines.values():
+        spine.set_position(("outward", 5))
+    # put the grid behind
+    ax2.set_axisbelow(True)
+
+    ax.legend(loc=(0.25, 0.0), labelspacing=0.2)
     ax.set_xlabel("MMR vaccine coverage (%)")
     ax.set_ylabel("Identification rate (sensitivity) (%)")
-    ax.set_ylim(0, 100)
+    ax.set_ylim(0, 101)
 
     return df_identification, fig, ax
 
@@ -527,14 +590,27 @@ def plot_coverage_various_models(df, fig, ax):
     ax.set_ylabel(
         "% change in incidence rate per 1%\nincrease in MMR vaccine coverage"
     )
-    ax.legend(loc=(0.2, 0.68))
+    ax.legend(loc=(0.2, 0.70))
 
     return fig, ax
 
 
 def plot_effect_over_time(samples, df, years_in_order, fig, ax):
     # scale by standard deviation to make it interpretable
-    mu = samples["mu"]
+
+    exclude_16_17 = pl.read_csv(
+        os.path.join(output_dir, "exclude_16_17.csv"),
+    )
+    df = df.with_columns(
+        year_county_state=pl.col("year").cast(pl.String)
+        + pl.col("county")
+        + pl.col("state")
+    )
+
+    df = df.filter(
+        ~pl.col("year_county_state").is_in(exclude_16_17["year_county_state"])
+    )
+
     samples = samples["effects_over_time_and_group"][:, :, 0]
     std_wh = df["estimated_mmr_cov"].to_numpy().std()
     samples_wh = samples / std_wh
@@ -554,10 +630,14 @@ def plot_effect_over_time(samples, df, years_in_order, fig, ax):
         mask = df["year"].is_in(year).to_jax()
         samples = samples_wh[:, mask]
         # average weighted by cases
-        samples = (
-            samples * mu[:, mask] / mu[:, mask].sum(axis=1, keepdims=True)
-        )
-        samples = samples.sum(axis=1)
+        # samples = (
+        #     samples * mu[:, mask] / mu[:, mask].sum(axis=1, keepdims=True)
+        # )
+        # samples = samples.sum(axis=1)
+        # simple average
+        samples = samples.mean(
+            axis=1
+        )  # average across county-years in each sample
         median_effect = np.append(
             median_effect, float(jnp.median(samples, axis=0))
         )
@@ -568,7 +648,7 @@ def plot_effect_over_time(samples, df, years_in_order, fig, ax):
             upper_effect, float(jnp.quantile(samples, 0.975, axis=0))
         )
 
-    n = 3  # smoothing window size
+    n = 2  # smoothing window size
     median_effect_expanded = jnp.convolve(
         median_effect, jnp.ones(n) / n, mode="same"
     )
@@ -664,7 +744,7 @@ if __name__ == "__main__":
     with open(
         os.path.join(
             output_dir,
-            "predictive_random_walk_poisson_CAR_time_and_group_varying_2025_oddities=True.pkl",
+            "predictive_random_walk_poisson_CAR_time_and_group_varying_2025_oddities=False_exclude_16_17_no_2025_oddities.pkl",
         ),
         "rb",
     ) as file:

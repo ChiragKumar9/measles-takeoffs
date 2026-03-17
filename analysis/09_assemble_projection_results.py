@@ -27,7 +27,7 @@ with open(
 
 # read the df used to make the risk projections
 df = pl.read_csv(
-    os.path.join(output_dir, "scaled_projection_dataset.csv"),
+    os.path.join(output_dir, "projection_dataset_2026.csv"),
     # make sure we read fips codes as strings
     schema_overrides={"fips": pl.String, "estimated_mmr_cov_raw": pl.Float64},
 )
@@ -163,7 +163,7 @@ df = df.with_columns(
 state_df = df.group_by(["state", "type"]).agg(
     pl.col("conditioned_projections").map_elements(
         lambda x: np.sum(np.stack([x]), axis=0).tolist(),
-        return_dtype=pl.List(pl.Int64),
+        return_dtype=pl.List(pl.Float64),
     ),
     pl.col("unconditioned_projections").map_elements(
         lambda x: np.sum(np.stack([x]), axis=0).tolist(),
@@ -181,7 +181,7 @@ state_df = df.group_by(["state", "type"]).agg(
 state_df = state_df.with_columns(
     pl.col("conditioned_projections").map_elements(
         lambda x: np.array(x).sum(axis=0).tolist(),
-        return_dtype=pl.List(pl.Int64),
+        return_dtype=pl.List(pl.Float64),
     ),
     pl.col("unconditioned_projections").map_elements(
         lambda x: np.array(x).sum(axis=0).tolist(),

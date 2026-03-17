@@ -4,12 +4,9 @@ import pickle
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import matplotlib.ticker as tck
-import numpy as np
 import polars as pl
 import yaml
 from matplotlib import rc
-
-from outbreak_size import adjacency
 
 data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 output_dir = os.path.join(
@@ -313,6 +310,7 @@ def plot_performance_comparison(df, fig, ax):
     ax.legend(
         [violinparts1["bodies"][0], violinparts2["bodies"][0]],
         ["2011-2020", "2021-2025"],
+        loc="upper right",
     )
 
     ax.set_xlabel("Outbreak size (cases)")
@@ -639,16 +637,23 @@ def plot_ecological_determinants(samples_pre, samples_post, df, fig, ax):
                 samples_of_interest = samples_of_interest / mean_income
                 # now convert from dollars to 10,000 USD
                 samples_of_interest = samples_of_interest * 10000
+            if "Population density" in covariate:
+                # convert from per km² to 1,000 per km²
+                samples_of_interest = samples_of_interest * 1000
             # exponentiate and multiply by 100
             samples_of_interest = jnp.exp(samples_of_interest) * 100
             # to express as percent change
             samples_of_interest = samples_of_interest - 100
             median_effects.append(jnp.median(samples_of_interest, axis=0))
             lower_effects.append(
-                jnp.quantile(samples_of_interest, 0.025, axis=0)
+                jnp.quantile(samples_of_interest, 0.05, axis=0)
             )
             upper_effects.append(
-                jnp.quantile(samples_of_interest, 0.975, axis=0)
+                jnp.quantile(samples_of_interest, 0.95, axis=0)
+            )
+            # print the covariate and its coefficient
+            print(
+                f"{covariate} ({years[0]}-{years[-1]}): {median_effects[-1]:.2f}% change in incidence rate per 1 unit increase in predictor (95% CI: {lower_effects[-1]:.2f}%, {upper_effects[-1]:.2f}%)"
             )
 
         ax.errorbar(
@@ -693,7 +698,8 @@ def plot_ecological_determinants(samples_pre, samples_post, df, fig, ax):
         "% change in incidence rate per\n1 unit increase in predictor"
     )
     ax.set_yscale("symlog")
-    ax.set_yticks([-1e14, -1e10, -1e6, -1e2, 0, 1e2, 1e6, 1e10, 1e14])
+
+    ax.set_yticks([-1000, -100, -10, 0, 10, 100, 1000, 10000, 100000])
 
     return fig, ax
 

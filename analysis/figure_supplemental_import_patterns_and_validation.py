@@ -4,7 +4,12 @@ import matplotlib.pyplot as plt
 import polars as pl
 import yaml
 from matplotlib import rc
-from sklearn.metrics import roc_auc_score, roc_curve
+from sklearn.metrics import (
+    average_precision_score,
+    precision_recall_curve,
+    roc_auc_score,
+    roc_curve,
+)
 
 data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 output_dir = os.path.join(
@@ -21,7 +26,7 @@ with open("params.yml", "r") as f:
 
 
 def setup_plot(nrows, ncols):
-    fig, ax = plt.subplots(nrows, ncols, figsize=(30, 7.5))
+    fig, ax = plt.subplots(nrows, ncols, figsize=(20, 15))
     if nrows * ncols == 1:
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
@@ -62,6 +67,8 @@ def plot_imports_over_time(df, fig, ax):
         linestyle="--",
     )
     ax.set_ylim(0)
+    ax.set_xlabel("Year")
+    ax.set_ylabel("Total imported cases\nin the US (N)")
 
 
 def plot_state_std_imports(df, fig, ax):
@@ -96,7 +103,7 @@ def plot_state_std_imports(df, fig, ax):
 
 
 def plot_importation_probability_roc_validation(df, fig, ax):
-    # precision-recall curve
+    # roc curve
     tpr_log, fpr_log, _ = roc_curve(
         (df["imported"] >= 1).cast(pl.Int64).to_numpy(),
         df["probability_at_least_one_import_log"].to_numpy(),
@@ -135,6 +142,59 @@ def plot_importation_probability_roc_validation(df, fig, ax):
     ax.set_xlim([0, 100])
     ax.set_ylim([0, 100])
     ax.legend(loc="lower right")
+    return fig, ax
+
+
+def plot_importation_probability_prc_validation(df, fig, ax):
+    # precision-recall curve
+    precision_log, recall_log, _ = precision_recall_curve(
+        (df["imported"] >= 1).cast(pl.Int64).to_numpy(),
+        df["probability_at_least_one_import_log"].to_numpy(),
+    )
+    score_log = average_precision_score(
+        (df["imported"] >= 1).cast(pl.Int64).to_numpy(),
+        df["probability_at_least_one_import_log"].to_numpy(),
+    )
+
+    precision, recall, _ = precision_recall_curve(
+        (df["imported"] >= 1).cast(pl.Int64).to_numpy(),
+        df["probability_at_least_one_import"].to_numpy(),
+    )
+    score = average_precision_score(
+        (df["imported"] >= 1).cast(pl.Int64).to_numpy(),
+        df["probability_at_least_one_import"].to_numpy(),
+    )
+
+    ax.plot(
+        recall_log * 100,
+        precision_log * 100,
+        color="purple",
+        lw=2,
+        label=f"Log10-pop weighted\nAverage precision: {score_log:.2f}\n(Fold increase: {score_log / (df['imported'] >= 1).mean():.2f}x)",
+    )
+    ax.plot(
+        recall * 100,
+        precision * 100,
+        color="salmon",
+        lw=2,
+        label=f"Pop weighted\nAverage precision: {score:.2f}\n(Fold increase: {score / (df['imported'] >= 1).mean():.2f}x)",
+    )
+    ax.set_xlabel("Recall (%)")
+    ax.set_ylabel("Precision (%)")
+    ax.set_xlim([0, 100])
+    ax.set_ylim([0, 100])
+    # add a grey dashed line for the baseline precision
+    ax.plot(
+        [0, 100],
+        [(df["imported"] >= 1).mean() * 100] * 2,
+        color="gray",
+        lw=1,
+        linestyle="--",
+        label="Baseline precision\n({:.2f}%)".format(
+            (df["imported"] >= 1).mean() * 100
+        ),
+    )
+    ax.legend(loc=(0.3, 0.4))
     return fig, ax
 
 
@@ -190,31 +250,31 @@ if __name__ == "__main__":
             how="diagonal_relaxed",
         )
 
-    fig, ax = setup_plot(1, 3)  # type: ignore
+    fig, ax = setup_plot(2, 2)  # type: ignore
 
-    ax[0].text(  # type: ignore
+    ax[0, 0].text(  # type: ignore
         -0.25,
         1.08,
         "a",
-        transform=ax[0].transAxes,  # type: ignore
+        transform=ax[0, 0].transAxes,  # type: ignore
         fontsize=24,
         fontweight="bold",
         va="top",
         ha="right",
     )
-    plot_imports_over_time(df, fig, ax[0])  # type: ignore
+    plot_imports_over_time(df, fig, ax[0, 0])  # type: ignore
 
-    ax[1].text(  # type: ignore
+    ax[0, 1].text(  # type: ignore
         -0.25,
         1.08,
         "b",
-        transform=ax[1].transAxes,  # type: ignore
+        transform=ax[0, 1].transAxes,  # type: ignore
         fontsize=24,
         fontweight="bold",
         va="top",
         ha="right",
     )
-    plot_state_std_imports(df, fig, ax[1])  # type: ignore
+    plot_state_std_imports(df, fig, ax[0, 1])  # type: ignore
 
     # we want to plot empirical import probability against recorded number
     # of imports for the counties that have known import numbers
@@ -226,6 +286,23 @@ if __name__ == "__main__":
         # make sure we read fips codes as strings
         schema_overrides={"fips": pl.String},
     )
+    import_df = import_df.with_columns(
+        mu=pl.col("posterior_alpha") / pl.col("posterior_beta")
+    )
+    count_imports = import_df.filter(pl.col("type") == "projection")
+    count_imports = count_imports.sort(by="year", descending=True)
+    count_imports = count_imports.group_by(
+        ["state", "county"], maintain_order=True
+    ).agg(
+        # for each county, take the most recent projection of import counts as the "count" of imports for that county
+        pl.first("importation_probability_mean"),
+        pl.first("importation_probability_median"),
+        pl.first("importation_probability_lower"),
+        pl.first("importation_probability_upper"),
+        pl.first("mu"),
+    )
+    # sum
+    print(count_imports.sum())
     counties_with_known_imports = counties_with_known_imports.join(
         import_df, on=["year", "state", "county"], how="left"
     )
@@ -235,8 +312,13 @@ if __name__ == "__main__":
         & pl.col("posterior_beta_pre_2023").is_not_null()
         & pl.col("posterior_alpha_pre_2023_log").is_not_null()
     )
+    # filter the year to be either the latest year for that county or at least
+    # be 2022
+    counties_with_known_imports = counties_with_known_imports.with_columns(
+        latest_year=pl.col("year").max().over(["state", "county"])
+    )
     counties_with_known_imports = counties_with_known_imports.filter(
-        pl.col("year") >= 2022
+        (pl.col("year") == pl.col("latest_year")) | (pl.col("year") >= 2022)
     )
     counties_with_known_imports = counties_with_known_imports.with_columns(
         # recall that gamma-poisson mixture is a negative binomial
@@ -270,12 +352,14 @@ if __name__ == "__main__":
             return_dtype=pl.Float64,
         ),
     )
+    # tell us about the distribution of counties with known imports
+    print(counties_with_known_imports["imported"].sort().value_counts())
 
-    ax[2].text(  # type: ignore
+    ax[1, 0].text(  # type: ignore
         -0.05,
         1.08,
         "c",
-        transform=ax[2].transAxes,  # type: ignore
+        transform=ax[1, 0].transAxes,  # type: ignore
         fontsize=24,
         fontweight="bold",
         va="top",
@@ -285,7 +369,24 @@ if __name__ == "__main__":
     plot_importation_probability_roc_validation(
         counties_with_known_imports,
         fig,
-        ax[2],  # type: ignore
+        ax[1, 0],  # type: ignore
+    )
+
+    ax[1, 1].text(  # type: ignore
+        -0.05,
+        1.08,
+        "d",
+        transform=ax[1, 1].transAxes,  # type: ignore
+        fontsize=24,
+        fontweight="bold",
+        va="top",
+        ha="right",
+    )
+
+    plot_importation_probability_prc_validation(
+        counties_with_known_imports,
+        fig,
+        ax[1, 1],  # type: ignore
     )
 
     fig.tight_layout()

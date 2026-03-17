@@ -73,10 +73,14 @@ def plot_time_varying_vaccine_effect(
             mask = df["year"].is_in(year).to_jax()
             samples = samples_wh[:, mask]
             # average weighted by cases
-            samples = (
-                samples * mu[:, mask] / mu[:, mask].sum(axis=1, keepdims=True)
-            )
-            samples = samples.sum(axis=1)
+            # samples = (
+            #     samples * mu[:, mask] / mu[:, mask].sum(axis=1, keepdims=True)
+            # )
+            # samples = samples.sum(axis=1)
+            # simple average
+            samples = samples.mean(
+                axis=1
+            )  # average across county-years in each sample
             median_effect = np.append(
                 median_effect, float(jnp.median(samples, axis=0))
             )

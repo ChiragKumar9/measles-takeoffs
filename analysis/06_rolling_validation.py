@@ -1,10 +1,12 @@
 import os
 import pickle
 
+import jax.numpy as jnp
 import numpy as np
 import polars as pl
 import statsmodels.api as sm
 import yaml
+from jax import clear_caches
 from jax.random import PRNGKey
 from numpyro import distributions as dist
 from numpyro import enable_x64, set_host_device_count
@@ -173,7 +175,7 @@ if __name__ == "__main__":
                     test_df = pl.read_csv(
                         os.path.join(
                             output_dir,
-                            f"scaled_projection_dataset_{years[-1] + 1}.csv",
+                            f"projection_dataset_{years[-1] + 1}.csv",
                         ),
                         schema_overrides={"fips": pl.String},
                     )
@@ -187,6 +189,10 @@ if __name__ == "__main__":
                     # concatenate the train and test data
                     train_df = pl.concat(
                         [train_df, test_df], how="diagonal_relaxed"
+                    )
+                    # any null cases_outbreak must be filled as 0s as a placeholder
+                    train_df = train_df.with_columns(
+                        cases_outbreak=pl.col("cases_outbreak").fill_null(0)
                     )
 
                     # assemble the adjacency matrix
@@ -206,54 +212,59 @@ if __name__ == "__main__":
                     covariates_scaled = scaler.fit_transform(
                         covariates.to_numpy()
                     )
-                    # add the test data -- recall the test data is already scaled
+                    # add the test data
                     covariates_scaled = np.vstack(
                         [
                             covariates_scaled,
-                            train_df.filter(pl.col("cases_train") == 0)
-                            .select(vars)
-                            .to_numpy(),
+                            scaler.transform(
+                                train_df.filter(pl.col("cases_train") == 0)
+                                .select(vars)
+                                .to_numpy()
+                            ),
                         ]
                     )
                     # append year variables
-                    # take everything but the first year as the reference year
-                    year_fixed_effects = [f"year_{y}" for y in years[1:]]
-                    # append the test year fixed effect
-                    year_fixed_effects.append(f"year_{years[-1] + 1}")
                     covariates_scaled = np.hstack(
                         [
                             covariates_scaled,
-                            0 * train_df.select(year_fixed_effects).to_numpy(),
                         ]
                     )
                     covariates = pl.DataFrame(
                         covariates_scaled,
-                        schema=[*covariates.columns, *year_fixed_effects],
+                        schema=[*covariates.columns],
                     )
-
                     # set up model
-                    if len(vars) == 1:
+                    if model_name != "All covariates":
                         ivs = 1
+                        # no regression covariates
+                        # use zeros for the regression covariates since the model will ignore them
+                        regression_covariates = jnp.zeros(
+                            (covariates.shape[0], 1)
+                        )
                     else:
                         ivs = 3
+                        regression_covariates = jnp.array(
+                            covariates[:, 3:].to_numpy()
+                        )
                     model = poisson.PartialPooledPoisson(
                         iv=covariates[:, :ivs].to_jax(),
                         pool=pool,
-                        regression_covariates=covariates[:, ivs:].to_jax(),
+                        regression_covariates=regression_covariates,
                         exposure=train_df["pop"].to_jax(),
                         groups=train_df["state"],
                         group_fixed_effect=False,
                         spatial=car,
                         spatial_units=train_df["geoid"],
                         adjacency_matrix=adjacency_matrix,
-                        spatial_sigma=dist.HalfNormal(1.5),
+                        spatial_sigma=dist.HalfNormal(0.25),
+                        car_sigma=dist.HalfNormal(0.25),
                     )
 
                     # fit model
                     nuts_kernel = NUTS(
                         model.fit,
                         init_strategy=init_to_median(),
-                        target_accept_prob=0.99,
+                        target_accept_prob=0.95,
                     )
                     mcmc = MCMC(
                         nuts_kernel,
@@ -311,7 +322,7 @@ if __name__ == "__main__":
                         # compute final outbreak size for each row
                         population = train_df.filter(
                             pl.col("cases_train") == 1
-                        )["pop_5_9"].to_numpy()
+                        )["pop"].to_numpy()
                         # calculate immune fraction based on coverage and effectiveness
                         mmr_effectiveness = 0.97
                         immune = (
@@ -323,7 +334,7 @@ if __name__ == "__main__":
                         )  # type: ignore
                         susceptible_fraction = 1 - immune
                         # calculate final outbreak size
-                        R0 = 15.0  # measles basic reproduction number
+                        R0 = 12.0  # measles basic reproduction number
                         # final outbreak size calculation
                         final_sizes = np.array(
                             [
@@ -340,18 +351,10 @@ if __name__ == "__main__":
                             pl.col("cases_train") == 1
                         )["cases_outbreak"].to_numpy()
                         # fit a poisson regression
-                        # include year fixed effects
-                        year_fixed_effects = (
-                            train_df.filter(pl.col("cases_train") == 1)
-                            .select([f"year_{y}" for y in years[1:]])
-                            .to_numpy()
-                        )
-                        X = np.hstack(
-                            [final_sizes.reshape(-1, 1), year_fixed_effects]
-                        )
+                        X = final_sizes.reshape(-1, 1)
                         model = sm.GLM(
                             observed_outbreaks,
-                            sm.add_constant(X),
+                            X,
                             family=sm.families.Poisson(),
                         ).fit()
 
@@ -359,7 +362,7 @@ if __name__ == "__main__":
                         # now apply this model to the test data
                         population_test = train_df.filter(
                             pl.col("cases_train") == 0
-                        )["pop_5_9"].to_numpy()
+                        )["pop"].to_numpy()
                         susceptible_fraction_test = (
                             1.0
                             - train_df.filter(pl.col("cases_train") == 0)[
@@ -377,18 +380,10 @@ if __name__ == "__main__":
                                 )
                             ]
                         )
-                        X_test = np.hstack(
-                            [
-                                final_sizes_test.reshape(-1, 1),
-                                np.zeros(
-                                    (
-                                        final_sizes_test.shape[0],
-                                        year_fixed_effects.shape[1],
-                                    )
-                                ),
-                            ]
-                        )
-                        mu = model.predict(sm.add_constant(X_test))
+                        X_test = final_sizes_test.reshape(-1, 1)
+                        mu = model.predict(X_test)
+                        # truncate mus at the population size
+                        mu = np.minimum(mu, population_test)
 
                         # extract median and 95th percentile interval
                         samples = stats.poisson.rvs(
@@ -399,7 +394,7 @@ if __name__ == "__main__":
                         with open(
                             os.path.join(
                                 output_dir,
-                                f"final_outbreak_size_predictions_{years}.pkl",
+                                f"predictive_final_outbreak_size_predictions_{years}.pkl",
                             ),
                             "wb",
                         ) as f:
@@ -409,3 +404,18 @@ if __name__ == "__main__":
                                 },
                                 f,
                             )
+
+                    del (
+                        model,
+                        mcmc,
+                        nuts_kernel,
+                        posterior_samples,
+                        predictive,
+                        predictive_samples,
+                        all_predictions,
+                        final_sizes,  # type: ignore
+                        final_sizes_test,  # type: ignore
+                        mu,  # type: ignore
+                        samples,  # type: ignore
+                    )
+                    clear_caches()

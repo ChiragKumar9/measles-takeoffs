@@ -395,11 +395,11 @@ if __name__ == "__main__":
     df, years_of_data = tally_state_importations(df_2025)
     df = calculate_yearly_import_probability(df, years_of_data)
     # read in our county data
-    validation_years = [2021, 2022, 2023, 2024, 2025]
+    validation_years = [2021, 2022, 2023, 2024, 2025, 2026]
     county_data_all_years = []
     for year in validation_years:
         county_data = pl.read_csv(
-            os.path.join(output_dir, f"scaled_projection_dataset_{year}.csv"),
+            os.path.join(output_dir, f"projection_dataset_{year}.csv"),
             schema_overrides={"fips": pl.String},
         )
         county_data_all_years.append(county_data)

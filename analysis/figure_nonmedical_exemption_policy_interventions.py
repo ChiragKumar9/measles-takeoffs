@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 import polars as pl
 import yaml
-from matplotlib import rc, ticker
+from matplotlib import rc
 from matplotlib.patches import Patch
 from scipy import stats
 from shapely.geometry import MultiPolygon, Polygon
@@ -705,7 +705,7 @@ def scenario_results(df, fig, ax):
 
     # read the df used to make the risk projections
     df = pl.read_csv(
-        os.path.join(output_dir, "scaled_projection_dataset.csv"),
+        os.path.join(output_dir, "scaled_projection_dataset_2026.csv"),
         # make sure we read fips codes as strings
         schema_overrides={
             "fips": pl.String,
@@ -1020,9 +1020,145 @@ def plot_who_benefits_most(df, fig, ax):
     ax.set_xlim(50)
 
 
+def plot_presentation_existing(fig, ax):
+    medians = [7538, 8564]
+    lowers = [4975, 5577]
+    uppers = [10500, 13000]
+    ax.errorbar(
+        [0, 1],
+        medians,
+        yerr=[
+            np.array(medians) - np.array(lowers),
+            np.array(uppers) - np.array(medians),
+        ],
+        fmt="o",
+        color="grey",
+        capsize=5,
+        capthick=2,
+    )
+    ax.set_xticks([0, 1])
+    ax.set_xticklabels(
+        ["No intervention", "Revert existing NME bans"],
+        rotation=-45,
+        ha="left",
+    )
+    ax.set_ylabel("Annual measles cases (N)")
+    ax.set_xlim([-0.5, 1.5])
+
+
+def plot_presentation_figure_future(fig, ax):
+    medians = [8564, 7538, 6365, 4023, 3854]
+    lowers = [5577, 4975, 5350, 3000, 2500]
+    uppers = [13000, 10500, 7500, 5000, 4500]
+    ax.errorbar(
+        [0, 1, 2, 3, 4],
+        medians,
+        yerr=[
+            np.array(medians) - np.array(lowers),
+            np.array(uppers) - np.array(medians),
+        ],
+        fmt="o",
+        color="grey",
+        capsize=5,
+        capthick=2,
+    )
+    ax.set_xticks([0, 1, 2, 3, 4])
+    ax.set_xticklabels(
+        [
+            "Revert existing NME bans",
+            "No intervention",
+            "Highest risk states",
+            "Highest NME states",
+            "Highest risk counties",
+        ],
+        rotation=-45,
+        ha="left",
+    )
+    ax.set_ylabel("Annual measles cases (N)")
+    ax.set_xlim([-0.5, 4.5])
+
+
+def plot_presentation_figure_future_indirects(fig, ax):
+    medians = [8564, 6365, 4023, 3854]
+    lowers = [5577, 5350, 3000, 2500]
+    uppers = [13000, 7500, 5000, 4500]
+
+    ax.errorbar(
+        [1],
+        [7538],
+        yerr=[[7538 - 4975], [10500 - 7538]],
+        fmt="o",
+        color="grey",
+        capsize=5,
+        capthick=2,
+    )
+
+    ax.errorbar(
+        np.array([0, 2, 3, 4]) - 0.25,
+        medians,
+        yerr=[
+            np.array(medians) - np.array(lowers),
+            np.array(uppers) - np.array(medians),
+        ],
+        fmt="o",
+        color="#800074",
+        capsize=5,
+        capthick=2,
+        label="Including spillover effects",
+    )
+
+    medians = [8000, 7000, 4500, 4300]
+    lowers = [6000, 5500, 3500, 3000]
+    uppers = [13000, 8500, 5500, 5000]
+
+    ax.errorbar(
+        np.array([0, 2, 3, 4]) + 0.25,
+        medians,
+        yerr=[
+            np.array(medians) - np.array(lowers),
+            np.array(uppers) - np.array(medians),
+        ],
+        fmt="o",
+        color="#298C8C",
+        capsize=5,
+        capthick=2,
+        label="Direct effects only",
+    )
+
+    ax.set_xticks([0, 1, 2, 3, 4])
+    ax.set_xticklabels(
+        [
+            "Revert existing NME bans",
+            "No intervention",
+            "Highest risk states",
+            "Highest NME states",
+            "Highest risk counties",
+        ],
+        rotation=-45,
+        ha="left",
+    )
+    ax.set_ylabel("Annual measles cases (N)")
+    ax.set_xlim([-0.5, 4.5])
+    ax.legend(loc=(0.2, 0.8))
+
+
 if __name__ == "__main__":
+    fig, ax = setup_plot(2, 2)  # type: ignore
+    plot_presentation_existing(fig, ax[0, 0])  # type: ignore
+    plot_presentation_figure_future(fig, ax[0, 1])  # type: ignore
+    plot_presentation_figure_future_indirects(fig, ax[1, 0])  # type: ignore
+
+    fig.tight_layout()
+
+    # save
+    fig.savefig(
+        os.path.join(fig_dir, "presentation_figure.png"),
+        bbox_inches="tight",
+        dpi=300,
+    )
+
     df = pl.read_csv(
-        os.path.join(data_dir, "latest_vaccination_data.csv"),
+        os.path.join(data_dir, "2025_vaccination_data.csv"),
         schema_overrides={
             "fips": pl.String,
             "estimated_mmr_cov_raw": pl.Float64,
@@ -1102,7 +1238,7 @@ if __name__ == "__main__":
 
     # read the df used to make the risk projections
     df_raw = pl.read_csv(
-        os.path.join(output_dir, "projection_dataset.csv"),
+        os.path.join(output_dir, "scaled_projection_dataset_2026.csv"),
         # make sure we read fips codes as strings
         schema_overrides={
             "fips": pl.String,
@@ -1122,61 +1258,61 @@ if __name__ == "__main__":
     ) as f:
         projections = pickle.load(f)
 
-    df_raw = df_raw.with_columns(
-        baseline=pl.Series(projections.T.__array__()),
-    )
+    # df_raw = df_raw.with_columns(
+    #     baseline=pl.Series(projections.T.__array__()),
+    # )
 
-    # merge
-    df = df.join(
-        df_raw.select(["fips", "estimated_mmr_cov", "baseline"]),
-        on="fips",
-        how="left",
-        suffix="_not_scaled",
-    )
+    # # merge
+    # df = df.join(
+    #     df_raw.select(["fips", "estimated_mmr_cov", "baseline"]),
+    #     on="fips",
+    #     how="left",
+    #     suffix="_not_scaled",
+    # )
 
-    # read sims
-    with open(
-        os.path.join(
-            output_dir,
-            f"nme_policy_analysis_median.pkl",
-        ),
-        "rb",
-    ) as f:
-        results = pickle.load(f)
+    # # read sims
+    # with open(
+    #     os.path.join(
+    #         output_dir,
+    #         f"nme_policy_analysis_median.pkl",
+    #     ),
+    #     "rb",
+    # ) as f:
+    #     results = pickle.load(f)
 
-    results = jnp.minimum(results, jnp.array(df["pop"]).reshape(1, -1))
-    df = df.with_columns(
-        projections=pl.Series(results.T.__array__()),
-    )
+    # results = jnp.minimum(results, jnp.array(df["pop"]).reshape(1, -1))
+    # df = df.with_columns(
+    #     projections=pl.Series(results.T.__array__()),
+    # )
 
-    df = df[2765 : (2765 * 2), :]
+    # df = df[3070 : (3070 * 2), :]
 
-    # extract the median percent change in outbreak size for the top risk state scenario
-    df = df.with_columns(
-        median_percent_change=(pl.col("projections") - pl.col("baseline"))
-        / pl.col("baseline")
-        * 100
-    )
-    # summarize by taking the median
-    # extract the values
-    median_percent_change = df["median_percent_change"].to_numpy()
-    # take the median
-    median_percent_change = np.median(median_percent_change, axis=1)
-    df = df.with_columns(
-        median_percent_change=pl.Series(median_percent_change)
-    )
+    # # extract the median percent change in outbreak size for the top risk state scenario
+    # df = df.with_columns(
+    #     median_percent_change=(pl.col("projections") - pl.col("baseline"))
+    #     / pl.col("baseline")
+    #     * 100
+    # )
+    # # summarize by taking the median
+    # # extract the values
+    # median_percent_change = df["median_percent_change"].to_numpy()
+    # # take the median
+    # median_percent_change = np.median(median_percent_change, axis=1)
+    # df = df.with_columns(
+    #     median_percent_change=pl.Series(median_percent_change)
+    # )
 
-    ax[1, 1].text(  # type: ignore
-        -0.05,
-        1.08,
-        "d",
-        transform=ax[1, 1].transAxes,  # type: ignore
-        fontsize=24,
-        fontweight="bold",
-        va="top",
-        ha="right",
-    )
-    plot_who_benefits_most(df, fig, ax[1, 1])  # type: ignore
+    # ax[1, 1].text(  # type: ignore
+    #     -0.05,
+    #     1.08,
+    #     "d",
+    #     transform=ax[1, 1].transAxes,  # type: ignore
+    #     fontsize=24,
+    #     fontweight="bold",
+    #     va="top",
+    #     ha="right",
+    # )
+    # plot_who_benefits_most(df, fig, ax[1, 1])  # type: ignore
 
     fig.tight_layout()
     # save

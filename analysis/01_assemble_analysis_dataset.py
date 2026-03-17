@@ -80,7 +80,7 @@ if __name__ == "__main__":
 
     df = df.with_columns(
         oddities_2025=pl.when(
-            (pl.col("pop_density") <= 10)
+            (pl.col("cases_outbreak") <= 5)
             # pl.when(
             #     (
             #         (pl.col("state") == "South Carolina")
@@ -95,15 +95,6 @@ if __name__ == "__main__":
         )
         .then(pl.lit(True))
         .otherwise(pl.lit(False))
-    )
-
-    df = df.with_columns(
-        # oddities_2025 = ((pl.col("cases_outbreak") < 10)) & (pl.col("estimated_mmr_cov") < 90) & (pl.col("year") == 2025)
-        oddities_2025=(pl.col("year") == 2025)
-        & (
-            (pl.col("cases_outbreak") <= 10)
-            & (pl.col("estimated_mmr_cov") < 85)
-        )
     )
 
     counties = df["fips"].unique(maintain_order=True).to_list()
@@ -165,9 +156,13 @@ if __name__ == "__main__":
                     neighbors_coverage=pl.when(
                         (pl.col("fips") == fips) & (pl.col("year") == year)
                     )
-                    .then(sum(neighbor_coverages) / len(neighbor_coverages))
+                    .then(
+                        np.nansum(neighbor_coverages) / len(neighbor_coverages)
+                    )
                     .otherwise(pl.col("neighbors_coverage")),
                 )
+        else:
+            print("No neighbors for county:", fips, "year:", year)
 
     # save dataset and adjacency matrix
     df.write_csv(os.path.join(data_dir, "analysis_dataset.csv"))

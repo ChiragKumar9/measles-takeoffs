@@ -27,13 +27,13 @@ if __name__ == "__main__":
         df = df_all.filter(pl.col("year").is_in(years))
 
         # compute final outbreak size for each row
-        population = df["pop_5_9"].to_numpy()
+        population = df["pop"].to_numpy()
         # calculate immune fraction based on coverage and effectiveness
         mmr_effectiveness = 0.97
         immune = df["estimated_mmr_cov"].to_numpy() * mmr_effectiveness / 100  # type: ignore
         susceptible_fraction = 1 - immune
         # calculate final outbreak size
-        R0 = 15.0  # measles basic reproduction number
+        R0 = 12.0  # measles basic reproduction number
         # final outbreak size calculation
         final_sizes = np.array(
             [

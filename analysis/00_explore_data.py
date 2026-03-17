@@ -114,6 +114,64 @@ def read_outbreaks(data_dir=data_dir) -> pl.DataFrame:
         indigenous=pl.col("cases") - pl.col("imported")
     )
 
+    # Lauren flagged some funky places that should be dropped
+    # drop snohomish
+    df_2025 = df_2025.filter(
+        ~(
+            (pl.col("county") == "Snohomish")
+            & (pl.col("state") == "Washington")
+        )
+    )
+    # drop "Western" which is really a county!
+    df_2025 = df_2025.filter(
+        ~((pl.col("county") == "Western") & (pl.col("state") == "Iowa"))
+    )
+    # unknown county Oklahoma is treated as a known county with a fips
+    df_2025 = df_2025.filter(
+        ~(
+            (pl.col("county") == "Unknown County")
+            & (pl.col("state") == "Oklahoma")
+        )
+    )
+    # drop Orange county California
+    df_2025 = df_2025.filter(
+        ~((pl.col("county") == "Orange") & (pl.col("state") == "California"))
+    )
+    # drop Central, Utah
+    df_2025 = df_2025.filter(
+        ~((pl.col("county") == "Central") & (pl.col("state") == "Utah"))
+    )
+    # drop Central Region, Virginia
+    df_2025 = df_2025.filter(
+        ~(
+            (pl.col("county") == "Central Region")
+            & (pl.col("state") == "Virginia")
+        )
+    )
+    # drop Unknown County, South Carolina
+    df_2025 = df_2025.filter(
+        ~(
+            (pl.col("county") == "Unknown County")
+            & (pl.col("state") == "South Carolina")
+        )
+    )
+
+    # drop anything south carolina because we have our own south carolina data
+    df_2025 = df_2025.filter(pl.col("state") != "South Carolina")
+
+    sc = pl.read_excel(os.path.join(data_dir, "SC2025Cases.xlsx"))
+    sc = sc.rename({col: col.lower() for col in sc.columns})
+    # add indigenous and imported as null
+    sc = sc.with_columns(
+        indigenous=pl.lit(None),
+        imported=pl.lit(None),
+        fips=pl.lit(None),
+        year=pl.lit(2025),
+        state=pl.lit("South Carolina"),
+    )
+    # concatenate to df_2025
+    df_2025 = pl.concat([df_2025, sc], how="diagonal_relaxed")
+
     # concatenate and return
     df = pl.concat([df, df_2025], how="diagonal_relaxed")
 
@@ -318,21 +376,21 @@ def higher_level_regions() -> dict[str, list[str]]:
         ],
         "Bear River, Utah": ["49003", "49005", "49033"],
         "Southeast Health District, Utah": ["49007", "49015", "49019"],
-        "North, Alabama": [
-            "01019",
-            "01033",
-            "01043",
-            "01049",
-            "01059",
-            "01071",
-            "01077",
-            "01079",
-            "01083",
-            "01089",
-            "01095",
-            "01103",
-            "01133",
-        ],
+        # "North, Alabama": [
+        #     "01019",
+        #     "01033",
+        #     "01043",
+        #     "01049",
+        #     "01059",
+        #     "01071",
+        #     "01077",
+        #     "01079",
+        #     "01083",
+        #     "01089",
+        #     "01095",
+        #     "01103",
+        #     "01133",
+        # ],
         "Upper Cumberland Region, Tennessee": [
             "47015",
             "47027",
@@ -427,18 +485,18 @@ def higher_level_regions() -> dict[str, list[str]]:
             "51620",
             "51800",
         ],
-        "Upstate, South Carolina": [
-            "45045",
-            "45083",
-            "45007",
-            "45077",
-            "45073",
-            "45047",
-            "45059",
-            "45021",
-            "45087",
-            "45001",
-        ],
+        # "Upstate, South Carolina": [
+        #     "45045",
+        #     "45083",
+        #     "45007",
+        #     "45077",
+        #     "45073",
+        #     "45047",
+        #     "45059",
+        #     "45021",
+        #     "45087",
+        #     "45001",
+        # ],
     }
     return assignment_special_places
 
@@ -483,15 +541,20 @@ def read_vaccinations(data_dir=data_dir) -> pl.DataFrame:
             & (pl.col("year") == 2024)
         )
         .then(pl.lit(94.5))
-        .otherwise(pl.col("nonmed_exempt_pct"))
+        .otherwise(pl.col("MMR_cov"))
     )
     # fill in states that did not report medical exemptions separately
     # as having medical exemptions of 0
     # these two states are wyoming and louisiana
+    # we also do this for vermont and mississippi, which censored medical exemptions
     # whenever medical exemptions for these states are null, fill them with 0
     df = df.with_columns(
         med_exempt_pct=pl.when(
-            (pl.col("state").is_in(["Wyoming", "Louisiana"]))
+            (
+                pl.col("state").is_in(
+                    ["Wyoming", "Louisiana", "Vermont", "Mississippi"]
+                )
+            )
             & pl.col("med_exempt_pct").is_null()
         )
         .then(pl.lit(0))
@@ -597,7 +660,9 @@ def query_avg_vaccinations_region_years(
 def process_vaccinations_df(vaccinations_df: pl.DataFrame) -> pl.DataFrame:
     # when we don't have mmr coverage, use all coverage
     vaccinations_df = vaccinations_df.with_columns(
-        estimated_mmr_cov=pl.when(pl.col("mmr_cov").is_null())
+        estimated_mmr_cov=pl.when(
+            pl.col("mmr_cov").is_null() | (pl.col("mmr_cov") == 0.0)
+        )
         .then(pl.col("all_vacc_cov"))
         .otherwise(pl.col("mmr_cov"))
     )

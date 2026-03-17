@@ -1,12 +1,10 @@
 import os
 
-import numpy as np
 import polars as pl
 import yaml
 from dotenv import load_dotenv
-from sklearn.preprocessing import StandardScaler
 
-from outbreak_size import adjacency, synth_pop_clusters, utils
+from outbreak_size import synth_pop_clusters, utils
 
 data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 output_dir = os.path.join(
@@ -19,11 +17,11 @@ with open("params.yml", "r") as f:
 
 
 def add_pop_variables(
-    merged_df: pl.DataFrame, census_key: str
+    merged_df: pl.DataFrame, year, census_key: str
 ) -> pl.DataFrame:
     census_query = utils.CensusQuery(census_key)
     fips = merged_df["fips"].to_list()
-    years_census = [2025] * len(fips)
+    years_census = [year] * len(fips)
     pop_df = census_query.query_5_9_pop(years_census, fips)
     merged_df = merged_df.with_columns(
         pop_df[
@@ -79,7 +77,7 @@ def add_pop_variables(
 if __name__ == "__main__":
     load_dotenv()
 
-    validation_years = [2021, 2022, 2023, 2024, 2025]
+    validation_years = [2021, 2022, 2023, 2024, 2025, 2026]
     for year in validation_years:
         df = pl.read_csv(
             os.path.join(data_dir, f"{year}_vaccination_data.csv"),
@@ -96,15 +94,12 @@ if __name__ == "__main__":
         # remove any places with fips codes greater than five digits
         df = df.filter(pl.col("fips").str.len_chars() == 5)
 
-        # drop any years pre 2019
-        df = df.filter(pl.col("year") >= 2019)
-
         # now add the relevant census data
         census_key = os.getenv("CENSUS_API_KEY")
         assert census_key is not None, (
             "CENSUS_API_KEY not found in environment"
         )
-        df = add_pop_variables(df, census_key)
+        df = add_pop_variables(df, year, census_key)
 
         # scale the data
         train_df = pl.read_csv(
@@ -112,10 +107,10 @@ if __name__ == "__main__":
             schema_overrides={"fips": pl.String},
         )
 
-        # only use train data up until the validation year
-        train_df = train_df.filter(pl.col("year") < year)
+        # only use train data that equals the validation year
+        train_df = train_df.filter(pl.col("year") == year)
 
-        train_df_to_scale = train_df.select(
+        train_df = train_df.select(
             [
                 "estimated_mmr_cov",
                 "nonmed_exempt_pct",
@@ -129,102 +124,141 @@ if __name__ == "__main__":
                 "fraction_graduate_degree",
                 "pop_density",
                 "log_income",
+                "fips",
+                "state",
+                "county",
+                "year",
+                "pop",
+                "cases_outbreak",
+                "geoid",
+                "cases",
             ]
-        )
-
-        scaler = StandardScaler()
-        print("Fitting scaler on training data...")
-        scaled_train = scaler.fit_transform(train_df_to_scale.to_numpy())
-
-        train_df = pl.DataFrame(
-            scaled_train, train_df_to_scale.columns
         ).with_columns(
-            state=train_df["state"],
-            geoid=train_df["geoid"],
-            fips=train_df["fips"],
-            county=train_df["county"],
-            year=train_df["year"],
-            pop=train_df["pop"],
             in_train=pl.lit(1),
-            cases_outbreak=train_df["cases_outbreak"],
             type=pl.lit("train"),
+            estimated_mmr_cov_raw=pl.col("estimated_mmr_cov"),
         )
+
+        projection_df = (
+            df.select(
+                [
+                    "estimated_mmr_cov",
+                    "nonmed_exempt_pct",
+                    "med_exempt_pct",
+                    "fraction_under_5",
+                    "fraction_school_aged",
+                    "avg_house_size",
+                    "std_house_size",
+                    "fraction_public",
+                    "fraction_white",
+                    "fraction_graduate_degree",
+                    "pop_density",
+                    "log_income",
+                    "fips",
+                    "state",
+                    "county",
+                    "year",
+                    "pop",
+                ]
+            )
+            .with_columns(
+                in_train=pl.lit(0),
+                # we need to have some value but it is not used
+                cases_outbreak=pl.lit(0),
+                cases=pl.lit(0),
+                estimated_mmr_cov_raw=df["estimated_mmr_cov"],
+                type=pl.lit("projection"),
+            )
+            .with_columns(
+                geoid=pl.when(pl.col("fips").is_null())
+                .then(pl.col("county"))
+                .otherwise(pl.col("county") + pl.col("fips"))
+            )
+        )
+
+        # join the two dataframes together
+        df = pl.concat([train_df, projection_df], how="diagonal_relaxed")
+
+        # drop places with nas -- means there were too few people there to get census data
+        df = df.drop_nans()
+        # these arise from places that don't have a real fips code in the synth pop
+        df = df.drop_nulls()
 
         df.write_csv(
             os.path.join(output_dir, f"projection_dataset_{year}.csv")
         )
 
-        # now apply the same scaler to our df
-        projection_df = df.select(
-            [
-                "estimated_mmr_cov",
-                "nonmed_exempt_pct",
-                "med_exempt_pct",
-                "fraction_under_5",
-                "fraction_school_aged",
-                "avg_house_size",
-                "std_house_size",
-                "fraction_public",
-                "fraction_white",
-                "fraction_graduate_degree",
-                "pop_density",
-                "log_income",
-            ]
-        )
+    # Load the most recent projection dataset as the base
+    base_year = max(validation_years)
+    base_df = pl.read_csv(
+        os.path.join(output_dir, f"projection_dataset_{base_year}.csv"),
+        schema_overrides={"fips": pl.String},
+    )
 
-        print("Scaling projection data...")
-        scaled_array = scaler.transform(projection_df.to_numpy())
-        scaled_df = pl.DataFrame(scaled_array, schema=projection_df.columns)
+    # Keep only the projection rows (not train rows) since those are the
+    # counties with current census data we want to reuse
+    base_df = base_df.filter(pl.col("type") == "projection")
 
-        # add back in fips, state, county, year
-        scaled_df = scaled_df.with_columns(
-            [
-                df["fips"],
-                df["state"],
-                df["county"],
-                df["year"],
-                df["pop"],
-            ],
-            in_train=pl.lit(0),
-            # we need to have some value but it is not used
-            cases_outbreak=pl.lit(0),
-            estimated_mmr_cov_raw=df["estimated_mmr_cov"],
-            type=pl.lit("projection"),
-        )
-        scaled_df = scaled_df.with_columns(
-            geoid=pl.when(pl.col("fips").is_null())
-            .then(pl.col("county"))
-            .otherwise(pl.col("county") + pl.col("fips"))
-        )
+    # Load the projections file
+    projections = pl.read_csv(
+        os.path.join(
+            data_dir, "vaccine_coverage_projections_all_scenarios.csv"
+        ),
+        schema_overrides={"fips": pl.String},
+    )
 
-        # join the two dataframes together
-        scaled_df = pl.concat([train_df, scaled_df], how="diagonal_relaxed")
+    future_years = projections["year"].unique().sort().to_list()
+    scenarios = projections["scenario"].unique().sort().to_list()
 
-        # drop places with nas -- means there were too few people there to get census data
-        scaled_df = scaled_df.drop_nans()
+    for scenario in scenarios:
+        for future_year in future_years:
+            # Pull the projected values for this scenario and year
+            proj_slice = projections.filter(
+                (pl.col("scenario") == scenario)
+                & (pl.col("year") == future_year)
+            ).select(
+                [
+                    "fips",
+                    "projected_coverage",
+                    "projected_nonmed_exempt",
+                    "projected_med_exempt",
+                ]
+            )
 
-        # save scaled df
-        print("Saving scaled projection dataset...")
-        scaled_df.write_csv(
-            os.path.join(output_dir, f"scaled_projection_dataset_{year}.csv")
-        )
+            # Join projected values onto the base census/demographic data
+            out_df = (
+                base_df.join(proj_slice, on="fips", how="inner")
+                .with_columns(
+                    [
+                        pl.col("projected_coverage").alias(
+                            "estimated_mmr_cov"
+                        ),
+                        pl.col("projected_coverage").alias(
+                            "estimated_mmr_cov_raw"
+                        ),
+                        pl.col("projected_nonmed_exempt").alias(
+                            "nonmed_exempt_pct"
+                        ),
+                        pl.col("projected_med_exempt").alias("med_exempt_pct"),
+                        pl.lit(future_year).alias("year"),
+                        pl.lit(scenario).alias("scenario"),
+                    ]
+                )
+                .drop(
+                    [
+                        "projected_coverage",
+                        "projected_nonmed_exempt",
+                        "projected_med_exempt",
+                    ]
+                )
+            )
 
-        print("Making adjacency matrix for projection dataset...")
-        adjacency_matrix = pl.read_csv(
-            os.path.join(data_dir, "county_adjacencies.txt"),
-            separator="|",
-            schema_overrides={
-                "County GEOID": pl.String,
-                "Neighbor GEOID": pl.String,
-            },
-        )
-        adj_matrix = adjacency.assemble_adjacency_matrix(
-            adjacency_matrix,
-            scaled_df["fips"].unique(maintain_order=True).to_list(),
-        )
-        np.savetxt(
-            os.path.join(
-                output_dir, f"projection_adjacency_matrix_{year}.npy"
-            ),
-            adj_matrix,
-        )
+            out_df.write_csv(
+                os.path.join(
+                    output_dir,
+                    f"projection_dataset_{scenario}_{future_year}.csv",
+                )
+            )
+            print(
+                f"Saved: projection_dataset_{scenario}_{future_year}.csv  ({out_df.height} counties)"
+            )

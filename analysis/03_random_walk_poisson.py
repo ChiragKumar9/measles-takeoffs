@@ -98,10 +98,32 @@ if __name__ == "__main__":
                         delimiter=",",
                     )
             else:
-                # we only want to run without 2025 oddities if we are including 16-17
-                # we don't want to both remove 16-17 and exclude mega regions
-                if not exclusions_16_17:
-                    df_model = df.filter(pl.col("oddities_2025") == False)
+                # Filter out 2025 oddities
+                df_model = df.filter(pl.col("oddities_2025") == False)
+
+                if exclusions_16_17:
+                    # Also exclude 16-17 data
+                    df_model = df_model.with_columns(
+                        year_county_state=pl.col("year").cast(pl.String)
+                        + pl.col("county")
+                        + pl.col("state")
+                    )
+                    df_model = df_model.filter(
+                        ~pl.col("year_county_state").is_in(
+                            exclude_16_17["year_county_state"].to_list()
+                        )
+                    )
+
+                    assembled_adjacency_matrix = (
+                        adjacency.assemble_adjacency_matrix(
+                            adjacency_matrix,
+                            df_model["fips"]
+                            .unique(maintain_order=True)
+                            .to_list(),
+                        )
+                    )
+                    additional_info = "_exclude_16_17_no_2025_oddities"
+                else:
                     assembled_adjacency_matrix = np.genfromtxt(
                         os.path.join(
                             data_dir,
@@ -109,8 +131,7 @@ if __name__ == "__main__":
                         ),
                         delimiter=",",
                     )
-                else:
-                    continue
+                    additional_info = "_no_2025_oddities"
 
             covariates = df_model.select(
                 [

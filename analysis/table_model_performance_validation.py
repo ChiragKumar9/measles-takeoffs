@@ -1,1113 +1,380 @@
-import os
 import pickle
 
 import numpy as np
+import polars as pl
 from numpyro import enable_x64
-from tqdm.auto import tqdm
 
 enable_x64()
+import os
 
 import jax.numpy as jnp
-import polars as pl
-from sklearn.metrics import (
-    average_precision_score,
-    precision_recall_curve,
-    roc_auc_score,
-    roc_curve,
-)
+from scipy import stats
+from sklearn.metrics import roc_auc_score, roc_curve
+from tqdm.auto import tqdm
 
-data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
-output_dir = os.path.join(
-    os.path.dirname(os.path.dirname(__file__)), "outputs"
-)
-fig_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "figures")
+data_dir = "data"
+output_dir = "outputs"
+fig_dir = "figures"
 
 
 def performance_table(
-    df,
-    models,
-    subset_models,
-    threshold,
-    with_importation,
-    include_classification,
-    classification_only,
-    model_selection,
+    samples,
+    true,
+    mode,
+    classification_threshold=None,
+    regression_percentile=None,
+    regression_threshold=None,
 ):
-    models = (
-        {k: v for k, v in models.items() if k in subset_models}
-        if subset_models is not None
-        else models
-    )
-
-    projection_years = [2021, 2022, 2023, 2024, 2025]
-    performance_all = []
-    for idx, year in enumerate(projection_years):
-        performance = pl.DataFrame()
-        if model_selection is not None:
-            performance = performance.with_columns(
-                Model=pl.Series(models.keys()),
-                R2=pl.lit(None),
-                R2_lower=pl.lit(None),
-                R2_upper=pl.lit(None),
-                adj_R2=pl.lit(None),
-                adj_R2_lower=pl.lit(None),
-                adj_R2_upper=pl.lit(None),
-                MAE=pl.lit(None),
-                MAE_lower=pl.lit(None),
-                MAE_upper=pl.lit(None),
-                AUROC2=pl.lit(None),
-                AUROC5=pl.lit(None),
-                AUROC10=pl.lit(None),
-                AUROC20=pl.lit(None),
-                Year=pl.lit(year),
-                n=pl.lit(None),
-                n_full=pl.lit(None),
-                k=pl.Series(model_selection[:, idx]),
-            )
+    if mode == "classification":
+        fpr, tpr, _ = roc_curve(
+            true >= classification_threshold, samples / samples.max()
+        )
+        if np.isnan(fpr[0]) or np.isnan(tpr[0]):
+            sensitivity = np.nan
+            specificity = np.nan
+            roc_auc = np.nan
         else:
-            performance = performance.with_columns(
-                Model=pl.Series(models.keys()),
-                R2=pl.lit(None),
-                R2_lower=pl.lit(None),
-                R2_upper=pl.lit(None),
-                # spearman_rho = pl.lit(None),
-                # spearman_rho_lower = pl.lit(None),
-                # spearman_rho_upper = pl.lit(None),
-                # kendall_tau = pl.lit(None),
-                # kendall_tau_lower = pl.lit(None),
-                # kendall_tau_upper = pl.lit(None),
-                RMSE=pl.lit(None),
-                RMSE_lower=pl.lit(None),
-                RMSE_upper=pl.lit(None),
-                MAE=pl.lit(None),
-                MAE_lower=pl.lit(None),
-                MAE_upper=pl.lit(None),
-                Year=pl.lit(year),
-                AUROC2=pl.lit(None),
-                AUROC5=pl.lit(None),
-                AUROC10=pl.lit(None),
-                AUROC20=pl.lit(None),
-                average_precision2=pl.lit(None),
-                average_precision5=pl.lit(None),
-                average_precision10=pl.lit(None),
-                average_precision20=pl.lit(None),
-                n=pl.lit(None),
-                n_full=pl.lit(None),
-            ).with_columns(
-                pl.lit(None).alias("Sensitivity, 2+"),
-                # pl.lit(None).alias("Sensitivity, 2+_lower"),
-                # pl.lit(None).alias("Sensitivity, 2+_upper"),
-                pl.lit(None).alias("Specificity, 2+"),
-                # pl.lit(None).alias("Specificity, 2+_lower"),
-                # pl.lit(None).alias("Specificity, 2+_upper"),
-                pl.lit(None).alias("Sensitivity, 5+"),
-                # pl.lit(None).alias("Sensitivity, 5+_lower"),
-                # pl.lit(None).alias("Sensitivity, 5+_upper"),
-                pl.lit(None).alias("Specificity, 5+"),
-                # pl.lit(None).alias("Specificity, 5+_lower"),
-                # pl.lit(None).alias("Specificity, 5+_upper"),
-                pl.lit(None).alias("Sensitivity, 10+"),
-                # pl.lit(None).alias("Sensitivity, 10+_lower"),
-                # pl.lit(None).alias("Sensitivity, 10+_upper"),
-                pl.lit(None).alias("Specificity, 10+"),
-                # pl.lit(None).alias("Specificity, 10+_lower"),
-                # pl.lit(None).alias("Specificity, 10+_upper"),
-                pl.lit(None).alias("Sensitivity, 20+"),
-                # pl.lit(None).alias("Sensitivity, 20+_lower"),
-                # pl.lit(None).alias("Sensitivity, 20+_upper"),
-                pl.lit(None).alias("Specificity, 20+"),
-                # pl.lit(None).alias("Specificity, 20+_lower"),
-                # pl.lit(None).alias("Specificity, 20+_upper"),
+            # select a specificity such that sensitivity is >= 80%
+            sensitivity = min(tpr[tpr >= 0.80])
+            specificity = 1.0 - min(fpr[tpr >= 0.80])
+
+            roc_auc = roc_auc_score(
+                true >= classification_threshold, samples / samples.max()
             )
 
-        if with_importation is None:
-            outcome = "cases_outbreak"
+        # make a dataframe
+        performance_summary = {
+            "Sensitivity (%)": sensitivity * 100,
+            "Specificity (%)": specificity * 100,
+            "AUROC (%)": roc_auc * 100,
+        }
+
+        performance_summary = pl.DataFrame(performance_summary)
+
+    elif mode == "regression":
+        # calculate regression metrics
+        # subset
+        mask = true > 0
+        if regression_threshold is None:
+            assert regression_percentile is not None, (
+                "Can't provide both regression percentile and threshold"
+            )
+            threshold = jnp.percentile(
+                true[mask],
+                regression_percentile,  # type: ignore
+            )
+            mask = jnp.logical_and(true >= threshold, mask)
         else:
-            outcome = "cases"
-            if model_selection is None:
-                performance = performance.with_columns(
-                    fold_error=pl.lit(None),
-                    fold_error_lower=pl.lit(None),
-                    fold_error_upper=pl.lit(None),
-                )
-        year_mask = (df["year"] == year).to_numpy()
-        threshold_val = np.percentile(
-            df.filter(pl.col("year") == year)[outcome].to_numpy(),
-            100 - threshold,
-        )
-        mask = (
-            df.filter(pl.col("year") == year)[outcome].to_numpy()
-            >= threshold_val
-        )
-        true_full = df.filter(pl.col("year") == year)[outcome].to_numpy()
-        true = true_full[mask]
-        n_full = true_full.shape[0]
-        n = true.shape[0]
-        true = np.array(true, dtype=np.float64)
-        true_full = np.array(true_full, dtype=np.float64)
-
-        for model in tqdm(models.keys()):
-            # calculate R2, RMSE, MAE, Sensitivity for 10+ cases, Specificity for 10+ cases
-            samples_full = models[model][idx]
-            samples_full = np.array(samples_full, dtype=np.float64)
-            samples = samples_full[:, mask].copy()
-
-            if with_importation is not None:
-                samples *= np.array(
-                    with_importation[:, year_mask][:, mask], dtype=np.float64
-                )
-                samples_full *= np.array(
-                    with_importation[:, year_mask], dtype=np.float64
-                )
-
-            if not classification_only:
-                R2 = 100 * np.array(
-                    [
-                        np.corrcoef(true, c)[0, 1] ** 2
-                        for c in np.sort(samples, axis=0)
-                    ]
-                )
-                R2_median = np.nanmedian(R2)
-                R2_median = round(float(R2_median), 2)
-                R2_lower = round(float(np.nanpercentile(R2, 2.5)), 2)
-                R2_upper = round(float(np.nanpercentile(R2, 97.5)), 2)
-
-                # let us make samples have the same levels as true
-                samples = samples - np.mean(samples, axis=1, keepdims=True)
-                samples = (
-                    samples
-                    / np.std(samples, axis=1, keepdims=True)
-                    * np.std(true)
-                )
-                samples = samples + np.mean(true)
-                samples = np.sort(samples, axis=0)
-
-                rmse = np.sqrt(np.mean((true - samples) ** 2, axis=1))
-                rmse_median = round(float(np.nanmedian(rmse)), 2)
-                rmse_lower = round(float(np.nanpercentile(rmse, 2.5)), 2)
-                rmse_upper = round(float(np.nanpercentile(rmse, 97.5)), 2)
-
-                if with_importation is not None and model_selection is None:
-                    fold_error = np.nanmedian(
-                        np.exp(np.abs(np.log(samples / true))), axis=1
-                    )
-                    fold_error_median = round(
-                        float(np.nanmedian(fold_error)), 2
-                    )
-                    fold_error_lower = round(
-                        float(np.nanpercentile(fold_error, 2.5)), 2
-                    )
-                    fold_error_upper = round(
-                        float(np.nanpercentile(fold_error, 97.5)), 2
-                    )
-
-                mae = np.nanmedian(np.abs(true - samples), axis=1)
-                mae_median = round(float(np.nanmedian(mae)), 2)
-                mae_lower = round(float(np.nanpercentile(mae, 2.5)), 2)
-                mae_upper = round(float(np.nanpercentile(mae, 97.5)), 2)
-
-            if model_selection is not None or include_classification:
-                for classification_threshold in [2, 5, 10, 20]:
-                    y_true = true_full >= classification_threshold
-                    y_true = y_true.astype(np.int64)
-                    samples_full_threshold = samples_full.copy()
-                    # we want to calculate the sensitivity, specificity, auroc, and auprc
-                    # we need to figure out the best cutoff point for each draw from the posterior
-                    for i in range(samples_full.shape[0]):
-                        temp = samples_full_threshold[i, :]
-                        precision, recall, thresholds = precision_recall_curve(
-                            y_true, temp
-                        )
-                        distances = np.sqrt(
-                            (1 - precision) ** 2 + (1 - recall) ** 2
-                        )
-                        optimal_idx = np.argmin(distances)
-                        if optimal_idx >= len(thresholds):
-                            # this means every value is negative
-                            # because precision is 1, meaning we have no false positives
-                            if np.max(temp) != 0:
-                                temp = (
-                                    temp
-                                    / np.max(temp)
-                                    * classification_threshold
-                                    - 1e-6
-                                )
-                        else:
-                            optimal_threshold = thresholds[optimal_idx]
-                            if optimal_threshold <= 0:
-                                # we want to classify every value as positive
-                                temp = temp + classification_threshold
-                            elif optimal_threshold == np.inf:
-                                # we want to classify every value as negative
-                                if np.max(temp) != 0:
-                                    temp = (
-                                        temp
-                                        / np.max(temp)
-                                        * classification_threshold
-                                        - 1e-6
-                                    )
-                            else:
-                                temp = temp / optimal_threshold
-                                temp = temp * classification_threshold
-                        samples_full_threshold[i, :] = temp
-
-                    y_scores = (
-                        samples_full_threshold >= classification_threshold
-                    ).mean(axis=0)
-
-                    fpr, tpr, _ = roc_curve(y_true, y_scores)
-
-                    # find the maximum sensitivity given that specificity is >= cutoff
-                    allowable_fpr = fpr <= 0.4
-                    # because the tprs and fprs are sorted in increasing order,
-                    # the greatest tpr at the allowable fpr is the last one
-                    specificity = round(100 * (1 - fpr[allowable_fpr][-1]), 2)
-                    sensitivity = round(100 * tpr[allowable_fpr][-1], 2)
-
-                    auc = round(100 * roc_auc_score(y_true, y_scores), 2)
-                    average_precision = round(
-                        100 * average_precision_score(y_true, y_scores), 2
-                    )
-
-                    # set the values
-                    if model_selection is None:
-                        performance = performance.with_columns(
-                            pl.when(pl.col("Model") == model)
-                            .then(pl.lit(sensitivity))
-                            .otherwise(
-                                pl.col(
-                                    f"Sensitivity, {classification_threshold}+"
-                                )
-                            )
-                            .alias(
-                                f"Sensitivity, {classification_threshold}+"
-                            ),
-                            # pl.when(pl.col("Model") == model)
-                            # .then(pl.lit(sensitivity_lower))
-                            # .otherwise(
-                            # pl.col(f"Sensitivity, {classification_threshold}+_lower")
-                            # )
-                            # .alias(f"Sensitivity, {classification_threshold}+_lower"),
-                            # pl.when(pl.col("Model") == model)
-                            # .then(pl.lit(sensitivity_upper))
-                            # .otherwise(
-                            # pl.col(f"Sensitivity, {classification_threshold}+_upper")
-                            # )
-                            # .alias(f"Sensitivity, {classification_threshold}+_upper"),
-                            pl.when(pl.col("Model") == model)
-                            .then(pl.lit(specificity))
-                            .otherwise(
-                                pl.col(
-                                    f"Specificity, {classification_threshold}+"
-                                )
-                            )
-                            .alias(
-                                f"Specificity, {classification_threshold}+"
-                            ),
-                            # pl.when(pl.col("Model") == model)
-                            # .then(pl.lit(specificity_lower))
-                            # .otherwise(
-                            # pl.col(f"Specificity, {classification_threshold}+_lower")
-                            # )
-                            # .alias(f"Specificity, {classification_threshold}+_lower"),
-                            # pl.when(pl.col("Model") == model)
-                            # .then(pl.lit(specificity_upper))
-                            # .otherwise(
-                            # pl.col(f"Specificity, {classification_threshold}+_upper")
-                            # )
-                            # .alias(f"Specificity, {classification_threshold}+_upper"),
-                        )
-
-                    # set the values
-                    if model_selection is None:
-                        performance = performance.with_columns(
-                            pl.when(pl.col("Model") == model)
-                            .then(pl.lit(auc))
-                            .otherwise(
-                                pl.col(f"AUROC{classification_threshold}")
-                            )
-                            .alias(f"AUROC{classification_threshold}"),
-                            pl.when(pl.col("Model") == model)
-                            .then(pl.lit(average_precision))
-                            .otherwise(
-                                pl.col(
-                                    f"average_precision{classification_threshold}"
-                                )
-                            )
-                            .alias(
-                                f"average_precision{classification_threshold}"
-                            ),
-                        )
-                    else:
-                        performance = performance.with_columns(
-                            pl.when(pl.col("Model") == model)
-                            .then(pl.lit(auc))
-                            .otherwise(
-                                pl.col(f"AUROC{classification_threshold}")
-                            )
-                            .alias(f"AUROC{classification_threshold}"),
-                        )
-            if not classification_only:
-                performance = performance.with_columns(
-                    R2=pl.when(pl.col("Model") == model)
-                    .then(pl.lit(R2_median))  # type: ignore
-                    .otherwise(pl.col("R2")),
-                    R2_lower=pl.when(pl.col("Model") == model)
-                    .then(pl.lit(R2_lower))  # type: ignore
-                    .otherwise(pl.col("R2_lower")),
-                    R2_upper=pl.when(pl.col("Model") == model)
-                    .then(pl.lit(R2_upper))  # type: ignore
-                    .otherwise(pl.col("R2_upper")),
-                    # spearman_rho = pl.when(pl.col("Model") == model).then(pl.lit(spearman_rho_median)).otherwise(pl.col("spearman_rho")),
-                    # spearman_rho_lower = pl.when(pl.col("Model") == model).then(pl.lit(spearman_rho_lower)).otherwise(pl.col("spearman_rho_lower")),
-                    # spearman_rho_upper = pl.when(pl.col("Model") == model).then(pl.lit(spearman_rho_upper)).otherwise(pl.col("spearman_rho_upper")),
-                    # kendall_tau = pl.when(pl.col("Model") == model).then(pl.lit(kendall_tau_median)).otherwise(pl.col("kendall_tau")),
-                    # kendall_tau_lower = pl.when(pl.col("Model") == model).then(pl.lit(kendall_tau_lower)).otherwise(pl.col("kendall_tau_lower")),
-                    # kendall_tau_upper = pl.when(pl.col("Model") == model).then(pl.lit(kendall_tau_upper)).otherwise(pl.col("kendall_tau_upper")),
-                    MAE=pl.when(pl.col("Model") == model)
-                    .then(pl.lit(mae_median))  # type: ignore
-                    .otherwise(pl.col("MAE")),
-                    MAE_lower=pl.when(pl.col("Model") == model)
-                    .then(pl.lit(mae_lower))  # type: ignore
-                    .otherwise(pl.col("MAE_lower")),
-                    MAE_upper=pl.when(pl.col("Model") == model)
-                    .then(pl.lit(mae_upper))  # type: ignore
-                    .otherwise(pl.col("MAE_upper")),
-                )
-
-                if model_selection is None:
-                    performance = performance.with_columns(
-                        RMSE=pl.when(pl.col("Model") == model)
-                        .then(pl.lit(rmse_median))  # type: ignore
-                        .otherwise(pl.col("RMSE")),
-                        RMSE_lower=pl.when(pl.col("Model") == model)
-                        .then(pl.lit(rmse_lower))  # type: ignore
-                        .otherwise(pl.col("RMSE_lower")),
-                        RMSE_upper=pl.when(pl.col("Model") == model)
-                        .then(pl.lit(rmse_upper))  # type: ignore
-                        .otherwise(pl.col("RMSE_upper")),
-                    )
-
-                if with_importation is not None and model_selection is None:
-                    performance = performance.with_columns(
-                        pl.when(pl.col("Model") == model)
-                        .then(pl.lit(fold_error_median))  # type: ignore
-                        .otherwise(pl.col("fold_error"))
-                        .alias("fold_error"),
-                        pl.when(pl.col("Model") == model)
-                        .then(pl.lit(fold_error_lower))  # type: ignore
-                        .otherwise(pl.col("fold_error_lower"))
-                        .alias("fold_error_lower"),
-                        pl.when(pl.col("Model") == model)
-                        .then(pl.lit(fold_error_upper))  # type: ignore
-                        .otherwise(pl.col("fold_error_upper"))
-                        .alias("fold_error_upper"),
-                    )
-
-            performance = performance.with_columns(
-                pl.when(pl.col("Model") == model)
-                .then(pl.lit(n))
-                .otherwise(pl.col("n"))
-                .alias("n"),
-                pl.when(pl.col("Model") == model)
-                .then(pl.lit(n_full))
-                .otherwise(pl.col("n_full"))
-                .alias("n_full"),
+            assert regression_percentile is None, (
+                "Can't provide both regression percentile and threshold"
             )
-
-        performance_all.append(performance)
-
-    performance = pl.concat(performance_all).sort(["Model", "Year"])
-
-    if not include_classification:
-        performance = performance.drop(
-            [
-                x
-                for x in performance.columns
-                if "Sensitivity" in x
-                or "Specificity" in x
-                or "AUROC" in x
-                or "average_precision" in x
-            ]
-        )
-
-    if classification_only:
-        performance = performance.select(
-            ["Model", "Year", "n", "n_full"]
-            + [
-                x
-                for x in performance.columns
-                if "Sensitivity" in x
-                or "Specificity" in x
-                or "AUROC" in x
-                or "average_precision" in x
-            ]
-        )
-    if model_selection is not None:
-        # calculate adjusted R2
-        performance = performance.with_columns(
-            adj_R2=(
-                1
-                - (1 - pl.col("R2") / 100)
-                * (pl.col("n") - 1)
-                / (pl.col("n") - pl.col("k") - 1)
+            mask = jnp.logical_and(true >= regression_threshold, mask)
+        true_subset = true[mask]
+        samples_subset = samples[mask]
+        # calculate metrics
+        rmse = jnp.sqrt(jnp.mean((samples_subset - true_subset) ** 2))
+        mae = jnp.median(jnp.abs(samples_subset - true_subset))
+        absolute_difference = abs(samples.sum() - true.sum())
+        mfe = jnp.median(
+            jnp.maximum(
+                samples_subset / true_subset, true_subset / samples_subset
             )
-            * 100,
-            adj_R2_lower=(
-                1
-                - (1 - pl.col("R2_lower") / 100)
-                * (pl.col("n") - 1)
-                / (pl.col("n") - pl.col("k") - 1)
-            )
-            * 100,
-            adj_R2_upper=(
-                1
-                - (1 - pl.col("R2_upper") / 100)
-                * (pl.col("n") - 1)
-                / (pl.col("n") - pl.col("k") - 1)
-            )
-            * 100,
+        )
+        rho2 = stats.spearmanr(true_subset, samples_subset)[0] ** 2  # type: ignore
+
+        performance_summary = {
+            "RMSE (cases)": rmse,
+            "MAE (cases)": mae,
+            "Absolute difference (cases)": absolute_difference,
+            "Median fold error": mfe,
+            "Spearman rho^2 (%)": rho2 * 100,
+        }
+
+        performance_summary = pl.DataFrame(performance_summary)
+
+    elif mode == "selection":
+        # run both classification and regression
+        classification = performance_table(
+            samples, true, "classification", classification_threshold=10
+        )
+        regression = performance_table(
+            samples,
+            true,
+            "regression",
+            regression_percentile=80,
         )
 
-        performance_grouped = (
-            performance.group_by("Model")
-            .agg(
-                R2=(
-                    pl.col("R2").filter(pl.col("n") > 2)
-                    * pl.col("n").filter(pl.col("n") > 2)
-                    / pl.col("n").filter(pl.col("n") > 2).sum()
-                ).sum(),
-                R2_lower=(
-                    pl.col("R2_lower").filter(pl.col("n") > 2)
-                    * pl.col("n").filter(pl.col("n") > 2)
-                    / pl.col("n").filter(pl.col("n") > 2).sum()
-                ).sum(),
-                R2_upper=(
-                    pl.col("R2_upper").filter(pl.col("n") > 2)
-                    * pl.col("n").filter(pl.col("n") > 2)
-                    / pl.col("n").filter(pl.col("n") > 2).sum()
-                ).sum(),
-                MAE=(pl.col("MAE") * pl.col("n") / pl.sum("n")).sum(),
-                MAE_lower=(
-                    pl.col("MAE_lower") * pl.col("n") / pl.sum("n")
-                ).sum(),
-                MAE_upper=(
-                    pl.col("MAE_upper") * pl.col("n") / pl.sum("n")
-                ).sum(),
-                AUROC2=(
-                    pl.col("AUROC2") * pl.col("n_full") / pl.sum("n_full")
-                ).sum(),
-                AUROC5=(
-                    pl.col("AUROC5") * pl.col("n_full") / pl.sum("n_full")
-                ).sum(),
-                AUROC10=(
-                    pl.col("AUROC10") * pl.col("n_full") / pl.sum("n_full")
-                ).sum(),
-                AUROC20=(
-                    pl.col("AUROC20") * pl.col("n_full") / pl.sum("n_full")
-                ).sum(),
-            )
-            .with_columns(Year=pl.lit("Overall"))
-        )
-        # we're actually going to drop the non-necessary columns
-        performance = performance.drop(
-            [
-                "adj_R2",
-                "adj_R2_lower",
-                "adj_R2_upper",
-                "n",
-                "n_full",
-                "k",
-            ],
-            strict=False,
-        )
-        performance = pl.concat(
-            [performance, performance_grouped], how="diagonal_relaxed"
-        )
-        performance = performance[
-            [
-                "Model",
-                "Year",
-                "AUROC10",
-                "R2",
-                "R2_lower",
-                "R2_upper",
-                "MAE",
-                "MAE_lower",
-                "MAE_upper",
-                "AUROC2",
-                "AUROC5",
-                "AUROC20",
-            ]
-        ]
-        performance = performance.sort(
-            ["Year", "AUROC10", "R2"], descending=[False, True, True]
-        )
-        performance = performance.with_columns(
-            # round everything that is numeric to two decimal places
-            [
-                pl.col(x).round(2)
-                for x in performance.columns
-                if x != "Model" and x != "Year"
-            ]
+        # concate
+        performance_summary = pl.concat(
+            [classification, regression], how="horizontal"
         )
 
     else:
-        agg = []
-        for metric in performance.columns:
-            if (
-                metric == "Model"
-                or metric == "Year"
-                or metric == "n"
-                or metric == "n_full"
-                or metric == "k"
-            ):
-                continue
-            else:
-                if (
-                    metric == "R2"
-                    or metric == "R2_lower"
-                    or metric == "R2_upper"
-                ):
-                    agg.append(
-                        (
-                            pl.col(metric).filter(pl.col("n") > 2)
-                            * pl.col("n").filter(pl.col("n") > 2)
-                            / pl.col("n").filter(pl.col("n") > 2).sum()
-                        ).sum()
-                    )
-                else:
-                    if (
-                        "AUROC" in metric
-                        or "average_precision" in metric
-                        or "Sensitivity" in metric
-                        or "Specificity" in metric
-                    ):
-                        agg.append(
-                            (
-                                pl.col(metric).filter(
-                                    pl.col(metric)
-                                    .cast(pl.Float64)
-                                    .is_not_nan()
-                                )
-                                * pl.col("n_full").filter(
-                                    pl.col(metric)
-                                    .cast(pl.Float64)
-                                    .is_not_nan()
-                                )
-                                / pl.col("n_full")
-                                .filter(
-                                    pl.col(metric)
-                                    .cast(pl.Float64)
-                                    .is_not_nan()
-                                )
-                                .sum()
-                            ).sum()
-                        )
-                    else:
-                        agg.append(
-                            (pl.col(metric) * pl.col("n") / pl.sum("n")).sum()
-                        )
+        assert False, "mode not found"
 
-        performance_grouped = performance.group_by("Model").agg(agg)
-        performance_grouped = performance_grouped.with_columns(
-            Year=pl.lit("Overall")
-        )
-        performance = pl.concat(
-            [performance, performance_grouped], how="diagonal_relaxed"
-        )
+    return performance_summary
 
-        performance = performance.with_columns(
-            # round everythin that is numeric to two decimal places
+
+def aggregate(df, metric_columns):
+    # create a weighted average value across all years
+    # weight by log of total cases observed in that year
+    df_agg = (
+        df.group_by(["Model"], maintain_order=True)
+        .agg(
             [
-                pl.col(x).round(2)
-                for x in performance.columns
-                if x != "Model" and x != "Year"
+                *[
+                    (pl.col(col).filter(pl.col(col).is_not_nan())).mean()
+                    for col in metric_columns
+                ],
+                *[
+                    pl.col(col)
+                    .filter(pl.col(col).is_not_nan())
+                    .min()
+                    .alias(f"{col}_lower")
+                    for col in metric_columns
+                ],
+                *[
+                    pl.col(col)
+                    .filter(pl.col(col).is_not_nan())
+                    .max()
+                    .alias(f"{col}_upper")
+                    for col in metric_columns
+                ],
             ]
         )
+        .with_columns(pl.lit("2021-2025").alias("Evaluation year"))
+    )
 
-    columns_metrics = [
-        x
-        for x in performance.columns
-        if "lower" not in x
-        and "upper" not in x
-        and x
-        not in [
-            "Model",
-            "AUROC2",
-            "AUROC5",
-            "AUROC10",
-            "AUROC20",
-            "average_precision2",
-            "average_precision5",
-            "average_precision10",
-            "average_precision20",
-            "Sensitivity, 10+",
-            "Specificity, 10+",
-            "Sensitivity, 2+",
-            "Specificity, 2+",
-            "Sensitivity, 5+",
-            "Specificity, 5+",
-            "Sensitivity, 20+",
-            "Specificity, 20+",
-            "Year",
-            "n",
-            "n_full",
-            "k",
-        ]
-    ]
+    # add this to the end
+    df = pl.concat([df, df_agg], how="diagonal_relaxed")
+    return df
 
-    beautified = performance.with_columns(
-        # let's concatenate the lower and upper bounds into one column
+
+def beautify(df, column_stub):
+    # for each column in column stub, concatenate its upper and lower values
+    # in one row and round
+    df = df.with_columns(
         [
-            (
-                pl.col(x).cast(pl.String)
-                + " ["
-                + pl.col(f"{x}_lower").cast(pl.String)
-                + ", "
-                + pl.col(f"{x}_upper").cast(pl.String)
-                + "]"
-            ).alias(x)
-            for x in columns_metrics
+            *[pl.col(col).round(2) for col in column_stub],
+            *[pl.col(f"{col}_lower").round(2) for col in column_stub],
+            *[pl.col(f"{col}_upper").round(2) for col in column_stub],
         ]
     )
-    beautified = beautified.drop(
-        [f"{x}_lower" for x in columns_metrics]
-        + [f"{x}_upper" for x in columns_metrics]
+    # join
+    df = df.with_columns(
+        [
+            pl.format(
+                "{} [{}, {}]", col, f"{col}_lower", f"{col}_upper"
+            ).alias(col)
+            for col in column_stub
+        ]
     )
+    # drop the lower and upper
+    df = df.drop([f"{col}_lower" for col in column_stub])
+    df = df.drop([f"{col}_upper" for col in column_stub])
 
-    # beautify performance
-    beautified = beautified.rename(
+    return df
+
+
+def other_tables(df, samples_unconditioned, samples, true, true_outbreak):
+    # this function accepts the model selection table, which has classification
+    # metrics calculated for the 10+
+    # for the main table, we need to add classification for 5+ and 20+ with imports
+    # for the supplemental table, we need to add classification for 5, 10, and 20
+    # without imports
+    # for the the supplemental regression table, we need to add regression
+    # metrics for the top 80%, top 50%, and top 20%
+
+    # first let's relabel the existing columns
+    df = df.rename(
         {
-            "Sensitivity, 10+": "Sensitivity, 10+ cases (%)",
-            "Specificity, 10+": "Specificity, 10+ cases (%)",
-            "Sensitivity, 2+": "Sensitivity, 2+ cases (%)",
-            "Specificity, 2+": "Specificity, 2+ cases (%)",
-            "Sensitivity, 5+": "Sensitivity, 5+ cases (%)",
-            "Specificity, 5+": "Specificity, 5+ cases (%)",
-            "Sensitivity, 20+": "Sensitivity, 20+ cases (%)",
-            "Specificity, 20+": "Specificity, 20+ cases (%)",
-            "RMSE": "RMSE (cases)",
-            "MAE": "MAE (cases)",
-            "R2": "R² (%)",
-            "AUROC2": "AU-ROC, 2+ cases (%)",
-            "AUROC5": "AU-ROC, 5+ cases (%)",
-            "AUROC10": "AU-ROC, 10+ cases (%)",
-            "AUROC20": "AU-ROC, 20+ cases (%)",
-            "average_precision2": "Average precision, 2+ cases (%)",
-            "average_precision5": "Average precision, 5+ cases (%)",
-            "average_precision10": "Average precision, 10+ cases (%)",
-            "average_precision20": "Average precision, 20+ cases (%)",
-            "Year": "Projection year",
-        },
-        strict=False,
+            "AUROC (%)": "AUROC, 10+ cases (%)",
+            "Sensitivity (%)": "Sensitivity, 10+ cases (%)",
+            "Specificity (%)": "Specificity, 10+ cases (%)",
+            "RMSE (cases)": "RMSE, top 20% (cases)",
+            "MAE (cases)": "MAE, top 20% (cases)",
+            "Median fold error": "Median fold error, top 20%",
+            "Spearman rho^2 (%)": "Spearman rho^2, top 20% (%)",
+        }
     )
-    if (
-        with_importation is not None
-        and model_selection is None
-        and not classification_only
-    ):
-        beautified = beautified.rename(
-            {
-                "fold_error": "Fold error",
-            }
-        )
-    if model_selection is not None:
-        beautified = beautified.rename(
-            {
-                "adj_R2": "Adjusted R² (%)",
-            },
-            strict=False,
-        )
 
-    beautified = beautified.drop(["n", "n_full", "k"], strict=False)
+    classification5_with_imports = performance_table(
+        samples_unconditioned,
+        true,
+        mode="classification",
+        classification_threshold=5,
+    )
+    classification5_with_imports = classification5_with_imports.rename(
+        {
+            "Sensitivity (%)": "Sensitivity, 5+ cases (%)",
+            "Specificity (%)": "Specificity, 5+ cases (%)",
+            "AUROC (%)": "AUROC, 5+ cases (%)",
+        }
+    )
 
-    return performance, beautified
+    classification20_with_imports = performance_table(
+        samples_unconditioned,
+        true,
+        mode="classification",
+        classification_threshold=20,
+    )
+    classification20_with_imports = classification20_with_imports.rename(
+        {
+            "Sensitivity (%)": "Sensitivity, 20+ cases (%)",
+            "Specificity (%)": "Specificity, 20+ cases (%)",
+            "AUROC (%)": "AUROC, 20+ cases (%)",
+        }
+    )
+
+    classification5_wo_imports = performance_table(
+        samples,
+        true_outbreak,
+        mode="classification",
+        classification_threshold=5,
+    )
+    classification5_wo_imports = classification5_wo_imports.rename(
+        {
+            "Sensitivity (%)": "Sensitivity, 5+ outbreak cases (%)",
+            "Specificity (%)": "Specificity, 5+ outbreak cases (%)",
+            "AUROC (%)": "AUROC, 5+ outbreak cases (%)",
+        }
+    )
+
+    classification10_wo_imports = performance_table(
+        samples,
+        true_outbreak,
+        mode="classification",
+        classification_threshold=10,
+    )
+    classification10_wo_imports = classification10_wo_imports.rename(
+        {
+            "Sensitivity (%)": "Sensitivity, 10+ outbreak cases (%)",
+            "Specificity (%)": "Specificity, 10+ outbreak cases (%)",
+            "AUROC (%)": "AUROC, 10+ outbreak cases (%)",
+        }
+    )
+
+    classification20_wo_imports = performance_table(
+        samples,
+        true_outbreak,
+        mode="classification",
+        classification_threshold=20,
+    )
+    classification20_wo_imports = classification20_wo_imports.rename(
+        {
+            "Sensitivity (%)": "Sensitivity, 20+ outbreak cases (%)",
+            "Specificity (%)": "Specificity, 20+ outbreak cases (%)",
+            "AUROC (%)": "AUROC, 20+ outbreak cases (%)",
+        }
+    )
+
+    regression_50 = performance_table(
+        samples_unconditioned,
+        true,
+        mode="regression",
+        regression_percentile=50,
+    ).drop("Absolute difference (cases)")
+    regression_50 = regression_50.rename(
+        {
+            "RMSE (cases)": "RMSE, top 50% (cases)",
+            "MAE (cases)": "MAE, top 50% (cases)",
+            "Median fold error": "Median fold error, top 50%",
+            "Spearman rho^2 (%)": "Spearman rho^2, top 50% (%)",
+        }
+    )
+
+    regression_80 = performance_table(
+        samples_unconditioned,
+        true,
+        mode="regression",
+        regression_percentile=80,
+    ).drop("Absolute difference (cases)")
+    regression_80 = regression_80.rename(
+        {
+            "RMSE (cases)": "RMSE, top 80% (cases)",
+            "MAE (cases)": "MAE, top 80% (cases)",
+            "Median fold error": "Median fold error, top 80%",
+            "Spearman rho^2 (%)": "Spearman rho^2, top 80% (%)",
+        }
+    )
+
+    # bring this all together in one table
+    df = pl.concat(
+        [
+            df,
+            classification5_with_imports,
+            classification20_with_imports,
+            classification5_wo_imports,
+            classification10_wo_imports,
+            classification20_wo_imports,
+            regression_50,
+            regression_80,
+        ],
+        how="horizontal",
+    )
+
+    return df
+
+
+def find_best_model(df, delta=35, subset=None, exclude=None):
+    """
+    Find best model: lowest absolute difference, then highest AUROC within delta
+
+    Parameters
+    ----------
+    df : pl.DataFrame
+        Model performance dataframe
+    subset : str, optional
+        Filter models containing this string
+    exclude : str, optional
+        Filter out models containing this string
+
+    Returns
+    -------
+    str
+        Name of the winning model
+    """
+    if subset is not None:
+        df = df.filter(pl.col("Model").str.contains(subset))
+
+    if exclude is not None:
+        df = df.filter(~pl.col("Model").str.contains(exclude))
+
+    best = df["Absolute difference (cases)"].min()
+
+    winner = df.filter(
+        pl.col("Absolute difference (cases)") <= best + delta
+    ).filter(
+        pl.col("AUROC, 10+ cases (%)") == pl.col("AUROC, 10+ cases (%)").max()
+    )["Model"][0]
+
+    return winner
 
 
 if __name__ == "__main__":
-    df = pl.read_csv(
+    # for each model for each year, we need to calculate:
+    # classification metrics: sensitivity, specificity, roc auc score
+    # regression metrics: RMSE, MAE, R2 or rho^2 (preferably the latter)
+    # we need to calculate regression metrics over the top 80%, the top 50%,
+    # and the top 20%
+
+    # we need to calculate classification metrics with and without importations
+
+    # we need one table that gets at some model selection metric -- we use
+    # AUROC10 + rho^2 20% for model selection
+
+    # we need to read in every model, calculate the mean posterior, pass that
+    # through the function to get out the metrics for model selection
+    # from the model selection table, we can subset to the other tables we need
+    # for the spatial models, we need to do our CAR term prior fitting
+
+    # let's first read the real outbreak size data and associated import
+    # probabilities
+    # let's get the actual case counts from the train data
+    analysis = pl.read_csv(
         os.path.join(data_dir, "analysis_dataset.csv"),
         schema_overrides={"fips": pl.String},
     )
-
-    # we need to read the following models
-    # read the mechanistic model separately because it is stored differently
-    models = {}
-    model_selection = np.zeros((39, 5))
-    mechanistic = []
-    for idx, year in enumerate(
-        [
-            [2019, 2020],
-            [2019, 2020, 2021],
-            [2019, 2020, 2021, 2022],
-            [2019, 2020, 2021, 2022, 2023],
-            [2019, 2020, 2021, 2022, 2023, 2024],
-        ]
-    ):
-        with open(
-            os.path.join(
-                output_dir, f"final_outbreak_size_predictions_{year}.pkl"
-            ),
-            "rb",
-        ) as f:
-            m = pickle.load(
-                f,
-            )
-        # this regression has two free parameters -- the slope and intercept
-        model_selection[0, idx] = 2
-
-        mechanistic.append(m["cases"])
-    models["Mechanistic: MMR coverage, trained starting 2019"] = mechanistic
-
-    mechanistic = []
-    for idx, year in enumerate(
-        [
-            [2019, 2020],
-            [2020, 2021],
-            [2021, 2022],
-            [2022, 2023],
-            [2023, 2024],
-        ]
-    ):
-        with open(
-            os.path.join(
-                output_dir, f"final_outbreak_size_predictions_{year}.pkl"
-            ),
-            "rb",
-        ) as f:
-            m = pickle.load(
-                f,
-            )
-        # this regression has two free parameters -- the slope and intercept
-        model_selection[0, idx] = 2
-
-        mechanistic.append(m["cases"])
-    models["Mechanistic: MMR coverage, trained over the last two years"] = (
-        mechanistic
-    )
-
-    mechanistic = []
-    for idx, year in enumerate(
-        [
-            [2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020],
-            [2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021],
-            [
-                2011,
-                2012,
-                2013,
-                2014,
-                2015,
-                2016,
-                2017,
-                2018,
-                2019,
-                2020,
-                2021,
-                2022,
-            ],
-            [
-                2011,
-                2012,
-                2013,
-                2014,
-                2015,
-                2016,
-                2017,
-                2018,
-                2019,
-                2020,
-                2021,
-                2022,
-                2023,
-            ],
-            [
-                2011,
-                2012,
-                2013,
-                2014,
-                2015,
-                2016,
-                2017,
-                2018,
-                2019,
-                2020,
-                2021,
-                2022,
-                2023,
-                2024,
-            ],
-        ]
-    ):
-        with open(
-            os.path.join(
-                output_dir, f"final_outbreak_size_predictions_{year}.pkl"
-            ),
-            "rb",
-        ) as f:
-            m = pickle.load(
-                f,
-            )
-        # this regression has two free parameters -- the slope and intercept
-        model_selection[0, idx] = 2
-
-        mechanistic.append(m["cases"])
-    models["Mechanistic: MMR coverage, trained starting 2011"] = mechanistic
-
-    # we now have to read the different poisson models
-    # the model options are covariate versions, with/without pooling, with and without car
-    # for the covariate versions, if car is true, we add the number of counties for that year
-    model_counter = 3
-    for car in [True, False]:
-        for pool in [True, False]:
-            for model in [
-                "MMR coverage",
-                "MMR coverage + exemptions",
-                "All covariates",
-            ]:
-                predictions = []
-                for idx, year in enumerate(
-                    [
-                        [2019, 2020],
-                        [2019, 2020, 2021],
-                        [2019, 2020, 2021, 2022],
-                        [2019, 2020, 2021, 2022, 2023],
-                        [2019, 2020, 2021, 2022, 2023, 2024],
-                    ]
-                ):
-                    k = 0
-                    with open(
-                        os.path.join(
-                            output_dir,
-                            f"samples_partial_pooled_poisson_validation_testing_{year}_pool={pool}_CAR={car}_{model}.pkl",
-                        ),
-                        "rb",
-                    ) as file:
-                        p = pickle.load(file)
-                    predictions.append(p)
-                    if model == "MMR coverage":
-                        k += 1  # 1 variable
-                    elif model == "MMR coverage + exemptions":
-                        k += 3  # 3 variables
-                    else:
-                        k += 12  # 12 variables
-                    if pool:
-                        n_states = (
-                            df.filter(pl.col("year").is_in(year))
-                            .select(pl.col("state"))
-                            .n_unique()
-                        )
-                        if model == "MMR coverage":
-                            k += 1  # 1 variance parameter
-                            k += n_states  # each state has their own shifts
-                        else:
-                            k += 3
-                            k += n_states * 3
-                    if car:
-                        k += (
-                            df.filter(pl.col("year").is_in(year))
-                            .select(pl.col("county"))
-                            .n_unique()
-                        )
-
-                    model_selection[model_counter, idx] = k
-
-                additional_info = ", trained starting 2019"
-                if pool:
-                    additional_info += ", partial pooled"
-                if car:
-                    additional_info += ", spatial"
-                models[f"Statistical: {model}{additional_info}"] = predictions
-                model_counter += 1
-
-    for car in [True, False]:
-        for pool in [True, False]:
-            for model in [
-                "MMR coverage",
-                "MMR coverage + exemptions",
-                "All covariates",
-            ]:
-                predictions = []
-                for idx, year in enumerate(
-                    [
-                        [2019, 2020],
-                        [2020, 2021],
-                        [2021, 2022],
-                        [2022, 2023],
-                        [2023, 2024],
-                    ]
-                ):
-                    k = 0
-                    with open(
-                        os.path.join(
-                            output_dir,
-                            f"samples_partial_pooled_poisson_validation_testing_{year}_pool={pool}_CAR={car}_{model}.pkl",
-                        ),
-                        "rb",
-                    ) as file:
-                        p = pickle.load(file)
-                    predictions.append(p)
-                    if model == "MMR coverage":
-                        k += 1  # 1 variable
-                    elif model == "MMR coverage + exemptions":
-                        k += 3  # 3 variables
-                    else:
-                        k += 12  # 12 variables
-                    if pool:
-                        n_states = (
-                            df.filter(pl.col("year").is_in(year))
-                            .select(pl.col("state"))
-                            .n_unique()
-                        )
-                        if model == "MMR coverage":
-                            k += 1  # 1 variance parameter
-                            k += n_states  # each state has their own shifts
-                        else:
-                            k += 3
-                            k += n_states * 3
-                    if car:
-                        k += (
-                            df.filter(pl.col("year").is_in(year))
-                            .select(pl.col("county"))
-                            .n_unique()
-                        )
-
-                    model_selection[model_counter, idx] = k
-
-                additional_info = ", trained over the last two years"
-                if pool:
-                    additional_info += ", partial pooled"
-                if car:
-                    additional_info += ", spatial"
-                models[f"Statistical: {model}{additional_info}"] = predictions
-                model_counter += 1
-
-    for car in [True, False]:
-        for pool in [True, False]:
-            for model in [
-                "MMR coverage",
-                "MMR coverage + exemptions",
-                "All covariates",
-            ]:
-                predictions = []
-                for idx, year in enumerate(
-                    [
-                        [
-                            2011,
-                            2012,
-                            2013,
-                            2014,
-                            2015,
-                            2016,
-                            2017,
-                            2018,
-                            2019,
-                            2020,
-                        ],
-                        [
-                            2011,
-                            2012,
-                            2013,
-                            2014,
-                            2015,
-                            2016,
-                            2017,
-                            2018,
-                            2019,
-                            2020,
-                            2021,
-                        ],
-                        [
-                            2011,
-                            2012,
-                            2013,
-                            2014,
-                            2015,
-                            2016,
-                            2017,
-                            2018,
-                            2019,
-                            2020,
-                            2021,
-                            2022,
-                        ],
-                        [
-                            2011,
-                            2012,
-                            2013,
-                            2014,
-                            2015,
-                            2016,
-                            2017,
-                            2018,
-                            2019,
-                            2020,
-                            2021,
-                            2022,
-                            2023,
-                        ],
-                        [
-                            2011,
-                            2012,
-                            2013,
-                            2014,
-                            2015,
-                            2016,
-                            2017,
-                            2018,
-                            2019,
-                            2020,
-                            2021,
-                            2022,
-                            2023,
-                            2024,
-                        ],
-                    ]
-                ):
-                    k = 0
-                    with open(
-                        os.path.join(
-                            output_dir,
-                            f"samples_partial_pooled_poisson_validation_testing_{year}_pool={pool}_CAR={car}_{model}.pkl",
-                        ),
-                        "rb",
-                    ) as file:
-                        p = pickle.load(file)
-                    predictions.append(p)
-                    if model == "MMR coverage":
-                        k += 1  # 1 variable
-                    elif model == "MMR coverage + exemptions":
-                        k += 3  # 3 variables
-                    else:
-                        k += 12  # 12 variables
-                    if pool:
-                        n_states = (
-                            df.filter(pl.col("year").is_in(year))
-                            .select(pl.col("state"))
-                            .n_unique()
-                        )
-                        if model == "MMR coverage":
-                            k += 1  # 1 variance parameter
-                            k += n_states  # each state has their own shifts
-                        else:
-                            k += 3
-                            k += n_states * 3
-                    if car:
-                        k += (
-                            df.filter(pl.col("year").is_in(year))
-                            .select(pl.col("county"))
-                            .n_unique()
-                        )
-
-                    model_selection[model_counter, idx] = k
-
-                additional_info = ", trained starting 2011"
-                if pool:
-                    additional_info += ", partial pooled"
-                if car:
-                    additional_info += ", spatial"
-                models[f"Statistical: {model}{additional_info}"] = predictions
-                model_counter += 1
 
     import_df = pl.read_csv(
         os.path.join(output_dir, "empirical_importation_probability.csv"),
@@ -1125,209 +392,449 @@ if __name__ == "__main__":
     import_df = import_df.with_columns(
         importation_probability_samples=pl.Series(samples)
     )
-    import_df = import_df.filter(pl.col("type") == "train")
+    # each place can only occur once per year
+    # we want to drop duplicates, deferring to projection rather than train
+    # type values
+    # to do this, sort by type
+    import_df = import_df.sort("type").unique(
+        subset=["state", "county", "year"], keep="last"
+    )
 
-    # join up with df
-    df = df.join(
-        import_df.select(
+    validation_years = [2021, 2022, 2023, 2024, 2025]
+    all_counties = []
+    all_imports = []
+    for year in validation_years:
+        temp = pl.read_csv(
+            os.path.join(output_dir, f"projection_dataset_{year}.csv"),
+            schema_overrides={"fips": pl.String},
+        )
+        temp = temp.with_columns(validation_year=pl.lit(year))
+
+        # the only things we need from the df are the county, state, year, and cases
+        temp = temp.select(
             [
-                "county",  # rather than fips because we have some regions
+                "county",
                 "state",
                 "year",
-                "importation_probability_samples",
+                "validation_year",
+                "cases_outbreak",
+                "type",
             ]
-        ),
-        on=["county", "state", "year"],
-        how="left",
-    )
-    importation_samples = jnp.array(
-        np.vstack(df["importation_probability_samples"].to_numpy())  # type: ignore
-    ).T
+        )
 
-    model_selection = model_selection[:2, :]
+        temp = temp.join(
+            analysis[["year", "state", "county", "cases"]],
+            on=["year", "state", "county"],
+            how="left",
+            maintain_order="left",
+        )
+        # fill null cases with 0 because they were in projection only
+        temp = temp.with_columns(
+            cases=pl.when(pl.col("type") == "projection")
+            .then(pl.lit(0))
+            .otherwise(pl.col("cases"))
+        )
 
-    models = {
-        k: v
-        for k, v in models.items()
-        if k
-        in [
-            "Mechanistic: MMR coverage, trained starting 2019",
-            "Statistical: All covariates, trained starting 2019, partial pooled, spatial",
-        ]
-    }
+        # we need to merge this up with the import data
+        temp = temp.join(
+            import_df.select(
+                [
+                    "county",  # rather than fips because we have some regions
+                    "state",
+                    "year",
+                    "importation_probability_samples",
+                ]
+            ),
+            on=["county", "state", "year"],
+            how="left",
+            maintain_order="left",
+        )
 
-    _, model_selection_results = performance_table(
-        df,
-        models,
-        subset_models=None,
-        threshold=20,
-        with_importation=importation_samples,
-        include_classification=True,
-        classification_only=False,
-        model_selection=model_selection,
-    )
-    model_selection_results = model_selection_results.drop(
+        # it helps to have the importation samples separately for easy
+        # multiplication
+        temp_import = jnp.array(
+            np.vstack(temp["importation_probability_samples"].to_numpy())  # type: ignore
+        ).T
+        all_imports.append(temp_import)
+
+        all_counties.append(temp)
+
+    car_scale_factors = {}  # Store scale factors keyed by (start_year, pool, model_variant)
+
+    for start_year in [2011, 2019, -2]:
+        for pool in [True, False]:
+            for model_variant in [
+                "MMR coverage",
+                "MMR coverage + exemptions",
+                "All covariates",
+            ]:
+                observed = []
+                predicted = []
+
+                for idx, validation_year in enumerate(
+                    [2021, 2022, 2023, 2024, 2025]
+                ):
+                    if start_year < 0:
+                        years = list(
+                            range(
+                                validation_year + start_year, validation_year
+                            )
+                        )
+                    else:
+                        years = list(range(start_year, validation_year))
+
+                    cases = all_counties[idx]["cases"].sum()
+
+                    # Only process CAR models for scaling calculation
+                    with open(
+                        os.path.join(
+                            output_dir,
+                            f"samples_partial_pooled_poisson_validation_testing_{years}_pool={pool}_CAR=True_{model_variant}.pkl",
+                        ),
+                        "rb",
+                    ) as f:
+                        samples = pickle.load(f)
+
+                    samples_with_imports = samples * all_imports[idx]
+                    samples_with_imports = jnp.sum(
+                        samples_with_imports, axis=1
+                    )
+                    predicted_median = jnp.median(samples_with_imports)
+
+                    observed.append(cases)
+                    predicted.append(predicted_median)
+
+                # Calculate scale factor for this model configuration across all years
+                scale = np.mean(np.array(predicted) / np.array(observed))
+                car_scale_factors[(start_year, pool, model_variant)] = scale
+
+    # we need to read in all of our different models and calculate the statistics
+    # on them
+    # we need the model selection metrics
+    model_performance = []
+    for start_year in tqdm([2011, 2019, -2], desc="Training year variants"):
+        for idx, validation_year in enumerate(
+            tqdm([2021, 2022, 2023, 2024, 2025], desc="Evaluation year")
+        ):
+            # assemble the full year list
+            if start_year < 0:
+                years = list(
+                    range(validation_year + start_year, validation_year)
+                )
+            else:
+                years = list(range(start_year, validation_year))
+
+            cases = all_counties[idx]["cases"].sum()
+            log_total_cases = cases
+            true = all_counties[idx]["cases"].to_numpy()
+            true_outbreak = all_counties[idx]["cases_outbreak"].to_numpy()
+
+            for car in [True, False]:
+                for pool in [True, False]:
+                    for model_variant in [
+                        "MMR coverage",
+                        "MMR coverage + exemptions",
+                        "All covariates",
+                    ]:
+                        with open(
+                            os.path.join(
+                                output_dir,
+                                f"samples_partial_pooled_poisson_validation_testing_{years}_pool={pool}_CAR={car}_{model_variant}.pkl",
+                            ),
+                            "rb",
+                        ) as f:
+                            samples = pickle.load(
+                                f,
+                            )
+
+                        # if car, we need to scale to account for the improper
+                        # CAR prior
+                        if car:
+                            scale = car_scale_factors[
+                                (start_year, pool, model_variant)
+                            ]
+                            samples = samples / scale
+
+                        # calculate the mean
+                        # pass through the performance table function
+                        # under various modes
+
+                        samples_unconditioned = samples * all_imports[idx]
+
+                        samples_unconditioned = jnp.mean(
+                            samples_unconditioned, axis=0
+                        )
+                        samples = jnp.mean(samples, axis=0)
+
+                        df = performance_table(
+                            samples_unconditioned, true, mode="selection"
+                        )
+
+                        # for the first df we get out from the fcn, we need to
+                        # editorialize
+                        model_name = f"Statistical: {model_variant}"
+                        if car:
+                            model_name += " + spatial"
+                        if pool:
+                            model_name += (
+                                " + state-specific vaccine coefficients"
+                            )
+                        if start_year == -2:
+                            model_name += ", trained on last two years"
+                        elif start_year == 2011:
+                            model_name += ", trained since 2011"
+                        elif start_year == 2019:
+                            model_name += ", trained since 2019"
+                        else:
+                            assert False, "Invalid training start year"
+
+                        df = df.with_columns(
+                            pl.lit(validation_year).alias("Evaluation year"),
+                            Model=pl.lit(model_name),
+                        )
+
+                        # let's now calculate the other stuff we need
+                        df = other_tables(
+                            df,
+                            samples_unconditioned,
+                            samples,
+                            true,
+                            true_outbreak,
+                        )
+
+                        model_performance.append(df)
+
+            # need to also read the mechanistic model for this training variant
+            with open(
+                os.path.join(
+                    output_dir,
+                    f"predictive_final_outbreak_size_predictions_{years}.pkl",
+                ),
+                "rb",
+            ) as f:
+                samples = pickle.load(
+                    f,
+                )["cases"]
+
+            samples_unconditioned = samples * all_imports[idx]
+
+            samples_unconditioned = jnp.mean(samples_unconditioned, axis=0)
+            samples = jnp.mean(samples, axis=0)
+
+            df = performance_table(
+                samples_unconditioned, true, mode="selection"
+            )
+            model_name = "Mechanistic: MMR coverage"
+            if start_year == -2:
+                model_name += ", trained on last two years"
+            elif start_year == 2011:
+                model_name += ", trained since 2011"
+            elif start_year == 2019:
+                model_name += ", trained since 2019"
+            else:
+                assert False, "Invalid training start year"
+
+            df = df.with_columns(
+                pl.lit(validation_year).alias("Evaluation year"),
+                Model=pl.lit(model_name),
+            )
+            # other stuff we need
+            df = other_tables(
+                df, samples_unconditioned, samples, true, true_outbreak
+            )
+            model_performance.append(df)
+
+    # let's do some clean up of the tables and export
+    model_performance = pl.concat(model_performance)
+    model_performance = aggregate(
+        model_performance,
         [
-            "AU-ROC, 2+ cases (%)",
-            "AU-ROC, 5+ cases (%)",
-            "AU-ROC, 20+ cases (%)",
+            col
+            for col in model_performance.columns
+            if col != "Model" and col != "Evaluation year"
+        ],
+    )
+    model_performance = model_performance.filter(
+        pl.col("Evaluation year") == "2021-2025"
+    ).drop("Evaluation year")
+
+    # model selection only requires certain columns
+    model_selection_columns = [
+        "Absolute difference (cases)",
+        "AUROC, 10+ cases (%)",
+        "MAE, top 50% (cases)",
+    ]
+    model_selection = model_performance.select(
+        [
+            *[
+                "Model",
+            ],
+            *[
+                f"{col}{suffix}"
+                for col in model_selection_columns
+                for suffix in ["", "_lower", "_upper"]
+            ],
         ]
     )
-
-    model_selection_results.write_csv(
+    model_selection = model_selection.sort(
+        by=model_selection_columns, descending=False
+    )
+    model_selection = beautify(model_selection, model_selection_columns)
+    # save
+    model_selection.write_csv(
         os.path.join(fig_dir, "table_supplemental_model_selection_metrics.csv")
     )
 
-    _, classification_metrics_with_importation = performance_table(
-        df,
-        models,
-        subset_models=None,
-        threshold=20,
-        with_importation=importation_samples,
-        include_classification=True,
-        classification_only=True,
-        model_selection=None,
-    )
-
-    classification_metrics_with_importation.write_csv(
-        os.path.join(
-            fig_dir,
-            "table_supplemental_classification_metrics_with_importation.csv",
-        )
-    )
-
-    _, classification_metrics_no_importation = performance_table(
-        df,
-        models,
-        subset_models=None,
-        threshold=20,
-        with_importation=None,
-        include_classification=True,
-        classification_only=True,
-        model_selection=None,
-    )
-
-    classification_metrics_no_importation.write_csv(
-        os.path.join(
-            fig_dir,
-            "table_supplemental_classification_metrics_no_importation.csv",
-        )
-    )
-
-    subset_models = [
-        "Mechanistic: MMR coverage, trained starting 2019",
-        "Statistical: MMR coverage, trained starting 2019, partial pooled, spatial",
-        "Statistical: MMR coverage + exemptions, trained over the last two years, spatial",
-        "Statistical: All covariates, trained starting 2019, partial pooled, spatial",
+    # we want the best performing mechanistic model
+    # we want the best performing statistical model
+    # we want the best performing statistical model w/out spatial
+    # we want the best performing statistical model with all covariates
+    # we want the best performing statistical model with all vaccination metrics
+    main_models = [
+        find_best_model(model_performance, subset="Mechanistic"),
+        find_best_model(model_performance, subset="Statistical"),
+        "Statistical: All covariates + spatial + state-specific vaccine coefficients, trained since 2019",
+        find_best_model(
+            model_performance, subset="Statistical", exclude="spatial"
+        ),
+        find_best_model(model_performance, subset="exemptions"),
+        find_best_model(model_performance, subset="All covariates"),
     ]
 
-    _, main_text_table = performance_table(
-        df,
-        models,
-        subset_models=subset_models,
-        threshold=20,
-        with_importation=importation_samples,
-        include_classification=True,
-        classification_only=False,
-        model_selection=None,
-    )
-
-    main_text_table = main_text_table[
+    # main table only requires certain columns
+    main_table_columns = [
+        # 'Absolute difference (cases)',
+        "Sensitivity, 10+ cases (%)",
+        "Specificity, 10+ cases (%)",
+        "AUROC, 10+ cases (%)",
+        "Sensitivity, 20+ cases (%)",
+        "Specificity, 20+ cases (%)",
+        "AUROC, 20+ cases (%)",
+        "Median fold error, top 20%",
+        "Spearman rho^2, top 20% (%)",
+        "RMSE, top 20% (cases)",
+        "MAE, top 20% (cases)",
+    ]
+    main_table = model_performance.select(
         [
-            "Model",
-            "Projection year",
-            "R² (%)",
-            "MAE (cases)",
-            "RMSE (cases)",
-            "Fold error",
-            "Sensitivity, 10+ cases (%)",
-            "Specificity, 10+ cases (%)",
-            "AU-ROC, 10+ cases (%)",
-            "Average precision, 10+ cases (%)",
+            *[
+                "Model",
+            ],
+            *[
+                f"{col}{suffix}"
+                for col in main_table_columns
+                for suffix in ["", "_lower", "_upper"]
+            ],
         ]
-    ]
-    main_text_table = main_text_table.filter(
-        pl.col("Projection year") == "Overall"
     )
-    main_text_table = main_text_table.drop("Projection year")
-    main_text_table = main_text_table.sort("Model")
+    # select set models
+    main_table = main_table.filter(pl.col("Model").is_in(main_models))
+    # order the models in a particular way we want
+    main_table = main_table.with_columns(
+        pl.col("Model").cast(pl.Enum(main_models))
+    ).sort(by="Model")
 
-    main_text_table.write_csv(
+    main_table = beautify(main_table, main_table_columns)
+    # export
+    main_table.write_csv(
         os.path.join(fig_dir, "table_validation_performance_metrics.csv")
     )
+    # supplemental classification table with imports only requires certain columns
+    classification_with_imports_columns = [
+        "Sensitivity, 5+ cases (%)",
+        "Specificity, 5+ cases (%)",
+        "AUROC, 5+ cases (%)",
+        "Sensitivity, 10+ cases (%)",
+        "Specificity, 10+ cases (%)",
+        "AUROC, 10+ cases (%)",
+        "Sensitivity, 20+ cases (%)",
+        "Specificity, 20+ cases (%)",
+        "AUROC, 20+ cases (%)",
+    ]
+    classification_with_imports = model_performance.select(
+        [
+            *["Model"],
+            *[
+                f"{col}{suffix}"
+                for col in classification_with_imports_columns
+                for suffix in ["", "_lower", "_upper"]
+            ],
+        ]
+    )
+    # beautify
+    classification_with_imports = beautify(
+        classification_with_imports, classification_with_imports_columns
+    )
+    # export
+    classification_with_imports.write_csv(
+        os.path.join(
+            fig_dir,
+            "table_supplemental_classification_metrics_with_importations.csv",
+        )
+    )
 
-    # table of with/without importation performance metrics
-    # and at 20%, 50%, and 80% thresholds
-    thresholds = [20, 50, 80]
-    importations = [None, importation_samples]
-    for threshold in thresholds:
-        for importation in importations:
-            if importation is None:
-                vars_ordered = [
-                    "Model",
-                    "Projection year",
-                    "R² (%)",
-                    "MAE (cases)",
-                    "RMSE (cases)",
-                ]
-                suffix = "no_importation"
-            else:
-                vars_ordered = [
-                    "Model",
-                    "Projection year",
-                    "R² (%)",
-                    "MAE (cases)",
-                    "RMSE (cases)",
-                    "Fold error",
-                ]
-                suffix = "with_importation"
-            _, temp_table = performance_table(
-                df,
-                models,
-                subset_models=None,
-                threshold=threshold,
-                with_importation=importation,
-                include_classification=False,
-                classification_only=False,
-                model_selection=None,
-            )
-            temp_table = temp_table[vars_ordered]
-            temp_table.write_csv(
-                os.path.join(
-                    fig_dir,
-                    f"table_supplemental_performance_metrics_{suffix}_threshold_{threshold}.csv",
-                )
-            )
+    # supplemental classification table w/out imports only requires certain columns
+    classification_wo_imports_columns = [
+        "Sensitivity, 5+ outbreak cases (%)",
+        "Specificity, 5+ outbreak cases (%)",
+        "AUROC, 5+ outbreak cases (%)",
+        "Sensitivity, 10+ outbreak cases (%)",
+        "Specificity, 10+ outbreak cases (%)",
+        "AUROC, 10+ outbreak cases (%)",
+        "Sensitivity, 20+ outbreak cases (%)",
+        "Specificity, 20+ outbreak cases (%)",
+        "AUROC, 20+ outbreak cases (%)",
+    ]
+    classification_wo_imports = model_performance.select(
+        [
+            *["Model"],
+            *[
+                f"{col}{suffix}"
+                for col in classification_wo_imports_columns
+                for suffix in ["", "_lower", "_upper"]
+            ],
+        ]
+    )
+    # beautify
+    classification_wo_imports = beautify(
+        classification_wo_imports, classification_wo_imports_columns
+    )
+    # export
+    classification_wo_imports.write_csv(
+        os.path.join(
+            fig_dir,
+            "table_supplemental_classification_metrics_without_importations.csv",
+        )
+    )
 
-    # total case counts table for the supplemental
-    df_counts = df.filter(pl.col("year").is_in([2021, 2022, 2023, 2024, 2025]))
-    df_counts = (
-        df_counts.group_by("year")
-        .agg(
-            total_cases=pl.sum("cases"),
-            total_cases_outbreak=pl.sum("cases_outbreak"),
-            n=pl.len(),
-            total_cases_geq_10=(
-                pl.when(pl.col("cases") >= 10).then(1).otherwise(0)
-            ).sum(),
-            total_cases_outbreak_geq_10=(
-                pl.when(pl.col("cases_outbreak") >= 10).then(1).otherwise(0)
-            ).sum(),
-        )
-        .sort("year")
-        .rename(
-            {
-                "total_cases": "Total cases (with importation)",
-                "total_cases_outbreak": "Total outbreak cases (without importation)",
-                "total_cases_geq_10": "Total counties with ≥10 cases (with importation)",
-                "total_cases_outbreak_geq_10": "Total counties with ≥10 outbreak cases (without importation)",
-                "n": "Number of counties",
-            }
-        )
-        .write_csv(
-            os.path.join(
-                fig_dir,
-                "table_supplemental_total_case_counts_validation_time_frame.csv",
-            )
-        )
+    # supplemental regression table only requires certain columns
+    regression_columns = [
+        "Median fold error, top 20%",
+        "RMSE, top 20% (cases)",
+        "MAE, top 20% (cases)",
+        "Spearman rho^2, top 20% (%)",
+        "Median fold error, top 50%",
+        "RMSE, top 50% (cases)",
+        "MAE, top 50% (cases)",
+        "Spearman rho^2, top 50% (%)",
+        "Median fold error, top 80%",
+        "RMSE, top 80% (cases)",
+        "MAE, top 80% (cases)",
+        "Spearman rho^2, top 80% (%)",
+    ]
+    regression = model_performance.select(
+        [
+            *["Model"],
+            *[
+                f"{col}{suffix}"
+                for col in regression_columns
+                for suffix in ["", "_lower", "_upper"]
+            ],
+        ]
+    )
+    # beautify
+    regression = beautify(regression, regression_columns)
+    # export
+    regression.write_csv(
+        os.path.join(fig_dir, "table_supplemental_regression_metrics.csv")
     )
