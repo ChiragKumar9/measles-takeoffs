@@ -769,8 +769,8 @@ def plot_intervention_effects(
             cumulative_total_by_county = (
                 i_county
                 if cumulative_total_by_county is None
-                else cumulative_total_by_county + i_county
-            )  # type: ignore
+                else cumulative_total_by_county + i_county  # type: ignore
+            )
 
             # cumulative_baseline_by_county = b_county
             # cumulative_total_by_county = i_county
