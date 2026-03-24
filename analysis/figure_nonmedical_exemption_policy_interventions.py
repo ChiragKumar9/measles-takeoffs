@@ -886,12 +886,7 @@ def plot_coverage_change_vs_cases(
     neighbor_fips = neighbors - intervened_fips
     plot_fips = intervened_fips | neighbor_fips
 
-    pkg = intervention_data[intervention][year]
-    pred = pkg["predictions"]
-    fips_list = pkg["fips"]
-
     fips_to_idx = {f: i for i, f in enumerate(baseline_fips)}
-    proj_fips_to_idx = {f: j for j, f in enumerate(fips_list)}
     imp = importation_samples
 
     # Load population data
@@ -908,43 +903,74 @@ def plot_coverage_change_vs_cases(
     )
     pop_lookup = dict(zip(pop_df["fips"].to_list(), pop_df["pop"].to_list()))
 
-    incidence_change = {}
+    # Calculate cumulative incidence change across all years
+    cumulative_incidence_change = {}
+
     for fip in plot_fips:
-        if fip not in fips_to_idx or fip not in proj_fips_to_idx:
+        if fip not in fips_to_idx:
             continue
         if fip not in pop_lookup:
             continue
 
         b_idx = fips_to_idx[fip]
-        p_idx = proj_fips_to_idx[fip]
         pop = pop_lookup[fip]
 
-        baseline_samps = np.array(
-            baseline_samples_by_year[year][:, b_idx] / scale
-        )
-        intervention_samps = np.array(pred[:, p_idx] / scale)
+        cumulative_baseline_incidence = None
+        cumulative_intervention_incidence = None
 
-        # Apply constraint only to intervened counties, not neighbors
-        if fip in intervened_fips:
-            if intervention in BAN_INTERVENTIONS:
-                intervention_samps = np.minimum(
-                    intervention_samps, baseline_samps
+        # Loop through all future years
+        for yr in future_years:
+            pkg = intervention_data[intervention][yr]
+            pred = pkg["predictions"]
+            fips_list = pkg["fips"]
+
+            if fip not in fips_list:
+                continue
+
+            proj_fips_to_idx = {f: j for j, f in enumerate(fips_list)}
+            p_idx = proj_fips_to_idx[fip]
+
+            baseline_samps = np.array(
+                baseline_samples_by_year[yr][:, b_idx] / scale
+            )
+            intervention_samps = np.array(pred[:, p_idx] / scale)
+
+            # Apply constraint only to intervened counties, not neighbors
+            if fip in intervened_fips:
+                if intervention in BAN_INTERVENTIONS:
+                    intervention_samps = np.minimum(
+                        intervention_samps, baseline_samps
+                    )
+                elif intervention in REMOVE_INTERVENTIONS:
+                    intervention_samps = np.maximum(
+                        intervention_samps, baseline_samps
+                    )
+
+            # Apply importation to both
+            baseline_samps = baseline_samps * imp[:, b_idx] + imp[:, b_idx]
+            intervention_samps = (
+                intervention_samps * imp[:, b_idx] + imp[:, b_idx]
+            )
+
+            # Calculate incidence (cases per 100,000 population)
+            baseline_incidence = (baseline_samps / pop) * 100000
+            intervention_incidence = (intervention_samps / pop) * 100000
+
+            # Accumulate across years
+            if cumulative_baseline_incidence is None:
+                cumulative_baseline_incidence = baseline_incidence
+                cumulative_intervention_incidence = intervention_incidence
+            else:
+                cumulative_baseline_incidence += baseline_incidence
+                cumulative_intervention_incidence += intervention_incidence
+
+        if cumulative_baseline_incidence is not None:
+            cumulative_incidence_change[fip] = float(
+                np.mean(
+                    cumulative_intervention_incidence
+                    - cumulative_baseline_incidence
                 )
-            elif intervention in REMOVE_INTERVENTIONS:
-                intervention_samps = np.maximum(
-                    intervention_samps, baseline_samps
-                )
-
-        # NOW apply importation to both
-        baseline_samps = baseline_samps * imp[:, b_idx] + imp[:, b_idx]
-        intervention_samps = intervention_samps * imp[:, b_idx] + imp[:, b_idx]
-
-        # Calculate change in incidence (cases per 100,000 population)
-        baseline_incidence = (baseline_samps / pop) * 100000
-        intervention_incidence = (intervention_samps / pop) * 100000
-        incidence_change[fip] = float(
-            np.mean(intervention_incidence - baseline_incidence)
-        )
+            )
 
     base_cov_lookup = dict(
         zip(
@@ -960,7 +986,7 @@ def plot_coverage_change_vs_cases(
 
     rows = []
     for fip in plot_fips:
-        if fip not in incidence_change:
+        if fip not in cumulative_incidence_change:
             continue
         if fip not in base_cov_lookup:
             continue
@@ -981,7 +1007,7 @@ def plot_coverage_change_vs_cases(
                 "fips": fip,
                 "initial_cov": initial_cov,
                 "cov_change": cov_change,
-                "incidence_change": incidence_change[fip],
+                "incidence_change": cumulative_incidence_change[fip],
                 "is_intervened": is_intervened,
             }
         )
@@ -998,7 +1024,7 @@ def plot_coverage_change_vs_cases(
     vmax_original = scatter_df["incidence_change"].max()
 
     print(
-        f"Incidence change range (before clipping): min={vmin_original:.2f}, max={vmax_original:.2f}"
+        f"Cumulative incidence change range (before clipping): min={vmin_original:.2f}, max={vmax_original:.2f}"
     )
 
     # Clip values below -100 and above 0
@@ -1011,13 +1037,13 @@ def plot_coverage_change_vs_cases(
     vmax = 0
 
     print(
-        f"Incidence change range (after clipping): min={vmin:.2f}, max={vmax:.2f}"
+        f"Cumulative incidence change range (after clipping): min={vmin:.2f}, max={vmax:.2f}"
     )
     print(
-        f"Median incidence change: {scatter_df['incidence_change'].median():.2f}"
+        f"Median cumulative incidence change: {scatter_df['incidence_change'].median():.2f}"
     )
     print(
-        f"Mean incidence change: {scatter_df['incidence_change'].mean():.2f}"
+        f"Mean cumulative incidence change: {scatter_df['incidence_change'].mean():.2f}"
     )
 
     # Create a blue-to-grey colormap (no red needed since vmax=0)
@@ -1149,7 +1175,7 @@ def create_supplemental_intervention_scatter_figure(
     # Add subplot labels
     axes[0].text(
         -0.05,
-        1.08,
+        1.48,
         "a",
         transform=axes[0].transAxes,
         fontsize=24,
@@ -1536,73 +1562,73 @@ if __name__ == "__main__":
         year=2026,
     )
 
-    # -------------------------------------------------------------------------
-    # Create supplemental figure: intervention effects across vaccination scenarios
-    # -------------------------------------------------------------------------
+    # # -------------------------------------------------------------------------
+    # # Create supplemental figure: intervention effects across vaccination scenarios
+    # # -------------------------------------------------------------------------
 
-    # Define the 4 vaccination scenarios to show
-    vaccination_scenarios_to_plot = [
-        "targeted_worsening",
-        "universal_worsening",
-        "targeted_improvement",
-        "universal_improvement",
-    ]
+    # # Define the 4 vaccination scenarios to show
+    # vaccination_scenarios_to_plot = [
+    #     "targeted_worsening",
+    #     "universal_worsening",
+    #     "targeted_improvement",
+    #     "universal_improvement",
+    # ]
 
-    vaccination_scenario_labels = {
-        "targeted_worsening": "Vaccinations universally decline by 100% more",
-        "universal_worsening": "Universal Vaccinations universally decline by 50% more",
-        "targeted_improvement": "Universal 95% coverage by 2030",
-        "universal_improvement": "1% improvement year-over-year",
-    }
+    # vaccination_scenario_labels = {
+    #     "targeted_worsening": "Vaccinations universally decline by 100% more",
+    #     "universal_worsening": "Universal Vaccinations universally decline by 50% more",
+    #     "targeted_improvement": "Universal 95% coverage by 2030",
+    #     "universal_improvement": "1% improvement year-over-year",
+    # }
 
-    # Load baseline samples for each vaccination scenario
-    all_scenario_baseline_samples = {}
-    for vac_scenario in vaccination_scenarios_to_plot:
-        all_scenario_baseline_samples[vac_scenario] = {}
-        for year in FUTURE_YEARS:
-            with open(
-                os.path.join(
-                    output_dir, f"risk_projections_{vac_scenario}_{year}.pkl"
-                ),
-                "rb",
-            ) as f:
-                all_scenario_baseline_samples[vac_scenario][year] = (
-                    pickle.load(f)
-                )
+    # # Load baseline samples for each vaccination scenario
+    # all_scenario_baseline_samples = {}
+    # for vac_scenario in vaccination_scenarios_to_plot:
+    #     all_scenario_baseline_samples[vac_scenario] = {}
+    #     for year in FUTURE_YEARS:
+    #         with open(
+    #             os.path.join(
+    #                 output_dir, f"risk_projections_{vac_scenario}_{year}.pkl"
+    #             ),
+    #             "rb",
+    #         ) as f:
+    #             all_scenario_baseline_samples[vac_scenario][year] = (
+    #                 pickle.load(f)
+    #             )
 
-    # Load intervention data for each vaccination scenario
-    all_scenario_intervention_data = {}
-    for vac_scenario in vaccination_scenarios_to_plot:
-        all_scenario_intervention_data[vac_scenario] = {}
-        for intervention in INTERVENTIONS:
-            all_scenario_intervention_data[vac_scenario][intervention] = {}
-            for year in FUTURE_YEARS:
-                with open(
-                    os.path.join(
-                        output_dir,
-                        f"risk_projections_{intervention}_{vac_scenario}_{year}.pkl",
-                    ),
-                    "rb",
-                ) as f:
-                    all_scenario_intervention_data[vac_scenario][intervention][
-                        year
-                    ] = pickle.load(f)
+    # # Load intervention data for each vaccination scenario
+    # all_scenario_intervention_data = {}
+    # for vac_scenario in vaccination_scenarios_to_plot:
+    #     all_scenario_intervention_data[vac_scenario] = {}
+    #     for intervention in INTERVENTIONS:
+    #         all_scenario_intervention_data[vac_scenario][intervention] = {}
+    #         for year in FUTURE_YEARS:
+    #             with open(
+    #                 os.path.join(
+    #                     output_dir,
+    #                     f"risk_projections_{intervention}_{vac_scenario}_{year}.pkl",
+    #                 ),
+    #                 "rb",
+    #             ) as f:
+    #                 all_scenario_intervention_data[vac_scenario][intervention][
+    #                     year
+    #                 ] = pickle.load(f)
 
-    create_supplemental_intervention_effects_by_scenario_figure(
-        interventions=INTERVENTIONS,
-        intervention_labels=INTERVENTION_LABELS,
-        future_years=FUTURE_YEARS,
-        vaccination_scenarios=vaccination_scenarios_to_plot,
-        vaccination_scenario_labels=vaccination_scenario_labels,
-        all_scenario_baseline_samples=all_scenario_baseline_samples,
-        all_scenario_intervention_data=all_scenario_intervention_data,
-        importation_samples=jnp.minimum(
-            importation_samples_future * import_scaler_2025, 1
-        ),
-        baseline_fips=baseline_fips,
-        scale=scale_2025,
-        output_path=os.path.join(
-            fig_dir,
-            "figure_supplemental_nme_policies_by_vaccination_scenario",
-        ),
-    )
+    # create_supplemental_intervention_effects_by_scenario_figure(
+    #     interventions=INTERVENTIONS,
+    #     intervention_labels=INTERVENTION_LABELS,
+    #     future_years=FUTURE_YEARS,
+    #     vaccination_scenarios=vaccination_scenarios_to_plot,
+    #     vaccination_scenario_labels=vaccination_scenario_labels,
+    #     all_scenario_baseline_samples=all_scenario_baseline_samples,
+    #     all_scenario_intervention_data=all_scenario_intervention_data,
+    #     importation_samples=jnp.minimum(
+    #         importation_samples_future * import_scaler_2025, 1
+    #     ),
+    #     baseline_fips=baseline_fips,
+    #     scale=scale_2025,
+    #     output_path=os.path.join(
+    #         fig_dir,
+    #         "figure_supplemental_nme_policies_by_vaccination_scenario",
+    #     ),
+    # )
