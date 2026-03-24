@@ -76,7 +76,7 @@ state_abbreviations = {
 
 
 def setup_plot(nrows, ncols):
-    fig, ax = plt.subplots(nrows, ncols, figsize=(20, 15))
+    fig, ax = plt.subplots(nrows, ncols, figsize=(30, 7.5))
     if nrows * ncols == 1:
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
@@ -89,7 +89,7 @@ def setup_plot(nrows, ncols):
             spine.set_position(("outward", 5))
         # put the grid behind
         ax.set_axisbelow(True)
-        return ax
+        return fig, ax
     for temp in ax.flatten():  # type: ignore
         temp.spines["top"].set_visible(False)
         temp.spines["right"].set_visible(False)
@@ -111,8 +111,6 @@ def plot_county_risk_fcn_of_coverage(df, median, upper, lower, label, fig, ax):
         df["estimated_mmr_cov_raw"].to_numpy(),
         df[median].to_numpy(),
         yerr=0,
-        # [[df[median].to_numpy() - df[lower].to_numpy()],
-        #         [df[upper].to_numpy() - df[median].to_numpy()]],
         fmt="o",
         alpha=0.7,
         ecolor="black",
@@ -132,28 +130,15 @@ def plot_state_risk_fcn_of_coverage(state_df, column_prefix, label, fig, ax):
     )
 
     # now plot rank vs MMR coverage
-    for cov, median_risk, lower_risk, upper_risk, state in zip(
+    for cov, risk_rank, state in zip(
         state_df["weighted_mmr_coverage"],
-        state_df[f"median_{column_prefix}_risk_rank"],
-        state_df[f"lower_{column_prefix}_risk_rank"],
-        state_df[f"upper_{column_prefix}_risk_rank"],
+        state_df[f"{column_prefix}_risk_rank"],
         state_df["state_abbr"],
     ):
-        # ax.errorbar(
-        #     cov,
-        #     median_risk,
-        #     yerr = [[median_risk - lower_risk],
-        #             [upper_risk - median_risk]],
-        #     fmt='none',
-        #     alpha=0.7,
-        #     ecolor='black',
-        # )
-
-        ax.scatter(cov, median_risk, s=0, alpha=0.0)
-
+        ax.scatter(cov, risk_rank, s=0, alpha=0.0)
         ax.text(
             cov,
-            median_risk,
+            risk_rank,
             state,
             fontsize=18,
             va="center",
@@ -167,11 +152,10 @@ def plot_state_risk_fcn_of_coverage(state_df, column_prefix, label, fig, ax):
 
 
 if __name__ == "__main__":
-    fig, ax = setup_plot(2, 2)  # type: ignore
+    fig, ax = setup_plot(1, 3)  # type: ignore
 
     df = pl.read_csv(
         os.path.join(output_dir, "assembled_projection_results.csv"),
-        # make sure we read fips codes as strings
     )
     df = df.filter(pl.col("type") == "projection")
 
@@ -180,11 +164,11 @@ if __name__ == "__main__":
     )
     state_df = state_df.filter(pl.col("type") == "projection")
 
-    ax[0, 0].text(  # type: ignore
+    ax[0].text(  # type: ignore
         -0.05,
         1.08,
         "a",
-        transform=ax[0, 0].transAxes,  # type: ignore
+        transform=ax[0].transAxes,  # type: ignore
         fontsize=24,
         fontweight="bold",
         va="top",
@@ -192,19 +176,41 @@ if __name__ == "__main__":
     )
     plot_county_risk_fcn_of_coverage(
         df,
-        "median_unconditioned_risk_rank",
-        "upper_unconditioned_risk_rank",
-        "lower_unconditioned_risk_rank",
-        "Risk percentile",
+        "unconditioned_count_rank",
+        "unconditioned_count_rank",
+        "unconditioned_count_rank",
+        "Risk percentile (count)",
         fig,
-        ax[0, 0],  # type: ignore
+        ax[0],  # type: ignore
     )
+    ax[0].set_ylim(0, 100)  # type: ignore
 
-    ax[0, 1].text(  # type: ignore
+    ax[1].text(  # type: ignore
         -0.05,
         1.08,
         "b",
-        transform=ax[0, 1].transAxes,  # type: ignore
+        transform=ax[1].transAxes,  # type: ignore
+        fontsize=24,
+        fontweight="bold",
+        va="top",
+        ha="right",
+    )
+    plot_county_risk_fcn_of_coverage(
+        df,
+        "unconditioned_incidence_rank",
+        "unconditioned_incidence_rank",
+        "unconditioned_incidence_rank",
+        "Risk percentile (incidence)",
+        fig,
+        ax[1],  # type: ignore
+    )
+    ax[1].set_ylim(0, 100)  # type: ignore
+
+    ax[2].text(  # type: ignore
+        -0.05,
+        1.08,
+        "c",
+        transform=ax[2].transAxes,  # type: ignore
         fontsize=24,
         fontweight="bold",
         va="top",
@@ -213,48 +219,11 @@ if __name__ == "__main__":
     plot_state_risk_fcn_of_coverage(
         state_df,
         "unconditioned",
-        "Risk percentile",
+        "Risk percentile (count)",
         fig,
-        ax[0, 1],  # type: ignore
+        ax[2],  # type: ignore
     )
-
-    ax[1, 0].text(  # type: ignore
-        -0.05,
-        1.08,
-        "c",
-        transform=ax[1, 0].transAxes,  # type: ignore
-        fontsize=24,
-        fontweight="bold",
-        va="top",
-        ha="right",
-    )
-    plot_county_risk_fcn_of_coverage(
-        df,
-        "median_conditioned_risk_rank",
-        "upper_conditioned_risk_rank",
-        "lower_conditioned_risk_rank",
-        "Import-conditioned risk percentile",
-        fig,
-        ax[1, 0],  # type: ignore
-    )
-
-    ax[1, 1].text(  # type: ignore
-        -0.05,
-        1.08,
-        "d",
-        transform=ax[1, 1].transAxes,  # type: ignore
-        fontsize=24,
-        fontweight="bold",
-        va="top",
-        ha="right",
-    )
-    plot_state_risk_fcn_of_coverage(
-        state_df,
-        "conditioned",
-        "Import-conditioned risk percentile",
-        fig,
-        ax[1, 1],  # type: ignore
-    )
+    ax[2].set_ylim(0, 100)  # type: ignore
 
     fig.tight_layout()
 

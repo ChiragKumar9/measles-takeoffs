@@ -354,7 +354,7 @@ if __name__ == "__main__":
                         X = final_sizes.reshape(-1, 1)
                         model = sm.GLM(
                             observed_outbreaks,
-                            X,
+                            sm.add_constant(X),
                             family=sm.families.Poisson(),
                         ).fit()
 
@@ -380,7 +380,9 @@ if __name__ == "__main__":
                                 )
                             ]
                         )
-                        X_test = final_sizes_test.reshape(-1, 1)
+                        X_test = sm.add_constant(
+                            final_sizes_test.reshape(-1, 1)
+                        )
                         mu = model.predict(X_test)
                         # truncate mus at the population size
                         mu = np.minimum(mu, population_test)

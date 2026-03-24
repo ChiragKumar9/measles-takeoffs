@@ -32,7 +32,7 @@ with open("params.yml", "r") as f:
     params = yaml.safe_load(f)
 
 
-def setup_plot(nrows, ncols, figsize=(20, 22)):
+def setup_plot(nrows, ncols, figsize=(30, 14)):
     fig, ax = plt.subplots(nrows, ncols, figsize=figsize)
     if nrows * ncols == 1:
         ax.spines["top"].set_visible(False)
@@ -334,16 +334,9 @@ def plot_ecological_determinants(samples_pre, samples_post, df, fig, ax):
         )
         year_medians.append(median_effects)
 
-    # for i in range(len(year_medians[0])):
-    #     ax.plot([i - offset, i + offset],
-    #             [year_medians[0][i], year_medians[1][i]],
-    #             linestyle = '-',
-    #             color = 'grey')
-
-    # line at 0%
     ax.axhline(0, ls="--", color="k")
 
-    ax.legend(loc=(0.01, 1.1))
+    ax.legend(loc=(0.01, 1.0))
 
     ax.set_xticks(range(len(all_covariates)))  # type: ignore
     # at a 45 degree angle
@@ -406,335 +399,6 @@ def plot_ecological_determinants(samples_pre, samples_post, df, fig, ax):
     return fig, ax
 
 
-def plot_spatial_importance(
-    samples_pre, samples_post, df, adjacency_pre, adjacency_post, fig, ax
-):
-    """
-    Plot spatial autocorrelation by outbreak case size bucket and time period.
-
-    Parameters:
-    -----------
-    samples_pre : dict
-        Posterior samples for 2011-2020 period
-    samples_post : dict
-        Posterior samples for 2021-2025 period
-    df : polars.DataFrame
-        Analysis dataset
-    adjacency_pre : numpy.ndarray
-        Adjacency matrix for counties in 2011-2020 period
-    adjacency_post : numpy.ndarray
-        Adjacency matrix for counties in 2021-2025 period
-    fig : matplotlib.figure.Figure
-        Figure object
-    ax : matplotlib.axes.Axes
-        Axis for plotting
-    """
-
-    def calculate_correlations_for_period(samples, df_period, adjacency):
-        """Helper function to calculate correlations for one time period."""
-        raw_spatial_effect = samples["raw_spatial_effect"]
-        spatial_sigma = samples["spatial_sigma"]
-        spatial_effect = raw_spatial_effect * spatial_sigma[:, None]
-
-        # Get counties with neighbors
-        has_a_neighbor = adjacency.sum(axis=0) > 0
-        counties_with_neighbors = (
-            df_period["fips"]
-            .unique(maintain_order=True)
-            .to_numpy()[has_a_neighbor]
-        )
-
-        # Filter adjacency matrix to only counties with neighbors
-        adjacency_filtered = adjacency[has_a_neighbor][:, has_a_neighbor]
-
-        # Create county-level dataframe (one row per county)
-        df_counties = (
-            df_period.filter(pl.col("fips").is_in(counties_with_neighbors))
-            .group_by("fips", maintain_order=True)
-            .agg(
-                pl.first("county"),
-                pl.first("state"),
-                pl.max("cases_outbreak"),
-                pl.mean("pop"),
-                estimated_mmr_cov=pl.mean("estimated_mmr_cov"),
-            )
-        )
-
-        # Create case size buckets
-        df_counties = df_counties.with_columns(
-            case_buckets=pl.when(pl.col("cases_outbreak") == 0)
-            .then(pl.lit("0"))
-            .when(pl.col("cases_outbreak") <= 4)
-            .then(pl.lit("1"))
-            .when(pl.col("cases_outbreak") <= 9)
-            .then(pl.lit("2"))
-            .when(pl.col("cases_outbreak") <= 19)
-            .then(pl.lit("3"))
-            .otherwise(pl.lit("4"))
-        )
-
-        # Calculate neighbor correlations by bucket
-        bucket_correlations = []
-
-        for case_bucket in ["0", "1", "2", "3", "4"]:
-            bucket_mask = (
-                df_counties["case_buckets"] == case_bucket
-            ).to_numpy()
-
-            # Get indices of counties in this bucket
-            bucket_county_indices = np.where(bucket_mask)[0]
-
-            if len(bucket_county_indices) == 0:
-                bucket_correlations.append([])
-                continue
-
-            # For each posterior sample, calculate correlation in this bucket
-            correlations_per_sample = []
-            for s in range(spatial_effect.shape[0]):
-                county_values = []
-                neighbor_means = []
-
-                for county_idx in bucket_county_indices:
-                    # Get ALL neighbors from filtered adjacency matrix
-                    neighbors = adjacency_filtered[county_idx] > 0
-                    if neighbors.sum() == 0:
-                        continue
-
-                    # County's spatial effect
-                    county_values.append(spatial_effect[s, county_idx])
-
-                    # Mean of ALL neighbors' spatial effects
-                    neighbor_means.append(spatial_effect[s, neighbors].mean())
-
-                # Calculate correlation across all counties in this bucket for this sample
-                if len(county_values) > 1:
-                    corr = np.corrcoef(county_values, neighbor_means)[0, 1]
-                    correlations_per_sample.append(corr)
-
-            bucket_correlations.append(correlations_per_sample)
-
-        return bucket_correlations, df_counties
-
-    # Calculate correlations for both time periods with their respective adjacency matrices
-    df_pre = df.filter(pl.col("year") <= 2020)
-    df_post = df.filter(pl.col("year") >= 2021)
-
-    bucket_correlations_pre, df_counties_pre = (
-        calculate_correlations_for_period(samples_pre, df_pre, adjacency_pre)
-    )
-    bucket_correlations_post, df_counties_post = (
-        calculate_correlations_for_period(
-            samples_post, df_post, adjacency_post
-        )
-    )
-
-    # Plotting
-    def get_stats(data_list):
-        medians = [np.median(d) if len(d) > 0 else np.nan for d in data_list]
-        lowers = [
-            np.percentile(d, 25) if len(d) > 0 else np.nan for d in data_list
-        ]
-        uppers = [
-            np.percentile(d, 75) if len(d) > 0 else np.nan for d in data_list
-        ]
-        means = [np.mean(d) if len(d) > 0 else np.nan for d in data_list]
-        return medians, lowers, uppers, means
-
-    def trim_to_percentiles(data_list):
-        """Trim data to 2.5th to 97.5th percentiles for violin plot."""
-        trimmed = []
-        for d in data_list:
-            if len(d) > 0:
-                d_array = np.array(d)
-                lower_bound = np.percentile(d_array, 2.5)
-                upper_bound = np.percentile(d_array, 97.5)
-                trimmed_d = d_array[
-                    (d_array >= lower_bound) & (d_array <= upper_bound)
-                ]
-                trimmed.append(trimmed_d.tolist())
-            else:
-                trimmed.append([])
-        return trimmed
-
-    # Calculate stats on full data
-    medians_pre, lowers_pre, uppers_pre, means_pre = get_stats(
-        bucket_correlations_pre
-    )
-    medians_post, lowers_post, uppers_post, means_post = get_stats(
-        bucket_correlations_post
-    )
-
-    # Trim data for violin plots
-    bucket_correlations_pre_trimmed = trim_to_percentiles(
-        bucket_correlations_pre
-    )
-    bucket_correlations_post_trimmed = trim_to_percentiles(
-        bucket_correlations_post
-    )
-
-    offset = 0.2
-    valid_indices = [
-        i
-        for i in range(5)
-        if len(bucket_correlations_pre[i]) > 0
-        or len(bucket_correlations_post[i]) > 0
-    ]
-
-    # Plot pre-2021 data
-    if any(len(bucket_correlations_pre_trimmed[i]) > 0 for i in valid_indices):
-        positions_pre = [
-            i - offset
-            for i in valid_indices
-            if len(bucket_correlations_pre_trimmed[i]) > 0
-        ]
-        data_pre = [
-            bucket_correlations_pre_trimmed[i]
-            for i in valid_indices
-            if len(bucket_correlations_pre_trimmed[i]) > 0
-        ]
-
-        violinparts1 = ax.violinplot(
-            data_pre, positions=positions_pre, widths=0.3, showextrema=False
-        )
-        for pc in violinparts1["bodies"]:
-            pc.set(facecolor="blue")
-
-        valid_pre_indices = [
-            i for i in valid_indices if len(bucket_correlations_pre[i]) > 0
-        ]
-        ax.errorbar(
-            x=positions_pre,
-            y=[medians_pre[i] for i in valid_pre_indices],
-            yerr=[
-                [medians_pre[i] - lowers_pre[i] for i in valid_pre_indices],
-                [uppers_pre[i] - medians_pre[i] for i in valid_pre_indices],
-            ],
-            fmt="o",
-            capsize=5,
-            capthick=2,
-            color="blue",
-        )
-
-    # Plot post-2020 data
-    if any(
-        len(bucket_correlations_post_trimmed[i]) > 0 for i in valid_indices
-    ):
-        positions_post = [
-            i + offset
-            for i in valid_indices
-            if len(bucket_correlations_post_trimmed[i]) > 0
-        ]
-        data_post = [
-            bucket_correlations_post_trimmed[i]
-            for i in valid_indices
-            if len(bucket_correlations_post_trimmed[i]) > 0
-        ]
-
-        violinparts2 = ax.violinplot(
-            data_post, positions=positions_post, widths=0.3, showextrema=False
-        )
-        for pc in violinparts2["bodies"]:
-            pc.set(facecolor="green")
-
-        valid_post_indices = [
-            i for i in valid_indices if len(bucket_correlations_post[i]) > 0
-        ]
-        ax.errorbar(
-            x=positions_post,
-            y=[medians_post[i] for i in valid_post_indices],
-            yerr=[
-                [medians_post[i] - lowers_post[i] for i in valid_post_indices],
-                [uppers_post[i] - medians_post[i] for i in valid_post_indices],
-            ],
-            fmt="o",
-            capsize=5,
-            capthick=2,
-            color="green",
-        )
-
-    # Bayesian comparison: probability that correlation is higher in post period
-    for i in valid_indices:
-        if (
-            len(bucket_correlations_pre[i]) > 0
-            and len(bucket_correlations_post[i]) > 0
-        ):
-            corr_pre = np.array(bucket_correlations_pre[i])
-            corr_post = np.array(bucket_correlations_post[i])
-
-            # Probability that post > pre
-            prob_post_greater = np.mean(corr_post > corr_pre)
-
-            # Two-sided: probability of difference in either direction
-            ks_statistic, p_value = stats.ks_2samp(
-                corr_pre, corr_post, alternative="greater"
-            )
-
-            # Bayesian interpretation: if prob_different is low, groups differ
-            if p_value < 0.01:  # type: ignore
-                sig_text = "**"
-            elif p_value < 0.05:  # type: ignore
-                sig_text = "*"
-            elif p_value < 0.10:  # type: ignore
-                sig_text = "†"
-            else:
-                sig_text = "n.s."
-
-            max_height = np.nanmax([uppers_pre[i], uppers_post[i]])
-            bracket_height = max_height + 0.05
-            x1, x2 = i - offset, i + offset
-            h = 0.02
-
-            ax.plot(
-                [x1, x2], [bracket_height, bracket_height], "k-", linewidth=1
-            )
-            ax.plot(
-                [x1, x1],
-                [bracket_height, bracket_height - h],
-                "k-",
-                linewidth=1,
-            )
-            ax.plot(
-                [x2, x2],
-                [bracket_height, bracket_height - h],
-                "k-",
-                linewidth=1,
-            )
-            ax.text(
-                (x1 + x2) / 2,
-                bracket_height + 0.02,
-                sig_text,
-                ha="center",
-                va="bottom",
-                fontsize=16,
-                fontweight="bold",
-            )
-
-    ax.set_xticks(range(5))
-    ax.set_xticklabels(
-        ["0", "1-4", "5-9", "10-19", "20+"], rotation=-60, ha="left"
-    )
-    ax.legend(
-        [
-            violinparts1["bodies"][0],  # type: ignore
-            violinparts2["bodies"][0],  # type: ignore
-        ],
-        ["2011-2020", "2021-2025"],
-    )
-    ax.set_xlabel("Outbreak size (N)")
-    ax.set_ylabel("Residual spatial autocorrelation")
-
-    return (
-        fig,
-        ax,
-        {
-            "bucket_correlations_pre": bucket_correlations_pre,
-            "bucket_correlations_post": bucket_correlations_post,
-            "df_counties_pre": df_counties_pre,
-            "df_counties_post": df_counties_post,
-        },
-    )
-
-
 def plot_increasing_spread_over_time(
     df,
     adjacency_matrix_pre,
@@ -743,14 +407,17 @@ def plot_increasing_spread_over_time(
     posterior_samples_post,
     fig,
     ax,
-    significance_threshold=0.95,
+    year_bins=None,
 ):
     """
-    Plot number of county-years with neighboring outbreaks over time.
+    Plot number of county-years with neighboring outbreaks over time as grouped bar chart.
 
     Outbreak defined as >= 3 cases. Counts unique counties involved in neighboring
-    outbreaks (where both the county and at least one neighbor have >= 3 cases),
-    but only if at least one county in the cluster has a significant spatial term.
+    outbreaks (where both the county and at least one neighbor have >= 3 cases).
+    Shows three bars for different significance requirements:
+    - Black: No significance requirement
+    - Orangered: At least one county in cluster significant at 5% level
+    - Darkmagenta: At least one county in cluster significant at 1% level
 
     Parameters:
     -----------
@@ -768,10 +435,11 @@ def plot_increasing_spread_over_time(
         Figure object
     ax : matplotlib.axes.Axes
         Axis for plotting
-    significance_threshold : float
-        Threshold for determining if spatial effect is significant (default: 0.95)
-        A county is considered to have significant spatial effect if no more than
-        5% (1 - threshold) of posterior mass is on the opposite side of zero.
+    year_bins : list of tuples, optional
+        Custom year bins as [(start1, end1), (start2, end2), ...].
+        Years are inclusive and will be labeled as "start-end".
+        If None, uses individual years.
+        Example: [(2011, 2015), (2016, 2020), (2021, 2025)]
     """
 
     def get_significant_spatial_counties(
@@ -818,7 +486,11 @@ def plot_increasing_spread_over_time(
         return significant_spatial_dict
 
     def count_valid_clusters(
-        year_df, adjacency_matrix, significant_spatial_dict, all_fips
+        year_df,
+        adjacency_matrix,
+        significant_spatial_dict,
+        all_fips,
+        require_significance=True,
     ):
         """
         Count counties in valid clusters for a specific year.
@@ -831,8 +503,11 @@ def plot_increasing_spread_over_time(
             Adjacency matrix for all counties in the period
         significant_spatial_dict : dict
             Dictionary mapping FIPS codes to whether they have significant spatial effects
+            Can be None if require_significance is False
         all_fips : list
             All FIPS codes in the period (matching adjacency matrix order)
+        require_significance : bool
+            If True, only count clusters with at least one significant spatial effect
         """
         fips_to_idx = {fips: idx for idx, fips in enumerate(all_fips)}
 
@@ -871,10 +546,14 @@ def plot_increasing_spread_over_time(
                 # Check if this county has significant spatial effect
                 # (only counties with neighbors are in the dict)
                 if (
-                    current_fips in significant_spatial_dict
-                    and significant_spatial_dict[current_fips]
+                    require_significance
+                    and significant_spatial_dict is not None
                 ):
-                    cluster_has_significant_spatial = True
+                    if (
+                        current_fips in significant_spatial_dict
+                        and significant_spatial_dict[current_fips]
+                    ):
+                        cluster_has_significant_spatial = True
 
                 idx = fips_to_idx[current_fips]
 
@@ -892,11 +571,11 @@ def plot_increasing_spread_over_time(
                     ):
                         queue.append(neighbor_fips)
 
-            # Only count this cluster if:
-            # 1. It has more than 1 county (neighboring outbreak)
-            # 2. At least one county has significant spatial effect
-            if len(cluster) > 1 and cluster_has_significant_spatial:
-                counties_in_valid_clusters.update(cluster)
+            # Only count this cluster if it has more than 1 county (neighboring outbreak)
+            # and (if required) at least one county has significant spatial effect
+            if len(cluster) > 1:
+                if not require_significance or cluster_has_significant_spatial:
+                    counties_in_valid_clusters.update(cluster)
 
         return len(counties_in_valid_clusters)
 
@@ -912,60 +591,127 @@ def plot_increasing_spread_over_time(
         .to_list()
     )
 
-    # Get significant spatial effects for both time periods
-    # This returns dicts mapping FIPS -> bool (only for counties with neighbors)
-    significant_spatial_pre = get_significant_spatial_counties(
-        posterior_samples_pre,
-        adjacency_matrix_pre,
-        all_fips_pre,
-        significance_threshold,
-    )
-    significant_spatial_post = get_significant_spatial_counties(
-        posterior_samples_post,
-        adjacency_matrix_post,
-        all_fips_post,
-        significance_threshold,
-    )
+    # Define significance thresholds and corresponding colors/labels
+    thresholds_and_styles = [
+        (None, "black", "All"),
+        (0.95, "orangered", "$p < 0.05$"),
+        (0.99, "darkmagenta", "$p < 0.01$"),
+    ]
 
-    years = sorted(df["year"].unique().to_list())
-    n_neighbor_outbreaks = []
+    # Set up year bins
+    all_years = sorted(df["year"].unique().to_list())
 
-    for year in years:
-        year_df = df.filter(pl.col("year") == year)
+    if year_bins is None:
+        # Default: individual years
+        bins = [(year, year) for year in all_years]
+    else:
+        bins = year_bins
 
-        if year < 2021:
-            # Use pre-2021 model and adjacency matrix
-            count = count_valid_clusters(
-                year_df,
-                adjacency_matrix_pre,
-                significant_spatial_pre,
-                all_fips_pre,
-            )
+    # Create labels for bins
+    bin_labels = []
+    for start_year, end_year in bins:
+        if start_year == end_year:
+            bin_labels.append(str(start_year))
         else:
-            # Use post-2020 model and adjacency matrix
-            count = count_valid_clusters(
-                year_df,
-                adjacency_matrix_post,
-                significant_spatial_post,
-                all_fips_post,
-            )
+            bin_labels.append(f"{start_year}-{end_year}")
 
-        n_neighbor_outbreaks.append(count)
+    # Calculate counts for each bin and threshold
+    data_by_bin = []
 
-    # Plot single black line
-    ax.plot(
-        years,
-        n_neighbor_outbreaks,
-        "o-",
-        color="black",
-        linewidth=2,
-        markersize=8,
-    )
+    for start_year, end_year in bins:
+        bin_counts = []
+
+        for threshold, color, threshold_label in thresholds_and_styles:
+            # Get significant spatial effects for both time periods (if needed)
+            if threshold is not None:
+                significant_spatial_pre = get_significant_spatial_counties(
+                    posterior_samples_pre,
+                    adjacency_matrix_pre,
+                    all_fips_pre,
+                    threshold,
+                )
+                significant_spatial_post = get_significant_spatial_counties(
+                    posterior_samples_post,
+                    adjacency_matrix_post,
+                    all_fips_post,
+                    threshold,
+                )
+                require_significance = True
+            else:
+                significant_spatial_pre = None
+                significant_spatial_post = None
+                require_significance = False
+
+            # Sum counts across all years in this bin
+            total_count = 0
+
+            for year in range(start_year, end_year + 1):
+                if year not in all_years:
+                    continue
+
+                year_df = df.filter(pl.col("year") == year)
+
+                if year < 2021:
+                    # Use pre-2021 model and adjacency matrix
+                    count = count_valid_clusters(
+                        year_df,
+                        adjacency_matrix_pre,
+                        significant_spatial_pre,
+                        all_fips_pre,
+                        require_significance,
+                    )
+                else:
+                    # Use post-2020 model and adjacency matrix
+                    count = count_valid_clusters(
+                        year_df,
+                        adjacency_matrix_post,
+                        significant_spatial_post,
+                        all_fips_post,
+                        require_significance,
+                    )
+
+                total_count += count
+
+            bin_counts.append(total_count)
+
+        data_by_bin.append(bin_counts)
+
+    # Create grouped bar chart
+    n_bins = len(bins)
+    n_bars_per_group = len(thresholds_and_styles)
+
+    # Bar width and positions
+    bar_width = 0.25
+    group_width = bar_width * n_bars_per_group
+    group_spacing = 0.3  # Space between groups
+    total_group_width = group_width + group_spacing
+
+    x_positions = np.arange(n_bins) * total_group_width
+
+    # Plot bars for each threshold
+    for bar_idx, (threshold, color, threshold_label) in enumerate(
+        thresholds_and_styles
+    ):
+        counts = [bin_data[bar_idx] for bin_data in data_by_bin]
+        x_pos = x_positions + bar_idx * bar_width
+
+        ax.bar(
+            x_pos,
+            counts,
+            width=bar_width,
+            color=color,
+            label=threshold_label,
+            alpha=0.8,
+        )
+
+    # Set x-axis labels centered under each group of 3 bars
+    ax.set_xticks(x_positions + group_width / 2 - bar_width / 2)
+    ax.set_xticklabels(bin_labels, rotation=-45, ha="left")
 
     ax.set_xlabel("Year")
-    ax.set_ylabel("Outbreaks spreading over multiple counties (N)")
-    ax.set_ylim(0)
-    ax.set_xticks([2015, 2020, 2025])
+    ax.set_ylabel("Counties in outbreak clusters (N)")
+    ax.set_ylim(bottom=0)
+    ax.legend(loc=(0.02, 0.79))
 
     return fig, ax
 
@@ -977,7 +723,7 @@ if __name__ == "__main__":
         schema_overrides={"fips": pl.String},
     )
 
-    fig, ax = setup_plot(2, 2)  # type: ignore
+    fig, ax = setup_plot(1, 3)  # type: ignore
 
     # read predictive samples
     with open(
@@ -999,11 +745,11 @@ if __name__ == "__main__":
         naive_model = pickle.load(f)
 
     # performance
-    ax[0, 0].text(  # type: ignore
+    ax[0].text(  # type: ignore
         -0.25,
         1.08,
         "a",
-        transform=ax[0, 0].transAxes,  # type: ignore
+        transform=ax[0].transAxes,  # type: ignore
         fontsize=24,
         fontweight="bold",
         va="top",
@@ -1014,7 +760,7 @@ if __name__ == "__main__":
         predictive_samples["cases"],
         naive_model,
         fig,
-        ax[0, 0],  # type: ignore
+        ax[0],  # type: ignore
     )
 
     # while we're here, make a plot of the performance for the R01
@@ -1055,11 +801,11 @@ if __name__ == "__main__":
     ) as file:
         posterior_samples_pre = pickle.load(file)
 
-    ax[0, 1].text(  # type: ignore
+    ax[1].text(  # type: ignore
         -0.25,
         1.08,
         "b",
-        transform=ax[0, 1].transAxes,  # type: ignore
+        transform=ax[1].transAxes,  # type: ignore
         fontsize=24,
         fontweight="bold",
         va="top",
@@ -1070,7 +816,7 @@ if __name__ == "__main__":
         posterior_samples,
         df,
         fig,
-        ax[0, 1],  # type: ignore
+        ax[1],  # type: ignore
     )
 
     # make adjacency matrix
@@ -1096,31 +842,11 @@ if __name__ == "__main__":
         .to_list(),
     )
 
-    ax[1, 0].text(  # type: ignore
+    ax[2].text(  # type: ignore
         -0.25,
         1.08,
         "c",
-        transform=ax[1, 0].transAxes,  # type: ignore
-        fontsize=24,
-        fontweight="bold",
-        va="top",
-        ha="right",
-    )
-    plot_spatial_importance(
-        posterior_samples_pre,
-        posterior_samples,
-        df,
-        adjacency_matrix_observed_pre,
-        adjacency_matrix_observed,
-        fig,
-        ax[1, 0],  # type: ignore
-    )
-
-    ax[1, 1].text(  # type: ignore
-        -0.25,
-        1.08,
-        "d",
-        transform=ax[1, 1].transAxes,  # type: ignore
+        transform=ax[2].transAxes,  # type: ignore
         fontsize=24,
         fontweight="bold",
         va="top",
@@ -1133,8 +859,8 @@ if __name__ == "__main__":
         posterior_samples_pre,
         posterior_samples,
         fig,
-        ax[1, 1],  # type: ignore
-        significance_threshold=0.95,
+        ax[2],  # type: ignore
+        year_bins=[(2011, 2015), (2016, 2020), (2021, 2024), (2025, 2025)],
     )
 
     fig.tight_layout()

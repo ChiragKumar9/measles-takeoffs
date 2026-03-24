@@ -8,13 +8,14 @@ import pickle
 import geopandas as gpd
 import jax.numpy as jnp
 import matplotlib.colors as mcolors
+import matplotlib.lines as mlines
 import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
 import numpy as np
 import pandas as pd
 import polars as pl
 import yaml
 from matplotlib import rc
-from matplotlib.patches import Patch
 from scipy import stats
 from shapely.geometry import MultiPolygon, Polygon
 from sklearn.linear_model import TheilSenRegressor
@@ -28,9 +29,25 @@ fig_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "figures")
 font = {"family": "Nimbus Roman", "size": 28}
 rc("font", **font)
 
-# read analysis params yaml
 with open("params.yml", "r") as f:
     params = yaml.safe_load(f)
+
+FUTURE_YEARS = [2026, 2027, 2028, 2029, 2030]
+INTERVENTIONS = [
+    # "remove_bans",
+    "ban_top_nme_states",
+    "ban_top_risk_states",
+    "ban_top_risk_counties",
+]
+INTERVENTION_LABELS = {
+    "remove_bans": "Remove existing\nNME policies",
+    "ban_top_risk_states": "Top risk states",
+    "ban_top_nme_states": "Top NME states",
+    "ban_top_risk_counties": "Top risk counties",
+}
+
+DIRECT_COLOR = "#298C8C"
+TOTAL_COLOR = "#800074"
 
 
 def setup_plot(nrows, ncols):
@@ -42,10 +59,8 @@ def setup_plot(nrows, ncols):
         ax.get_yaxis().tick_left()
         ax.tick_params(axis="x", direction="out")
         ax.tick_params(axis="y", direction="out")
-        # offset the spines
         for spine in ax.spines.values():
             spine.set_position(("outward", 5))
-        # put the grid behind
         ax.set_axisbelow(True)
         return ax
     for temp in ax.flatten():  # type: ignore
@@ -55,10 +70,8 @@ def setup_plot(nrows, ncols):
         temp.get_yaxis().tick_left()
         temp.tick_params(axis="x", direction="out")
         temp.tick_params(axis="y", direction="out")
-        # offset the spines
         for spine in temp.spines.values():
             spine.set_position(("outward", 5))
-        # put the grid behind
         temp.set_axisbelow(True)
     return fig, ax
 
@@ -66,36 +79,26 @@ def setup_plot(nrows, ncols):
 def map_fips_code_data(
     fips, vals, fig, ax, cbar_label, cbar_type, point_data=None
 ):
-    """
-    Create a static US county map using GeoPandas
-    """
-    # Load the county boundaries
     counties = gpd.read_file(
         os.path.join(data_dir, "cb_2020_us_county_20m.shp")
     )
     states = gpd.read_file(os.path.join(data_dir, "cb_2020_us_state_20m.shp"))
 
-    exclude_fips = ["60", "66", "69", "72", "78"]  # AS, GU, MP, PR, VI
+    exclude_fips = ["60", "66", "69", "72", "78"]
     counties = counties[~counties["STATEFP"].isin(exclude_fips)]
     states = states[~states["STATEFP"].isin(exclude_fips)]
 
-    # Move Alaska and Hawaii to bottom left
     def reposition_alaska_hawaii(gdf):
         gdf = gdf.copy()
-
-        # Move Alaska - handle longitude wraparound
         alaska_mask = gdf["STATEFP"] == "02"
         if alaska_mask.any():
-            # Fix Alaska's longitude wraparound issue
             alaska_geoms = gdf.loc[alaska_mask, "geometry"].copy()
 
-            # Function to fix coordinates that cross the dateline
             def fix_alaska_coords(geom):
                 if geom.geom_type == "Polygon":
                     coords = list(geom.exterior.coords)
                     fixed_coords = []
                     for x, y in coords:
-                        # Convert positive longitudes (0 to 180) to negative (-180 to 0)
                         if x > 0:
                             x = x - 360
                         fixed_coords.append((x, y))
@@ -113,20 +116,13 @@ def map_fips_code_data(
                     return MultiPolygon(fixed_polygons)
                 return geom
 
-            # Apply coordinate fix
             alaska_geoms = alaska_geoms.apply(fix_alaska_coords)
-
-            # Now get bounds after fixing coordinates
             alaska_bounds = alaska_geoms.total_bounds
-
-            # Apply transformation
             alaska_transformed = alaska_geoms.translate(
                 xoff=-alaska_bounds[0] - 600, yoff=-alaska_bounds[1] + 80
             ).scale(xfact=0.2, yfact=0.27, origin=(0, 0))
-
             gdf.loc[alaska_mask, "geometry"] = alaska_transformed
 
-        # Move Hawaii (should be fine as-is)
         hawaii_mask = gdf["STATEFP"] == "15"
         if hawaii_mask.any():
             hawaii_bounds = gdf[hawaii_mask].total_bounds
@@ -135,14 +131,11 @@ def map_fips_code_data(
             ].translate(
                 xoff=-hawaii_bounds[0] - 110, yoff=-hawaii_bounds[1] + 25
             )
-
         return gdf
 
-    # Reposition Alaska and Hawaii
     counties = reposition_alaska_hawaii(counties)
     states = reposition_alaska_hawaii(states)
 
-    # Merge with the geographic data
     if fips is not None:
         df = pd.DataFrame({"GEOID": fips, "value": vals})
     else:
@@ -155,16 +148,11 @@ def map_fips_code_data(
 
     county_data = df[df["GEOID"].str.len() == 5]
     state_data = df[df["GEOID"].str.len() == 2]
-
     counties_with_data = counties.merge(county_data, how="left")
 
-    # For state-level data, we need to identify counties that belong to states
-    # where we have state-level data but no county-level data
     if not state_data.empty:
-        # Create a mapping of state FIPS to values
         state_values = dict(zip(state_data["GEOID"], state_data["value"]))
 
-        # For counties without data, check if their state has state-level data
         def fill_state_data(row):
             if pd.isna(row["value"]) and row["STATEFP"] in state_values:
                 return state_values[row["STATEFP"]]
@@ -181,7 +169,6 @@ def map_fips_code_data(
         ax=ax, color="lightgrey", linewidth=0.3, edgecolor="grey"
     )
 
-    # Create normalization for colorbar
     if cbar_type == "risk":
         norm = mcolors.Normalize(vmin=0, vmax=2300)
         cmap = mcolors.LinearSegmentedColormap.from_list(
@@ -193,15 +180,14 @@ def map_fips_code_data(
             boundaries=breakpoints,
             ncolors=len(breakpoints) - 1,
         )
-        # make the colormap
         cmap = mcolors.ListedColormap(
             [
-                "#fee5d9",  # 0-2.5
-                "#fcbba1",  # 2.5-5
-                "#fc9272",  # 5-10
-                "#fb6a4a",  # 10-15
-                "#de2d26",  # 15-20
-                "#a50f15",  # 20+
+                "#fee5d9",
+                "#fcbba1",
+                "#fc9272",
+                "#fb6a4a",
+                "#de2d26",
+                "#a50f15",
             ]
         )
     elif cbar_type is None:
@@ -210,7 +196,6 @@ def map_fips_code_data(
     else:
         assert False, f"cbar_type {cbar_type} not recognized"
 
-    # Plot counties with data
     if fips is not None:
         counties_with_data[has_data_mask].plot(
             column="value",
@@ -223,59 +208,38 @@ def map_fips_code_data(
             missing_kwds={"color": "lightgrey"},
         )
 
-    # Create custom colorbar
     if cbar_type is not None:
-        sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)  # type: ignore
-
+        sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
         cbar = fig.colorbar(
             sm,
             ax=ax,
-            shrink=0.7,  # Size of colorbar relative to axes
-            aspect=20,  # Ratio of long to short dimensions
-            pad=0.0,  # Distance between axes and colorbar
-            extend="neither",  # Add arrow at top ('neither', 'both', 'min', 'max')
-            orientation="horizontal",  # 'vertical' or 'horizontal'
+            shrink=0.7,
+            aspect=20,
+            pad=0.0,
+            extend="neither",
+            orientation="horizontal",
         )
-
-        # Customize the colorbar
         cbar.set_label(cbar_label, rotation=0, labelpad=0, fontsize=28)
-
-        # Set ticks
         if cbar_type == "exemptions":
             cbar.set_ticks([1.25, 4.0, 8.0, 12.5, 17.5, 50])
             cbar.set_ticklabels(
-                [
-                    "≤2.5%",
-                    "2.5%-5%",
-                    "5%-10%",
-                    "10%-15%",
-                    "15%-20%",
-                    ">20%",
-                ]
+                ["≤2.5%", "2.5%-5%", "5%-10%", "10%-15%", "15%-20%", ">20%"]
             )
             cbar.ax.tick_params(labelsize=24, rotation=-60, length=0)
 
-    # Add state borders
     states.boundary.plot(ax=ax, linewidth=1.0, edgecolor="black", alpha=0.8)
 
     if point_data is not None:
-        # Ensure we have centroids
         counties_with_data["centroid"] = counties_with_data.geometry.centroid
 
-    # Create a DataFrame with point information
     point_df = pd.DataFrame(point_data, columns=["GEOID", "point_value"])
     counties_with_points = counties_with_data.merge(
         point_df, on="GEOID", how="inner"
     )
 
     if not counties_with_points.empty:
-        # Scale the point sizes
         point_values = counties_with_points["point_value"]
-
-        # Alternative: Square root scaling for better visual proportion
         sizes = np.array(list(point_values))
-
-        # Plot the points
         ax.scatter(
             counties_with_points["centroid"].x,
             counties_with_points["centroid"].y,
@@ -286,17 +250,13 @@ def map_fips_code_data(
         )
 
     if cbar_type is None:
-        # add a legend with point sizes
-        size_values = [10, 50, 100, 500]  # Example sizes to show
+        size_values = [10, 50, 100, 500]
         size_labels = ["10", "50", "100", "500"]
-
         legend_elements = []
         for size, label in zip(size_values, size_labels):
             legend_elements.append(
                 plt.scatter([], [], s=size, c="red", alpha=0.8, label=label)
             )
-
-        # Add the legend
         ax.legend(
             handles=legend_elements,
             title="Measles cases (N)",
@@ -307,9 +267,7 @@ def map_fips_code_data(
             bbox_to_anchor=(1.15, 0.035),
         )
 
-    # Remove axis
     ax.set_axis_off()
-
     return fig, ax
 
 
@@ -357,7 +315,6 @@ def coverage_increase_nme_policy_change(df, fig, ax):
             - pl.col("estimated_mmr_cov"),
         )
 
-        # do a regression between nonmed_exempt_pct and estimated_mmr_cov_change_policy_year
         temp_regression = temp[
             ["nonmed_exempt_pct", "estimated_mmr_cov_change_policy_year"]
         ].drop_nulls()
@@ -453,7 +410,6 @@ def coverage_increase_nme_policy_change(df, fig, ax):
         )
 
         if state != "Connecticut":
-            # connecticut reported state-level data in 2024
             temp_regression = temp[
                 ["nonmed_exempt_pct", "estimated_mmr_cov_change_2yr"]
             ].drop_nulls()
@@ -487,7 +443,6 @@ def coverage_increase_nme_policy_change(df, fig, ax):
 
     result_df = pl.concat(all_dfs)
 
-    # plot
     state_colors = {
         "California": "lightblue",
         "Maine": "purple",
@@ -506,13 +461,12 @@ def coverage_increase_nme_policy_change(df, fig, ax):
             color=state_colors[state],
         )
 
-    ax.axhline(0, color="black", linewidth=ax.spines["bottom"].get_linewidth())
+    ax.axhline(0, color="k", ls="--")
     ax.legend(loc=(0.6, 0.0))
     ax.set_xlabel("Pre-policy nonmedical exemption rate (%)")
     ax.set_ylabel("Change in MMR coverage (%)")
     ax.set_xlim(0)
 
-    # do a regression for all states combined
     for year_mode in ["policy_year", "1yr", "2yr"]:
         temp_regression = result_df[
             ["nonmed_exempt_pct", f"estimated_mmr_cov_change_{year_mode}"]
@@ -551,7 +505,6 @@ def coverage_increase_nme_policy_change(df, fig, ax):
         )
         regression_df.append(temp_regression)
 
-    # do the same but add in state fixed effects
     for year_mode in ["policy_year", "1yr", "2yr"]:
         temp_regression = result_df[
             [
@@ -596,10 +549,8 @@ def coverage_increase_nme_policy_change(df, fig, ax):
         )
         regression_df.append(temp_regression)
 
-    # merge slopes
     regression_df = pl.concat(regression_df)
 
-    # add a line to the plot for the regression of all states combined
     x_vals = np.array(ax.get_xlim())
     slope = regression_df.filter(
         (pl.col("State") == "All states") & (pl.col("Year") == "1 year after")
@@ -614,24 +565,11 @@ def coverage_increase_nme_policy_change(df, fig, ax):
         (pl.col("State") == "All states") & (pl.col("Year") == "1 year after")
     )["Intercept"][0]
     y_vals = intercept + slope * x_vals
-    ax.plot(
-        x_vals,
-        y_vals,
-        color="black",
-        linewidth=2,
-    )
-    # put some confidence bounds
+    ax.plot(x_vals, y_vals, color="black", linewidth=2)
     y_lower = intercept + slope_lower * x_vals
     y_upper = intercept + slope_upper * x_vals
-    ax.fill_between(
-        x_vals,
-        y_lower,
-        y_upper,
-        color="grey",
-        alpha=0.3,
-    )
+    ax.fill_between(x_vals, y_lower, y_upper, color="grey", alpha=0.3)
 
-    # annotate the figure with the regression equation
     ax.text(
         0.05,
         0.95,
@@ -640,7 +578,6 @@ def coverage_increase_nme_policy_change(df, fig, ax):
         fontsize=32,
         verticalalignment="top",
     )
-    # annotate the figure with the R2
     r2 = regression_df.filter(
         (pl.col("State") == "All states") & (pl.col("Year") == "1 year after")
     )["R2"][0]
@@ -652,15 +589,7 @@ def coverage_increase_nme_policy_change(df, fig, ax):
         fontsize=32,
         verticalalignment="top",
     )
-
-    # annotate the figure with the 1-1 line
-    ax.plot(
-        x_vals,
-        x_vals,
-        color="grey",
-        linestyle="--",
-        linewidth=1,
-    )
+    ax.plot(x_vals, x_vals, color="grey", linestyle="--", linewidth=1)
 
     regression_df = (
         regression_df.with_columns(
@@ -674,9 +603,7 @@ def coverage_increase_nme_policy_change(df, fig, ax):
                 + "]"
             )
             .otherwise(pl.col("Slope").round(3).cast(pl.String)),
-            # round the intercept values
             Intercept=pl.col("Intercept").round(3),
-            # round R2
             R2=(pl.col("R2") * 100).round(3),
         )
         .drop(["Slope_lower", "Slope_upper"])
@@ -692,482 +619,714 @@ def coverage_increase_nme_policy_change(df, fig, ax):
     return regression_df
 
 
-def scenario_results(df, fig, ax):
-    # read the risk projections
-    with open(
-        os.path.join(
-            output_dir,
-            "risk_projections.pkl",
-        ),
-        "rb",
-    ) as f:
-        projections = pickle.load(f)
+def load_importation_samples_future(output_dir):
+    future_base = pl.read_csv(
+        os.path.join(output_dir, "projection_dataset_2026.csv"),
+        schema_overrides={"fips": pl.String},
+    ).filter(pl.col("type") == "projection")
 
-    # read the df used to make the risk projections
-    df = pl.read_csv(
-        os.path.join(output_dir, "scaled_projection_dataset_2026.csv"),
-        # make sure we read fips codes as strings
-        schema_overrides={
-            "fips": pl.String,
-            "estimated_mmr_cov_raw": pl.Float64,
-        },
+    reference = pl.read_csv(
+        os.path.join(output_dir, "projection_dataset_baseline_2026.csv"),
+        schema_overrides={"fips": pl.String},
     )
-    df = df.filter(pl.col("in_train") == 0)
-
-    # make into an incidence measure
-    # clip at population size
-    projections = jnp.minimum(projections, jnp.array(df["pop"]).reshape(1, -1))
-    incidence = projections  # / df["pop"].to_numpy()
-
-    # concatenate to dataframe so we can print out counties by risk
-    df = df.with_columns(
-        projections=pl.Series(incidence.T.__array__()),
+    future_base = future_base.join(
+        reference.select("fips"), on="fips", how="inner"
     )
 
-    # add in import probability
+    import_df = pl.read_csv(
+        os.path.join(output_dir, "empirical_importation_probability.csv"),
+        schema_overrides={"fips": pl.String},
+    )
     with open(
         os.path.join(
             output_dir, "empirical_importation_probability_samples.pkl"
         ),
         "rb",
     ) as f:
-        samples = pickle.load(f)
-    import_df = pl.read_csv(
-        os.path.join(output_dir, "empirical_importation_probability.csv"),
-        # make sure we read fips codes as strings
+        imp_raw = pickle.load(f)
+
+    import_df = import_df.with_columns(
+        importation_probability_samples=pl.Series(imp_raw)
+    )
+    import_df = import_df.sort("type").unique(
+        subset=["state", "county", "year", "fips"], keep="last"
+    )
+    import_df = import_df.sort("year", descending=True).unique(
+        subset=["fips"], keep="first"
+    )
+
+    future_base = future_base.join(
+        import_df.select(["fips", "importation_probability_samples"]),
+        on="fips",
+        how="left",
+    )
+    assert future_base["importation_probability_samples"].null_count() == 0, (
+        "Some future counties missing importation probability samples"
+    )
+
+    importation_samples_future = jnp.array(
+        np.vstack(future_base["importation_probability_samples"].to_numpy())  # type: ignore
+    ).T
+    return importation_samples_future, future_base["fips"].to_list()
+
+
+def plot_intervention_effects(
+    interventions,
+    intervention_labels,
+    future_years,
+    baseline_samples_by_year,
+    intervention_data,
+    importation_samples,
+    baseline_fips,
+    scale,
+    fig,
+    ax,
+):
+    violin_width = 0.15
+    pair_gap = 0.25
+
+    INTERVENTION_COLORS = {
+        interventions[0]: DIRECT_COLOR,
+        interventions[1]: TOTAL_COLOR,
+        interventions[2]: "#8B5CF6",
+    }
+
+    fips_to_idx = {f: i for i, f in enumerate(baseline_fips)}
+
+    BAN_INTERVENTIONS = {
+        "ban_top_risk_states",
+        "ban_top_nme_states",
+        "ban_top_risk_counties",
+    }
+    REMOVE_INTERVENTIONS = {"remove_bans"}
+
+    PLOT_INTERVENTIONS = [
+        iv for iv in interventions if iv not in REMOVE_INTERVENTIONS
+    ]
+    n_interventions = len(PLOT_INTERVENTIONS)
+
+    offsets = np.linspace(-pair_gap, pair_gap, n_interventions)
+
+    vln_handles = []
+
+    for i_idx, intervention in enumerate(PLOT_INTERVENTIONS):
+        color = INTERVENTION_COLORS[intervention]
+
+        # Build county index mappings from first year (consistent across years)
+        first_pkg = intervention_data[intervention][future_years[0]]
+        first_fips_list = first_pkg["fips"]
+        first_int_applied = first_pkg["intervention_applied"]
+
+        proj_fips_to_idx = {f: j for j, f in enumerate(first_fips_list)}
+        common_fips = [f for f in baseline_fips if f in proj_fips_to_idx]
+        baseline_col_idx = [fips_to_idx[f] for f in common_fips]
+        proj_col_idx = [proj_fips_to_idx[f] for f in common_fips]
+
+        int_fips = [f for f, a in zip(first_fips_list, first_int_applied) if a]
+        int_fips_set = set(int_fips)
+        int_in_common_mask = jnp.array(
+            [f in int_fips_set for f in common_fips], dtype=bool
+        )
+
+        imp = importation_samples
+
+        cumulative_total_by_county = None
+        cumulative_baseline_by_county = None
+
+        for y_idx, year in enumerate(future_years):
+            pkg = intervention_data[intervention][year]
+            pred = pkg["predictions"]
+
+            # --- Total: (n_samples, n_common_counties) ---
+            b_county = (
+                baseline_samples_by_year[year][:, baseline_col_idx]
+                * imp[:, baseline_col_idx]
+                + imp[:, baseline_col_idx]
+            ) / scale
+            i_county = (
+                pred[:, proj_col_idx] * imp[:, baseline_col_idx]
+                + imp[:, baseline_col_idx]
+            ) / scale
+
+            if intervention in BAN_INTERVENTIONS:
+                i_county = jnp.where(
+                    int_in_common_mask,
+                    jnp.minimum(i_county, b_county),
+                    i_county,
+                )
+            elif intervention in REMOVE_INTERVENTIONS:
+                i_county = jnp.where(
+                    int_in_common_mask,
+                    jnp.maximum(i_county, b_county),
+                    i_county,
+                )
+
+            cumulative_baseline_by_county = (
+                b_county
+                if cumulative_baseline_by_county is None
+                else cumulative_baseline_by_county + b_county
+            )
+            cumulative_total_by_county = (
+                i_county
+                if cumulative_total_by_county is None
+                else cumulative_total_by_county + i_county
+            )  # type: ignore
+
+            # cumulative_baseline_by_county = b_county
+            # cumulative_total_by_county = i_county
+
+            # Cumulative diff summed across counties: (n_samples,)
+            cumulative_diffs = jnp.sum(
+                cumulative_total_by_county - cumulative_baseline_by_county,
+                axis=1,
+            )
+
+            x_pos = y_idx + offsets[i_idx]
+
+            lo = float(jnp.percentile(cumulative_diffs, 2.5))
+            hi = float(jnp.percentile(cumulative_diffs, 97.5))
+            vln_data = np.array(cumulative_diffs)[
+                (np.array(cumulative_diffs) >= lo)
+                & (np.array(cumulative_diffs) <= hi)
+            ]
+            vln = ax.violinplot(
+                vln_data,
+                positions=[x_pos],
+                widths=violin_width,
+                showextrema=False,
+            )
+            for pc in vln["bodies"]:
+                pc.set_facecolor(color)
+                pc.set_edgecolor(color)
+                pc.set_alpha(0.3)
+
+            med = float(jnp.median(cumulative_diffs))
+            p25 = float(jnp.percentile(cumulative_diffs, 25))
+            p75 = float(jnp.percentile(cumulative_diffs, 75))
+            ax.errorbar(
+                x_pos,
+                med,
+                yerr=np.array([[med - p25], [p75 - med]]),
+                fmt="o",
+                markersize=7,
+                color=color,
+                ecolor=color,
+                capsize=5,
+                capthick=2,
+            )
+
+        vln_handles.append(
+            (
+                vln["bodies"][0],  # type: ignore
+                intervention_labels[intervention],
+            )
+        )
+
+    ax.axhline(0, color="black", ls="--")
+    ax.set_xticks(range(len(future_years)))
+    ax.set_xticklabels(future_years)
+    ax.set_xlabel("Year")
+    ax.set_ylabel("Cumulative change in projected cases")
+    ax.legend(
+        handles=[h for h, _ in vln_handles],
+        labels=[l for _, l in vln_handles],
+        loc=(0, 0),
+    )
+    ax.yaxis.set_major_formatter(ticker.StrMethodFormatter("{x:,.0f}"))
+
+
+def plot_coverage_change_vs_cases(
+    intervention,
+    future_years,
+    baseline_samples_by_year,
+    intervention_data,
+    importation_samples,
+    baseline_fips,
+    scale,
+    adjacency_data_path,
+    output_dir,
+    fig,
+    ax,
+    year=2026,
+):
+    BAN_INTERVENTIONS = {
+        "ban_top_risk_states",
+        "ban_top_nme_states",
+        "ban_top_risk_counties",
+    }
+    REMOVE_INTERVENTIONS = {"remove_bans"}
+
+    int_base = pl.read_csv(
+        os.path.join(output_dir, f"intervention_base_{intervention}.csv"),
         schema_overrides={"fips": pl.String},
     )
-    import_df = import_df.with_columns(
-        importation_probability_samples=pl.Series(
-            samples["importation_probability_samples"].__array__()
-        )
+    base_2026 = pl.read_csv(
+        os.path.join(output_dir, "projection_dataset_2026.csv"),
+        schema_overrides={"fips": pl.String},
+    ).filter(pl.col("type") == "projection")
+
+    intervened_fips = set(
+        int_base.filter(pl.col("intervention_applied"))["fips"].to_list()
     )
-    # join with main dataframe
-    df = df.join(
-        import_df.select(
-            [
-                "fips",
-                "year",
-                "type",
-                "importation_probability_samples",
-            ]
-        ),
-        on=["fips", "year", "type"],
-        how="left",
-    )
-    # multiply the importation probability samples with the incidence projections
-    importation_probability_samples = np.vstack(
-        df["importation_probability_samples"].to_numpy()  # type: ignore
-    ).T
-    unconditioned_risk_samples = importation_probability_samples * incidence
 
-    # sum over all counties to get expected number of yearly cases
-    expected_cases_samples = unconditioned_risk_samples.sum(axis=1)
-    # violin plot this
-    # violinparts = ax.violinplot(
-    # expected_cases_samples,
-    # positions=[0],
-    # showextrema=False,
-    # widths=0.6,
-    # )
-    # for pc in violinparts["bodies"]:
-    # pc.set(facecolor="grey", alpha=0.4)
-    # print(expected_cases_samples.min(), expected_cases_samples.max())
-
-    # add error bars for the median and interquartile range
-    median = np.median(expected_cases_samples)
-    lower = np.percentile(expected_cases_samples, 25)
-    upper = np.percentile(expected_cases_samples, 75)
-    ax.errorbar(
-        0,
-        median,
-        yerr=[[median - lower], [upper - median]],
-        fmt="o",
-        color="grey",
-        capsize=5,
-        capthick=2,
-    )
-    # dashed grey line at this median
-    # ax.axhline(
-    # median,
-    # color="grey",
-    # linestyle="--",
-    # linewidth=1,
-    # )
-
-    # add the runs for each of the scenarios
-    scenarios = {
-        "Remove existing NME bans": "add_nmes_back",
-        "NME bans in highest risk states": "top_risk_state_unconditioned",
-        "NME bans in highest NME states": "top_nme_state",
-        "NME bans in highest risk counties": "top_ten_pct_counties",
-    }
-    # read sims
-    with open(
-        os.path.join(
-            output_dir,
-            f"nme_policy_analysis_median.pkl",
-        ),
-        "rb",
-    ) as f:
-        results = pickle.load(f)
-
-    no_nme_df = pl.read_csv(
-        os.path.join(
-            output_dir, "nme_policy_analysis_broken_up_by_scenario.csv"
-        ),
+    adj = pl.read_csv(
+        adjacency_data_path,
+        separator="|",
         schema_overrides={
-            "fips": pl.String,
-            "estimated_mmr_cov_raw": pl.Float64,
-            "nonmed_exempt_pct_raw": pl.Float64,
+            "County GEOID": pl.String,
+            "Neighbor GEOID": pl.String,
         },
     )
+    neighbors = set()
+    for fip in intervened_fips:
+        nbrs = adj.filter(pl.col("County GEOID") == fip)[
+            "Neighbor GEOID"
+        ].to_list()
+        neighbors.update(nbrs)
+    neighbor_fips = neighbors - intervened_fips
+    plot_fips = intervened_fips | neighbor_fips
 
-    results = jnp.minimum(results, jnp.array(no_nme_df["pop"]).reshape(1, -1))
-    no_nme_df = no_nme_df.with_columns(
-        projections=pl.Series(results.T.__array__()),
+    pkg = intervention_data[intervention][year]
+    pred = pkg["predictions"]
+    fips_list = pkg["fips"]
+
+    fips_to_idx = {f: i for i, f in enumerate(baseline_fips)}
+    proj_fips_to_idx = {f: j for j, f in enumerate(fips_list)}
+    imp = importation_samples
+
+    # Load population data
+    pop_df = (
+        pl.read_csv(
+            os.path.join(output_dir, "projection_dataset_2026.csv"),
+            schema_overrides={"fips": pl.String},
+        )
+        .with_columns(
+            pop=pl.col("pop")
+            * (pl.col("fraction_school_aged") + pl.col("fraction_under_5"))
+        )
+        .select(["fips", "pop"])
+    )
+    pop_lookup = dict(zip(pop_df["fips"].to_list(), pop_df["pop"].to_list()))
+
+    incidence_change = {}
+    for fip in plot_fips:
+        if fip not in fips_to_idx or fip not in proj_fips_to_idx:
+            continue
+        if fip not in pop_lookup:
+            continue
+
+        b_idx = fips_to_idx[fip]
+        p_idx = proj_fips_to_idx[fip]
+        pop = pop_lookup[fip]
+
+        baseline_samps = np.array(
+            baseline_samples_by_year[year][:, b_idx] / scale
+        )
+        intervention_samps = np.array(pred[:, p_idx] / scale)
+
+        # Apply constraint only to intervened counties, not neighbors
+        if fip in intervened_fips:
+            if intervention in BAN_INTERVENTIONS:
+                intervention_samps = np.minimum(
+                    intervention_samps, baseline_samps
+                )
+            elif intervention in REMOVE_INTERVENTIONS:
+                intervention_samps = np.maximum(
+                    intervention_samps, baseline_samps
+                )
+
+        # NOW apply importation to both
+        baseline_samps = baseline_samps * imp[:, b_idx] + imp[:, b_idx]
+        intervention_samps = intervention_samps * imp[:, b_idx] + imp[:, b_idx]
+
+        # Calculate change in incidence (cases per 100,000 population)
+        baseline_incidence = (baseline_samps / pop) * 100000
+        intervention_incidence = (intervention_samps / pop) * 100000
+        incidence_change[fip] = float(
+            np.mean(intervention_incidence - baseline_incidence)
+        )
+
+    base_cov_lookup = dict(
+        zip(
+            base_2026["fips"].to_list(),
+            base_2026["estimated_mmr_cov"].to_list(),
+        )
+    )
+    int_cov_lookup = dict(
+        zip(
+            int_base["fips"].to_list(), int_base["estimated_mmr_cov"].to_list()
+        )
     )
 
-    # join no nme_df with results and import probability samples
-    no_nme_df = no_nme_df.join(
-        import_df.select(
-            [
-                "fips",
-                "year",
-                "importation_probability_samples",
-            ]
-        ),
-        on=["fips", "year"],
-        how="left",
+    rows = []
+    for fip in plot_fips:
+        if fip not in incidence_change:
+            continue
+        if fip not in base_cov_lookup:
+            continue
+
+        initial_cov = base_cov_lookup[fip]
+
+        if fip in intervened_fips:
+            if fip not in int_cov_lookup:
+                continue
+            cov_change = int_cov_lookup[fip] - initial_cov
+            is_intervened = True
+        else:
+            cov_change = 0.0
+            is_intervened = False
+
+        rows.append(
+            {
+                "fips": fip,
+                "initial_cov": initial_cov,
+                "cov_change": cov_change,
+                "incidence_change": incidence_change[fip],
+                "is_intervened": is_intervened,
+            }
+        )
+
+    scatter_df = pd.DataFrame(rows)
+    if scatter_df.empty:
+        print(f"Warning: no data to plot for intervention {intervention}")
+        return
+
+    scatter_df = scatter_df.dropna(subset=["incidence_change"])
+
+    # Get actual data range before clipping
+    vmin_original = scatter_df["incidence_change"].min()
+    vmax_original = scatter_df["incidence_change"].max()
+
+    print(
+        f"Incidence change range (before clipping): min={vmin_original:.2f}, max={vmax_original:.2f}"
     )
 
-    # join with the baseline
-    no_nme_df = no_nme_df.join(
-        df.select(["fips", "year", "projections"]).rename(
-            {"projections": "baseline_projections"}
-        ),
-        on=["fips", "year"],
-        how="left",
+    # Clip values below -100 and above 0
+    scatter_df["incidence_change"] = scatter_df["incidence_change"].clip(
+        lower=-100, upper=0
     )
 
-    # make violin plots for each scenario
-    num_per_scenario = no_nme_df.shape[0] // len(scenarios)
-    for idx, (scenario, column) in enumerate(scenarios.items(), start=1):
-        # first we want to plot the baseline without including neighbors
-        temp = no_nme_df[
-            (idx - 1) * num_per_scenario : idx * num_per_scenario, :
-        ]
-        # we need to make two violins
-        # one for the scenario itself
-        scenario_df = temp.with_columns(
-            projections_direct=pl.when(pl.col(column) == True)
-            .then(pl.col("projections"))
-            .otherwise(pl.col("baseline_projections")),
-        )
-        # extract the projections
-        scenario_projections = jnp.vstack(
-            scenario_df["projections_direct"].to_numpy()
-        ).T
-        # multiply with importation probability samples
-        scenario_importation_probability_samples = np.vstack(
-            scenario_df["importation_probability_samples"].to_numpy()  # type: ignore
-        ).T
-        scenario_risk_samples = (
-            scenario_importation_probability_samples * scenario_projections
-        )
-        # sum over all counties to get expected number of yearly cases
-        scenario_expected_cases_samples = scenario_risk_samples.sum(axis=1)
-        # make a violin plot of this
-        # violinparts = ax.violinplot(
-        # scenario_expected_cases_samples,
-        # positions=[idx - 0.2],
-        # showextrema=False,
-        # widths=0.3,
-        # )
-        # for pc in violinparts["bodies"]:
-        # pc.set(facecolor="#298C8C", alpha=0.4)
-        # add error bars for the median and interquartile range
-        median = np.median(scenario_expected_cases_samples)
-        lower = np.percentile(scenario_expected_cases_samples, 25)
-        upper = np.percentile(scenario_expected_cases_samples, 75)
-        print(
-            scenario_expected_cases_samples.min(),
-            scenario_expected_cases_samples.max(),
-        )
-        print(scenario, median, lower, upper)
-        ax.errorbar(
-            idx - 0.2,
-            median,
-            yerr=[[median - lower], [upper - median]],
-            fmt="o",
-            color="#298C8C",
-            capsize=5,
-            capthick=2,
-        )
+    # Set colorbar range from -100 to 0
+    vmin = -100
+    vmax = 0
 
-        # now similar thing but for the whole scenario including neighbors
-        # here we just use the full projections since the neighbors are already included
-        scenario_projections = jnp.vstack(temp["projections"].to_numpy()).T
-        # multiply with importation probability samples
-        scenario_importation_probability_samples = np.vstack(
-            temp["importation_probability_samples"].to_numpy()  # type: ignore
-        ).T
-        scenario_risk_samples = (
-            scenario_importation_probability_samples * scenario_projections
-        )
-        # sum over all counties to get expected number of yearly cases
-        scenario_expected_cases_samples = scenario_risk_samples.sum(axis=1)
-        # make a violin plot of this
-        # violinparts = ax.violinplot(
-        # scenario_expected_cases_samples,
-        # positions=[idx + 0.2],
-        # showextrema=False,
-        # widths=0.3,
-        # )
-        # for pc in violinparts["bodies"]:
-        # pc.set(facecolor="#800074", alpha=0.4)
-        # add error bars for the median and interquartile range
-        print(
-            scenario_expected_cases_samples.min(),
-            scenario_expected_cases_samples.max(),
-        )
-        median = np.median(scenario_expected_cases_samples)
-        lower = np.percentile(scenario_expected_cases_samples, 25)
-        upper = np.percentile(scenario_expected_cases_samples, 75)
-        ax.errorbar(
-            idx + 0.2,
-            median,
-            yerr=[[median - lower], [upper - median]],
-            fmt="o",
-            color="#800074",
-            capsize=5,
-            capthick=2,
-        )
+    print(
+        f"Incidence change range (after clipping): min={vmin:.2f}, max={vmax:.2f}"
+    )
+    print(
+        f"Median incidence change: {scatter_df['incidence_change'].median():.2f}"
+    )
+    print(
+        f"Mean incidence change: {scatter_df['incidence_change'].mean():.2f}"
+    )
 
-    # add a legend
-    legend_elements = [
-        Patch(
-            facecolor="grey",
-            edgecolor="grey",
-            alpha=0.4,
-            label="No intervention",
-        ),
-        Patch(
-            facecolor="#298C8C",
-            edgecolor="#298C8C",
-            alpha=0.4,
-            label="Direct effects",
-        ),
-        Patch(
-            facecolor="#800074",
-            edgecolor="#800074",
-            alpha=0.4,
-            label="Spillover effects",
-        ),
+    # Create a blue-to-grey colormap (no red needed since vmax=0)
+    color_positions = [
+        0.0,  # -100 (dark blue)
+        0.25,  # -75
+        0.5,  # -50
+        0.75,  # -25
+        1.0,  # 0 (grey)
     ]
-    ax.legend(
-        handles=legend_elements,
+
+    colors = [
+        "#08519c",  # dark blue (-100)
+        "#3182bd",  # medium blue
+        "#6baed6",  # light blue
+        "#c6dbef",  # very light blue
+        "#f0f0f0",  # light grey (0)
+    ]
+
+    blue_to_grey = mcolors.LinearSegmentedColormap.from_list(
+        "Blue_to_Grey",
+        list(zip(color_positions, colors)),
+        N=256,
     )
 
-    ax.set_xticks(range(len(scenarios) + 1))
-    ax.set_xticklabels(
-        ["No intervention"] + list(scenarios.keys()), rotation=-45, ha="left"
-    )
-    ax.set_ylabel("Annual measles cases (N)")
-    # ax.set_ylim(2000, 15000)
-    # ax.set_yscale("log")
-    # set y minor ticks
-    # ax.yaxis.set_minor_locator(
-    #     ticker.LogLocator(
-    #         base=10.0,
-    #         subs=np.arange(1.0, 10.0),  # type: ignore
-    #                                              numticks=10))
-    # ax.set_ylim(top = 100000)
+    # Use simple linear normalization from -100 to 0
+    norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
 
+    neighbors_df = scatter_df[~scatter_df["is_intervened"]]
+    intervened_df = scatter_df[scatter_df["is_intervened"]]
 
-def plot_who_benefits_most(df, fig, ax):
-    df = df.filter(
-        (
-            pl.col("top_risk_state_unconditioned") == True
-            # | (pl.col("bordering_high_risk_state") == True)
-        )
+    sc = ax.scatter(
+        intervened_df["initial_cov"],
+        intervened_df["cov_change"],
+        c=intervened_df["incidence_change"],
+        cmap=blue_to_grey,
+        norm=norm,
+        s=120,
+        alpha=0.5,
+        edgecolors="black",
+        linewidths=0.5,
+        marker="o",
+        zorder=2,
     )
-    df = df.filter(pl.col("median_percent_change") <= 0)
-    ax.scatter(
-        x=df["estimated_mmr_cov_not_scaled"],
-        # df["change_in_mmr_cov"],
-        alpha=0.7,
-        y=df["median_percent_change"],
+
+    sm = plt.cm.ScalarMappable(cmap=blue_to_grey, norm=norm)
+    # Add extend='min' to show arrow at bottom indicating values below -100
+    cbar = fig.colorbar(
+        sm, ax=ax, shrink=0.7, pad=0.02, orientation="vertical", extend="min"
     )
-    # cbar = fig.colorbar(
-    # plt.cm.ScalarMappable(cmap="viridis"),
-    # ax=ax,
-    # shrink=0.7,
-    # aspect=20,
-    # pad=0.0,
-    # extend="neither",
-    # orientation="vertical",
-    # )
-    # cbar.set_label(
-    # "Percent change in outbreak size (%)",
-    # rotation=90,
-    # labelpad=15,
-    # fontsize=28,
-    # )
-    # cbar.ax.tick_params(labelsize=24)
+    cbar.set_label(
+        "Change in incidence\n(cases per 100,000)", rotation=270, labelpad=44
+    )
+
+    # Create tick positions from -100 to 0
+    tick_positions = [-100, -75, -50, -25, 0]
+    tick_labels = ["-100", "-75", "-50", "-25", "0"]
+
+    cbar.set_ticks(tick_positions)
+    cbar.set_ticklabels(tick_labels)
+
     ax.set_xlabel("Initial MMR coverage (%)")
-    ax.set_ylabel("Change in median outbreak size (%)")
-    ax.set_xlim(50)
+    ax.set_ylabel("Change in MMR coverage (%)")
+
+    ax.set_xlim(50, 100)
+    ax.set_ylim(0)
 
 
-def plot_presentation_existing(fig, ax):
-    medians = [7538, 8564]
-    lowers = [4975, 5577]
-    uppers = [10500, 13000]
-    ax.errorbar(
-        [0, 1],
-        medians,
-        yerr=[
-            np.array(medians) - np.array(lowers),
-            np.array(uppers) - np.array(medians),
-        ],
-        fmt="o",
-        color="grey",
-        capsize=5,
-        capthick=2,
+def create_supplemental_intervention_scatter_figure(
+    interventions,
+    intervention_labels,
+    future_years,
+    baseline_samples_by_year,
+    intervention_data,
+    importation_samples,
+    baseline_fips,
+    scale,
+    adjacency_data_path,
+    output_dir,
+    output_path,
+    year=2026,
+):
+    """
+    Create a supplemental figure showing coverage change vs incidence change
+    for additional intervention scenarios.
+
+    Parameters
+    ----------
+    interventions : list
+        List of intervention names to plot (should be 2 interventions)
+    intervention_labels : dict
+        Mapping of intervention names to display labels
+    future_years : list
+        Years available for projection
+    baseline_samples_by_year : dict
+        Baseline risk samples by year
+    intervention_data : dict
+        Intervention prediction data
+    importation_samples : array
+        Importation probability samples
+    baseline_fips : list
+        List of FIPS codes in baseline order
+    scale : float
+        Scaling factor for predictions
+    adjacency_data_path : str
+        Path to county adjacency file
+    output_dir : str
+        Directory containing intervention and projection data
+    output_path : str
+        Path to save the figure (without extension)
+    year : int, optional
+        Year to analyze (default: 2026)
+    """
+    # Create figure with 1 row, 2 columns
+    fig, axes = plt.subplots(1, 2, figsize=(20, 7.5))
+
+    # Apply standard styling to both subplots
+    for ax in axes:
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.get_xaxis().tick_bottom()
+        ax.get_yaxis().tick_left()
+        ax.tick_params(axis="x", direction="out")
+        ax.tick_params(axis="y", direction="out")
+        for spine in ax.spines.values():
+            spine.set_position(("outward", 5))
+        ax.set_axisbelow(True)
+
+    # Add subplot labels
+    axes[0].text(
+        -0.05,
+        1.08,
+        "a",
+        transform=axes[0].transAxes,
+        fontsize=24,
+        fontweight="bold",
+        va="top",
+        ha="right",
     )
-    ax.set_xticks([0, 1])
-    ax.set_xticklabels(
-        ["No intervention", "Revert existing NME bans"],
-        rotation=-45,
-        ha="left",
-    )
-    ax.set_ylabel("Annual measles cases (N)")
-    ax.set_xlim([-0.5, 1.5])
-
-
-def plot_presentation_figure_future(fig, ax):
-    medians = [8564, 7538, 6365, 4023, 3854]
-    lowers = [5577, 4975, 5350, 3000, 2500]
-    uppers = [13000, 10500, 7500, 5000, 4500]
-    ax.errorbar(
-        [0, 1, 2, 3, 4],
-        medians,
-        yerr=[
-            np.array(medians) - np.array(lowers),
-            np.array(uppers) - np.array(medians),
-        ],
-        fmt="o",
-        color="grey",
-        capsize=5,
-        capthick=2,
-    )
-    ax.set_xticks([0, 1, 2, 3, 4])
-    ax.set_xticklabels(
-        [
-            "Revert existing NME bans",
-            "No intervention",
-            "Highest risk states",
-            "Highest NME states",
-            "Highest risk counties",
-        ],
-        rotation=-45,
-        ha="left",
-    )
-    ax.set_ylabel("Annual measles cases (N)")
-    ax.set_xlim([-0.5, 4.5])
-
-
-def plot_presentation_figure_future_indirects(fig, ax):
-    medians = [8564, 6365, 4023, 3854]
-    lowers = [5577, 5350, 3000, 2500]
-    uppers = [13000, 7500, 5000, 4500]
-
-    ax.errorbar(
-        [1],
-        [7538],
-        yerr=[[7538 - 4975], [10500 - 7538]],
-        fmt="o",
-        color="grey",
-        capsize=5,
-        capthick=2,
-    )
-
-    ax.errorbar(
-        np.array([0, 2, 3, 4]) - 0.25,
-        medians,
-        yerr=[
-            np.array(medians) - np.array(lowers),
-            np.array(uppers) - np.array(medians),
-        ],
-        fmt="o",
-        color="#800074",
-        capsize=5,
-        capthick=2,
-        label="Including spillover effects",
+    axes[1].text(
+        -0.05,
+        1.08,
+        "b",
+        transform=axes[1].transAxes,
+        fontsize=24,
+        fontweight="bold",
+        va="top",
+        ha="right",
     )
 
-    medians = [8000, 7000, 4500, 4300]
-    lowers = [6000, 5500, 3500, 3000]
-    uppers = [13000, 8500, 5500, 5000]
+    # Plot each intervention
+    for idx, intervention in enumerate(interventions):
+        plot_coverage_change_vs_cases(
+            intervention=intervention,
+            future_years=future_years,
+            baseline_samples_by_year=baseline_samples_by_year,
+            intervention_data=intervention_data,
+            importation_samples=importation_samples,
+            baseline_fips=baseline_fips,
+            scale=scale,
+            adjacency_data_path=adjacency_data_path,
+            output_dir=output_dir,
+            fig=fig,
+            ax=axes[idx],
+            year=year,
+        )
 
-    ax.errorbar(
-        np.array([0, 2, 3, 4]) + 0.25,
-        medians,
-        yerr=[
-            np.array(medians) - np.array(lowers),
-            np.array(uppers) - np.array(medians),
-        ],
-        fmt="o",
-        color="#298C8C",
-        capsize=5,
-        capthick=2,
-        label="Direct effects only",
+    fig.tight_layout()
+
+    # Save in both formats
+    fig.savefig(
+        f"{output_path}.png",
+        dpi=300,
+        bbox_inches="tight",
+    )
+    fig.savefig(
+        f"{output_path}.pdf",
+        dpi=300,
+        bbox_inches="tight",
     )
 
-    ax.set_xticks([0, 1, 2, 3, 4])
-    ax.set_xticklabels(
-        [
-            "Revert existing NME bans",
-            "No intervention",
-            "Highest risk states",
-            "Highest NME states",
-            "Highest risk counties",
-        ],
-        rotation=-45,
-        ha="left",
+    plt.close(fig)
+
+    print(
+        f"Supplemental intervention scatter figure saved to {output_path}.png and {output_path}.pdf"
     )
-    ax.set_ylabel("Annual measles cases (N)")
-    ax.set_xlim([-0.5, 4.5])
-    ax.legend(loc=(0.2, 0.8))
+
+
+def create_supplemental_intervention_effects_by_scenario_figure(
+    interventions,
+    intervention_labels,
+    future_years,
+    vaccination_scenarios,
+    vaccination_scenario_labels,
+    all_scenario_baseline_samples,
+    all_scenario_intervention_data,
+    importation_samples,
+    baseline_fips,
+    scale,
+    output_path,
+):
+    """
+    Create a supplemental figure showing intervention effects across
+    different vaccination scenarios in a 2x2 grid.
+
+    Parameters
+    ----------
+    interventions : list
+        List of intervention names to plot
+    intervention_labels : dict
+        Mapping of intervention names to display labels
+    future_years : list
+        Years to plot
+    vaccination_scenarios : list
+        List of 4 vaccination scenario names (e.g., ['targeted_worsening', ...])
+    vaccination_scenario_labels : dict
+        Mapping of scenario names to display labels
+    all_scenario_baseline_samples : dict
+        Nested dict: {scenario: {year: samples}}
+    all_scenario_intervention_data : dict
+        Nested dict: {scenario: {intervention: {year: {predictions, fips, ...}}}}
+    importation_samples : array
+        Importation probability samples
+    baseline_fips : list
+        List of FIPS codes in baseline order
+    scale : float
+        Scaling factor for predictions
+    output_path : str
+        Path to save the figure (without extension)
+    """
+    # Create figure with 2x2 subplots
+    fig, axes = plt.subplots(2, 2, figsize=(20, 17))
+
+    # Apply standard styling to all subplots
+    for ax_row in axes:
+        for ax in ax_row:
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+            ax.get_xaxis().tick_bottom()
+            ax.get_yaxis().tick_left()
+            ax.tick_params(axis="x", direction="out")
+            ax.tick_params(axis="y", direction="out")
+            for spine in ax.spines.values():
+                spine.set_position(("outward", 5))
+            ax.set_axisbelow(True)
+
+    # Add subplot labels
+    labels = ["a", "b", "c", "d"]
+    for idx, (ax_row, label_row) in enumerate(
+        zip(axes, [labels[:2], labels[2:]])
+    ):
+        for jdx, (ax, label) in enumerate(zip(ax_row, label_row)):
+            ax.text(
+                -0.05,
+                1.08,
+                label,
+                transform=ax.transAxes,
+                fontsize=24,
+                fontweight="bold",
+                va="top",
+                ha="right",
+            )
+
+    # Plot each vaccination scenario
+    for idx, scenario in enumerate(vaccination_scenarios):
+        row = idx // 2
+        col = idx % 2
+        ax = axes[row, col]
+
+        plot_intervention_effects(
+            interventions=interventions,
+            intervention_labels=intervention_labels,
+            future_years=future_years,
+            baseline_samples_by_year=all_scenario_baseline_samples[scenario],
+            intervention_data=all_scenario_intervention_data[scenario],
+            importation_samples=importation_samples,
+            baseline_fips=baseline_fips,
+            scale=scale,
+            fig=fig,
+            ax=ax,
+        )
+
+    fig.tight_layout()
+
+    # Save in both formats
+    fig.savefig(
+        f"{output_path}.png",
+        dpi=300,
+        bbox_inches="tight",
+    )
+    fig.savefig(
+        f"{output_path}.pdf",
+        dpi=300,
+        bbox_inches="tight",
+    )
+
+    plt.close(fig)
+
+    print(
+        f"Supplemental intervention effects by scenario figure saved to {output_path}.png and {output_path}.pdf"
+    )
 
 
 if __name__ == "__main__":
     fig, ax = setup_plot(2, 2)  # type: ignore
-    plot_presentation_existing(fig, ax[0, 0])  # type: ignore
-    plot_presentation_figure_future(fig, ax[0, 1])  # type: ignore
-    plot_presentation_figure_future_indirects(fig, ax[1, 0])  # type: ignore
 
-    fig.tight_layout()
-
-    # save
-    fig.savefig(
-        os.path.join(fig_dir, "presentation_figure.png"),
-        bbox_inches="tight",
-        dpi=300,
-    )
-
-    df = pl.read_csv(
-        os.path.join(data_dir, "2025_vaccination_data.csv"),
-        schema_overrides={
-            "fips": pl.String,
-            "estimated_mmr_cov_raw": pl.Float64,
-        },
-    )
-
-    # map of risk
-    fig, ax = setup_plot(2, 2)  # type: ignore
-
+    # -------------------------------------------------------------------------
+    # Subplot a: map of NME rates
+    # -------------------------------------------------------------------------
     ax[0, 0].text(  # type: ignore
         -0.05,
         1.08,
@@ -1178,6 +1337,14 @@ if __name__ == "__main__":
         va="top",
         ha="right",
     )
+
+    # load the NME data for the map — using the assembled projection results
+    # which has the latest NME values per county
+    df = pl.read_csv(
+        os.path.join(output_dir, "projection_dataset_2026.csv"),
+        schema_overrides={"fips": pl.String},
+    )
+
     map_fips_code_data(
         df["fips"],
         df["nonmed_exempt_pct"],
@@ -1188,6 +1355,9 @@ if __name__ == "__main__":
         point_data=None,
     )
 
+    # -------------------------------------------------------------------------
+    # Subplot b: coverage change vs NME policy
+    # -------------------------------------------------------------------------
     ax[0, 1].text(  # type: ignore
         -0.05,
         1.08,
@@ -1206,7 +1376,11 @@ if __name__ == "__main__":
             "nonmed_exempt_pct": pl.Float64,
         },
     )
-    regression_df = coverage_increase_nme_policy_change(vac_df, fig, ax[0, 1])  # type: ignore
+    regression_df = coverage_increase_nme_policy_change(
+        vac_df,
+        fig,
+        ax[0, 1],  # type: ignore
+    )
     regression_df.write_csv(
         os.path.join(
             fig_dir,
@@ -1214,16 +1388,40 @@ if __name__ == "__main__":
         )
     )
 
-    df = pl.read_csv(
-        os.path.join(output_dir, "nme_policy_analysis_assembled_median.csv"),
-        schema_overrides={
-            "estimated_mmr_cov_raw": pl.Float64,
-            "nonmed_exempt_pct_raw": pl.Float64,
-            "change_in_mmr_cov": pl.Float64,
-            "fips": pl.String,
-        },
+    # -------------------------------------------------------------------------
+    # Load shared data for subplots c and d
+    # -------------------------------------------------------------------------
+    with open(os.path.join(output_dir, "scale_2025.pkl"), "rb") as f:
+        scale_2025 = pickle.load(f)
+
+    importation_samples_future, baseline_fips = (
+        load_importation_samples_future(output_dir)
     )
 
+    baseline_samples_by_year = {}
+    for year in FUTURE_YEARS:
+        with open(
+            os.path.join(output_dir, f"risk_projections_baseline_{year}.pkl"),
+            "rb",
+        ) as f:
+            baseline_samples_by_year[year] = pickle.load(f)
+
+    intervention_data = {}
+    for intervention in INTERVENTIONS:
+        intervention_data[intervention] = {}
+        for year in FUTURE_YEARS:
+            with open(
+                os.path.join(
+                    output_dir,
+                    f"risk_projections_{intervention}_baseline_{year}.pkl",
+                ),
+                "rb",
+            ) as f:
+                intervention_data[intervention][year] = pickle.load(f)
+
+    # -------------------------------------------------------------------------
+    # Subplot c: intervention effects
+    # -------------------------------------------------------------------------
     ax[1, 0].text(  # type: ignore
         -0.05,
         1.08,
@@ -1234,99 +1432,177 @@ if __name__ == "__main__":
         va="top",
         ha="right",
     )
-    plot_data = scenario_results(df, fig, ax[1, 0])  # type: ignore
 
-    # read the df used to make the risk projections
-    df_raw = pl.read_csv(
-        os.path.join(output_dir, "scaled_projection_dataset_2026.csv"),
-        # make sure we read fips codes as strings
-        schema_overrides={
-            "fips": pl.String,
-            "estimated_mmr_cov_raw": pl.Float64,
-        },
-    )
-
-    df_raw = df_raw.drop_nans()
-
-    # read the risk projections
     with open(
         os.path.join(
             output_dir,
-            "risk_projections.pkl",
+            "import_scaler_2025.pkl",
         ),
         "rb",
     ) as f:
-        projections = pickle.load(f)
+        import_scaler_2025 = pickle.load(f)
 
-    # df_raw = df_raw.with_columns(
-    #     baseline=pl.Series(projections.T.__array__()),
-    # )
+    plot_intervention_effects(
+        interventions=INTERVENTIONS,
+        intervention_labels=INTERVENTION_LABELS,
+        future_years=FUTURE_YEARS,
+        baseline_samples_by_year=baseline_samples_by_year,
+        intervention_data=intervention_data,
+        importation_samples=jnp.minimum(
+            importation_samples_future * import_scaler_2025, 1
+        ),
+        baseline_fips=baseline_fips,
+        scale=scale_2025,
+        fig=fig,
+        ax=ax[1, 0],  # type: ignore
+    )
 
-    # # merge
-    # df = df.join(
-    #     df_raw.select(["fips", "estimated_mmr_cov", "baseline"]),
-    #     on="fips",
-    #     how="left",
-    #     suffix="_not_scaled",
-    # )
+    # -------------------------------------------------------------------------
+    # Subplot d: coverage change vs cases scatter
+    # Change SUBPLOT_D_INTERVENTION to switch which intervention is shown
+    # -------------------------------------------------------------------------
+    SUBPLOT_D_INTERVENTION = "ban_top_risk_states"
 
-    # # read sims
-    # with open(
-    #     os.path.join(
-    #         output_dir,
-    #         f"nme_policy_analysis_median.pkl",
-    #     ),
-    #     "rb",
-    # ) as f:
-    #     results = pickle.load(f)
-
-    # results = jnp.minimum(results, jnp.array(df["pop"]).reshape(1, -1))
-    # df = df.with_columns(
-    #     projections=pl.Series(results.T.__array__()),
-    # )
-
-    # df = df[3070 : (3070 * 2), :]
-
-    # # extract the median percent change in outbreak size for the top risk state scenario
-    # df = df.with_columns(
-    #     median_percent_change=(pl.col("projections") - pl.col("baseline"))
-    #     / pl.col("baseline")
-    #     * 100
-    # )
-    # # summarize by taking the median
-    # # extract the values
-    # median_percent_change = df["median_percent_change"].to_numpy()
-    # # take the median
-    # median_percent_change = np.median(median_percent_change, axis=1)
-    # df = df.with_columns(
-    #     median_percent_change=pl.Series(median_percent_change)
-    # )
-
-    # ax[1, 1].text(  # type: ignore
-    #     -0.05,
-    #     1.08,
-    #     "d",
-    #     transform=ax[1, 1].transAxes,  # type: ignore
-    #     fontsize=24,
-    #     fontweight="bold",
-    #     va="top",
-    #     ha="right",
-    # )
-    # plot_who_benefits_most(df, fig, ax[1, 1])  # type: ignore
+    ax[1, 1].text(  # type: ignore
+        -0.05,
+        1.08,
+        "d",
+        transform=ax[1, 1].transAxes,  # type: ignore
+        fontsize=24,
+        fontweight="bold",
+        va="top",
+        ha="right",
+    )
+    plot_coverage_change_vs_cases(
+        intervention=SUBPLOT_D_INTERVENTION,
+        future_years=FUTURE_YEARS,
+        baseline_samples_by_year=baseline_samples_by_year,
+        intervention_data=intervention_data,
+        importation_samples=jnp.minimum(
+            importation_samples_future * import_scaler_2025, 1
+        ),
+        baseline_fips=baseline_fips,
+        scale=scale_2025,
+        adjacency_data_path=os.path.join(data_dir, "county_adjacencies.txt"),
+        output_dir=output_dir,
+        fig=fig,
+        ax=ax[1, 1],  # type: ignore
+        year=2026,
+    )
 
     fig.tight_layout()
-    # save
     fig.savefig(
         os.path.join(
-            fig_dir, "figure_nonmedical_exemption_policy_interventions.png"
+            fig_dir,
+            "figure_nonmedical_exemption_policy_interventions.png",
         ),
         dpi=300,
         bbox_inches="tight",
     )
     fig.savefig(
         os.path.join(
-            fig_dir, "figure_nonmedical_exemption_policy_interventions.pdf"
+            fig_dir,
+            "figure_nonmedical_exemption_policy_interventions.pdf",
         ),
         dpi=300,
         bbox_inches="tight",
+    )
+
+    # -------------------------------------------------------------------------
+    # Create supplemental figure with alternative intervention scenarios
+    # -------------------------------------------------------------------------
+    alternative_interventions = [
+        "ban_top_nme_states",
+        "ban_top_risk_counties",
+    ]
+
+    create_supplemental_intervention_scatter_figure(
+        interventions=alternative_interventions,
+        intervention_labels=INTERVENTION_LABELS,
+        future_years=FUTURE_YEARS,
+        baseline_samples_by_year=baseline_samples_by_year,
+        intervention_data=intervention_data,
+        importation_samples=jnp.minimum(
+            importation_samples_future * import_scaler_2025, 1
+        ),
+        baseline_fips=baseline_fips,
+        scale=scale_2025,
+        adjacency_data_path=os.path.join(data_dir, "county_adjacencies.txt"),
+        output_dir=output_dir,
+        output_path=os.path.join(
+            fig_dir,
+            "figure_supplemental_intervention_coverage_vs_incidence",
+        ),
+        year=2026,
+    )
+
+    # -------------------------------------------------------------------------
+    # Create supplemental figure: intervention effects across vaccination scenarios
+    # -------------------------------------------------------------------------
+
+    # Define the 4 vaccination scenarios to show
+    vaccination_scenarios_to_plot = [
+        "targeted_worsening",
+        "universal_worsening",
+        "targeted_improvement",
+        "universal_improvement",
+    ]
+
+    vaccination_scenario_labels = {
+        "targeted_worsening": "Vaccinations universally decline by 100% more",
+        "universal_worsening": "Universal Vaccinations universally decline by 50% more",
+        "targeted_improvement": "Universal 95% coverage by 2030",
+        "universal_improvement": "1% improvement year-over-year",
+    }
+
+    # Load baseline samples for each vaccination scenario
+    all_scenario_baseline_samples = {}
+    for vac_scenario in vaccination_scenarios_to_plot:
+        all_scenario_baseline_samples[vac_scenario] = {}
+        for year in FUTURE_YEARS:
+            with open(
+                os.path.join(
+                    output_dir, f"risk_projections_{vac_scenario}_{year}.pkl"
+                ),
+                "rb",
+            ) as f:
+                all_scenario_baseline_samples[vac_scenario][year] = (
+                    pickle.load(f)
+                )
+
+    # Load intervention data for each vaccination scenario
+    all_scenario_intervention_data = {}
+    for vac_scenario in vaccination_scenarios_to_plot:
+        all_scenario_intervention_data[vac_scenario] = {}
+        for intervention in INTERVENTIONS:
+            all_scenario_intervention_data[vac_scenario][intervention] = {}
+            for year in FUTURE_YEARS:
+                with open(
+                    os.path.join(
+                        output_dir,
+                        f"risk_projections_{intervention}_{vac_scenario}_{year}.pkl",
+                    ),
+                    "rb",
+                ) as f:
+                    all_scenario_intervention_data[vac_scenario][intervention][
+                        year
+                    ] = pickle.load(f)
+
+    create_supplemental_intervention_effects_by_scenario_figure(
+        interventions=INTERVENTIONS,
+        intervention_labels=INTERVENTION_LABELS,
+        future_years=FUTURE_YEARS,
+        vaccination_scenarios=vaccination_scenarios_to_plot,
+        vaccination_scenario_labels=vaccination_scenario_labels,
+        all_scenario_baseline_samples=all_scenario_baseline_samples,
+        all_scenario_intervention_data=all_scenario_intervention_data,
+        importation_samples=jnp.minimum(
+            importation_samples_future * import_scaler_2025, 1
+        ),
+        baseline_fips=baseline_fips,
+        scale=scale_2025,
+        output_path=os.path.join(
+            fig_dir,
+            "figure_supplemental_nme_policies_by_vaccination_scenario",
+        ),
     )

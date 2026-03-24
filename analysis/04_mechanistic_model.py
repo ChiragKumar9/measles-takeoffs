@@ -44,7 +44,7 @@ if __name__ == "__main__":
 
         # now scale these values to match the scale of the observed outbreaks
         observed_outbreaks = df["cases_outbreak"].to_numpy()
-        # fit a linear regression through the origin
+        # fit a regression
         # include state and year fixed effects
         year_fixed_effects = df.select(
             [f"year_{y}" for y in years[1:]]

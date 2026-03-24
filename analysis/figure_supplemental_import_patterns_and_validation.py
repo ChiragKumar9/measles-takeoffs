@@ -1,4 +1,5 @@
 import os
+import pickle
 
 import matplotlib.pyplot as plt
 import polars as pl
@@ -190,8 +191,8 @@ def plot_importation_probability_prc_validation(df, fig, ax):
         color="gray",
         lw=1,
         linestyle="--",
-        label="Baseline precision\n({:.2f}%)".format(
-            (df["imported"] >= 1).mean() * 100
+        label="Baseline precision\n({:.5f})".format(
+            (df["imported"] >= 1).mean()
         ),
     )
     ax.legend(loc=(0.3, 0.4))
@@ -303,6 +304,17 @@ if __name__ == "__main__":
     )
     # sum
     print(count_imports.sum())
+    print((df_2025["imported"].sum() / count_imports.sum()["mu"])[0])
+    with open(
+        os.path.join(
+            output_dir,
+            "import_scaler_2025.pkl",
+        ),
+        "wb",
+    ) as f:
+        pickle.dump(
+            (df_2025["imported"].sum() / count_imports.sum()["mu"])[0], f
+        )
     counties_with_known_imports = counties_with_known_imports.join(
         import_df, on=["year", "state", "county"], how="left"
     )

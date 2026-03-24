@@ -468,7 +468,7 @@ def project_coverage_scenarios(
                             linregress(
                                 g["year"].cast(pl.Float64).to_numpy(),
                                 g[outcome_col].cast(pl.Float64).to_numpy(),
-                            ).slope
+                            ).slope  # type: ignore
                             if g.height >= 2
                             else float("nan")
                         ],
@@ -574,105 +574,131 @@ def project_coverage_scenarios(
         )
 
     def apply_scenario_b(df):
-        """(b) Targeted worsening - worst 30% coverage decline 30% faster;
-        nonmed/med exemptions increase 30% faster in those counties"""
+        """(b) Targeted worsening - declining counties decline 2x faster,
+        nonmed soaks up extra decline. Currently-increasing counties switch
+        to national average slope and national average nonmed slope."""
+        # Extra coverage decline for declining counties = slope_baseline * 1
+        # (the additional amount beyond baseline, i.e. slope*2 - slope*1 = slope)
+        # nonmed_slope += abs(extra_decline) = abs(slope_baseline)
         return df.with_columns(
             [
-                # Coverage: more negative slope = faster decline
-                pl.when(pl.col("fips").is_in(bottom_30_fips["fips"]))
-                .then(pl.col("slope_baseline") * 1.3)
-                .otherwise(pl.col("slope_baseline"))
+                # Coverage slope
+                pl.when(pl.col("slope_baseline") < 0)
+                .then(pl.col("slope_baseline") * 2.0)
+                .otherwise(national_avg_slope)
                 .alias("slope_scenario"),
-                # Nonmed: more positive slope = faster increase = worsening
-                pl.when(pl.col("fips").is_in(bottom_30_fips["fips"]))
+                # Nonmed slope: soaks up extra decline for declining counties,
+                # switches to national avg for currently-increasing counties
+                pl.when(pl.col("slope_baseline") < 0)
                 .then(
-                    pl.when(pl.col("slope_nonmed_baseline") > 0)
-                    .then(pl.col("slope_nonmed_baseline") * 1.3)
-                    .otherwise(pl.col("slope_nonmed_baseline") * 0.7)
+                    pl.col("slope_nonmed_baseline")
+                    + pl.col("slope_baseline").abs()  # abs(extra decline)
                 )
-                .otherwise(pl.col("slope_nonmed_baseline"))
+                .otherwise(national_avg_slope_nonmed)
                 .alias("slope_nonmed_scenario"),
-                # Med: same logic
-                pl.when(pl.col("fips").is_in(bottom_30_fips["fips"]))
-                .then(
-                    pl.when(pl.col("slope_med_baseline") > 0)
-                    .then(pl.col("slope_med_baseline") * 1.3)
-                    .otherwise(pl.col("slope_med_baseline") * 0.7)
-                )
-                .otherwise(pl.col("slope_med_baseline"))
-                .alias("slope_med_scenario"),
+                # Med: unchanged
+                pl.col("slope_med_baseline").alias("slope_med_scenario"),
             ]
         )
 
     def apply_scenario_c(df):
-        """(c) Universal worsening - coverage declines 20% faster (improving -> national avg);
-        exemptions increase 20% faster (decreasing -> national avg)"""
+        """(c) Universal worsening - all declining counties decline 1.5x faster,
+        nonmed soaks up extra decline. Currently-increasing counties keep
+        their trajectory."""
         return df.with_columns(
             [
+                # Coverage slope
                 pl.when(pl.col("slope_baseline") < 0)
-                .then(pl.col("slope_baseline") * 1.2)
-                .otherwise(national_avg_slope)
+                .then(pl.col("slope_baseline") * 1.5)
+                .otherwise(pl.col("slope_baseline"))
                 .alias("slope_scenario"),
-                # Nonmed: worsening = increasing; if already decreasing, revert to national avg
-                pl.when(pl.col("slope_nonmed_baseline") > 0)
-                .then(pl.col("slope_nonmed_baseline") * 1.2)
-                .otherwise(national_avg_slope_nonmed)
+                # Nonmed slope: soaks up extra decline for declining counties only.
+                # Extra decline = slope_baseline * 0.5 (the additional 0.5x),
+                # so nonmed += abs(slope_baseline * 0.5)
+                pl.when(pl.col("slope_baseline") < 0)
+                .then(
+                    pl.col("slope_nonmed_baseline")
+                    + (pl.col("slope_baseline") * 0.5).abs()
+                )
+                .otherwise(pl.col("slope_nonmed_baseline"))
                 .alias("slope_nonmed_scenario"),
-                # Med: same logic
-                pl.when(pl.col("slope_med_baseline") > 0)
-                .then(pl.col("slope_med_baseline") * 1.2)
-                .otherwise(national_avg_slope_med)
-                .alias("slope_med_scenario"),
+                # Med: unchanged
+                pl.col("slope_med_baseline").alias("slope_med_scenario"),
             ]
         )
 
     def apply_scenario_d(df):
-        """(d) Targeted improvement - worst 30% coverage decline 30% slower;
-        nonmed/med exemptions increase 30% slower in those counties"""
+        years_to_end = end_year - df["baseline_year"]
+        years_to_start = latest_year + 1 - df["baseline_year"]
+
+        # Threshold check: where is this county naturally headed by 2026?
+        # Use slope_baseline, not required_coverage_slope
+        projected_coverage_at_start = (
+            df["baseline_coverage"] + df["slope_baseline"] * years_to_start
+        ).clip(0.0, 100.0)
+
+        # Slope to reach 95 by end_year, anchored at baseline_year
+        required_coverage_slope = (
+            95.0 - df["baseline_coverage"]
+        ) / years_to_end
+
+        df = df.with_columns(
+            [
+                pl.Series("required_coverage_slope", required_coverage_slope),
+                pl.Series(
+                    "projected_coverage_at_start", projected_coverage_at_start
+                ),
+            ]
+        )
+
         return df.with_columns(
             [
-                pl.when(pl.col("fips").is_in(bottom_30_fips["fips"]))
-                .then(pl.col("slope_baseline") * 0.7)
-                .otherwise(pl.col("slope_baseline"))
+                pl.when(pl.col("projected_coverage_at_start") < 95.0)
+                .then(pl.col("required_coverage_slope"))
+                .otherwise(
+                    # County is naturally at or above 95% by 2026.
+                    # Keep baseline slope only if it stays >= 95 through 2030,
+                    # otherwise hold flat at 0 so coverage doesn't erode below 95.
+                    pl.when(
+                        pl.col("baseline_coverage")
+                        + pl.col("slope_baseline")
+                        * (end_year - pl.col("baseline_year"))
+                        >= 95.0
+                    )
+                    .then(pl.col("slope_baseline"))
+                    .otherwise(pl.lit(0.0))
+                )
                 .alias("slope_scenario"),
-                pl.when(pl.col("fips").is_in(bottom_30_fips["fips"]))
-                .then(
-                    pl.when(pl.col("slope_nonmed_baseline") > 0)
-                    .then(pl.col("slope_nonmed_baseline") * 0.7)
-                    .otherwise(pl.col("slope_nonmed_baseline") * 1.7)
+                pl.when(pl.col("projected_coverage_at_start") < 95.0)
+                .then(-pl.col("required_coverage_slope"))
+                .otherwise(
+                    pl.when(
+                        pl.col("baseline_coverage")
+                        + pl.col("slope_baseline")
+                        * (end_year - pl.col("baseline_year"))
+                        >= 95.0
+                    )
+                    .then(pl.col("slope_nonmed_baseline"))
+                    .otherwise(pl.lit(0.0))
                 )
-                .otherwise(pl.col("slope_nonmed_baseline"))
                 .alias("slope_nonmed_scenario"),
-                pl.when(pl.col("fips").is_in(bottom_30_fips["fips"]))
-                .then(
-                    pl.when(pl.col("slope_med_baseline") > 0)
-                    .then(pl.col("slope_med_baseline") * 0.7)
-                    .otherwise(pl.col("slope_med_baseline") * 1.3)
-                )
-                .otherwise(pl.col("slope_med_baseline"))
-                .alias("slope_med_scenario"),
+                pl.col("slope_med_baseline").alias("slope_med_scenario"),
             ]
         )
 
     def apply_scenario_e(df):
-        """(e) Universal improvement - coverage declines 20% slower / improving accelerates 20%;
-        exemptions increase 20% slower / decreasing accelerates 20%"""
+        """(e) Universal improvement - every county increases coverage by
+        2 percentage points per year. Nonmed exemptions fill the balance
+        so mmr_cov + nonmed_exempt_pct = 100 is maintained.
+        Med exemptions stay the same."""
         return df.with_columns(
             [
-                pl.when(pl.col("slope_baseline") < 0)
-                .then(pl.col("slope_baseline") * 0.8)
-                .otherwise(pl.col("slope_baseline") * 1.2)
-                .alias("slope_scenario"),
-                # Nonmed: worsening = increasing; improvement = decreasing
-                pl.when(pl.col("slope_nonmed_baseline") > 0)
-                .then(pl.col("slope_nonmed_baseline") * 0.8)
-                .otherwise(pl.col("slope_nonmed_baseline") * 1.2)
-                .alias("slope_nonmed_scenario"),
-                # Med: same logic
-                pl.when(pl.col("slope_med_baseline") > 0)
-                .then(pl.col("slope_med_baseline") * 0.8)
-                .otherwise(pl.col("slope_med_baseline") * 1.2)
-                .alias("slope_med_scenario"),
+                # Coverage: fixed +2pp/yr slope for all counties
+                pl.lit(1.0).alias("slope_scenario"),
+                # Nonmed: mirror image, -2pp/yr
+                pl.lit(-1.0).alias("slope_nonmed_scenario"),
+                # Med: unchanged
+                pl.col("slope_med_baseline").alias("slope_med_scenario"),
             ]
         )
 

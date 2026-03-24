@@ -92,7 +92,7 @@ def plot_time_varying_vaccine_effect(
             )
 
         if rolling_average:
-            n = 3
+            n = 2
             median_effect_expanded = jnp.convolve(
                 median_effect, jnp.ones(n) / n, mode="same"
             )
@@ -125,7 +125,7 @@ def plot_time_varying_vaccine_effect(
 
     ax.set_xlabel("Year")
     ax.set_ylabel(
-        "% change in incidence rate per 1%\nincrease in vaccine coverage"
+        "% change in outbreak size per 1%\nincrease in vaccine coverage"
     )
 
     return fig, ax
@@ -200,6 +200,15 @@ if __name__ == "__main__":
     df = pl.read_csv(
         os.path.join(data_dir, "analysis_dataset.csv"),
         schema_overrides={"fips": pl.String},
+    )
+
+    exclude_16_17 = pl.read_csv(
+        os.path.join(output_dir, "exclude_16_17.csv"),
+    )
+    df = df.with_columns(
+        year_county_state=pl.col("year").cast(pl.String)
+        + pl.col("county")
+        + pl.col("state")
     )
 
     years_in_order = list(
@@ -383,15 +392,6 @@ if __name__ == "__main__":
         samples = pickle.load(file)
     sample_dict_wh["Constant"] = samples
 
-    exclude_16_17 = pl.read_csv(
-        os.path.join(output_dir, "exclude_16_17.csv"),
-    )
-    df = df.with_columns(
-        year_county_state=pl.col("year").cast(pl.String)
-        + pl.col("county")
-        + pl.col("state")
-    )
-
     ax[2, 0].text(  # type: ignore
         -0.25,
         1.08,
@@ -449,14 +449,14 @@ if __name__ == "__main__":
         ax[2, 1],  # type: ignore
     )
 
-    # the second row is what happens if we drop the 2025 mega regions
+    # the second row is what happens if we drop the 2025 oddities
     sample_dict_wh = {}
 
     # time and group varying
     with open(
         os.path.join(
             output_dir,
-            "predictive_random_walk_poisson_CAR_time_and_group_varying_2025_oddities=False.pkl",
+            "predictive_random_walk_poisson_CAR_time_and_group_varying_2025_oddities=False_no_2025_oddities.pkl",
         ),
         "rb",
     ) as file:
@@ -467,7 +467,7 @@ if __name__ == "__main__":
     with open(
         os.path.join(
             output_dir,
-            "predictive_random_walk_poisson_CAR_time_varying_only_2025_oddities=False.pkl",
+            "predictive_random_walk_poisson_CAR_time_varying_only_2025_oddities=False_no_2025_oddities.pkl",
         ),
         "rb",
     ) as file:
@@ -478,7 +478,7 @@ if __name__ == "__main__":
     with open(
         os.path.join(
             output_dir,
-            "predictive_random_walk_poisson_CAR_group_varying_only_2025_oddities=False.pkl",
+            "predictive_random_walk_poisson_CAR_group_varying_only_2025_oddities=False_no_2025_oddities.pkl",
         ),
         "rb",
     ) as file:
@@ -489,7 +489,7 @@ if __name__ == "__main__":
     with open(
         os.path.join(
             output_dir,
-            "predictive_random_walk_poisson_CAR_constant_2025_oddities=False.pkl",
+            "predictive_random_walk_poisson_CAR_constant_2025_oddities=False_no_2025_oddities.pkl",
         ),
         "rb",
     ) as file:
@@ -510,7 +510,7 @@ if __name__ == "__main__":
         df.filter((pl.col("year") == 2025) & (~pl.col("oddities_2025"))),
         df.filter((pl.col("year") == 2025) & (pl.col("oddities_2025"))),
         "2025 cases",
-        "Counties < 10,000 pop",
+        r"Outbreak cases $\leq$ 10",
         (0.2, 0.5),
         fig,
         ax[3, 0],  # type: ignore

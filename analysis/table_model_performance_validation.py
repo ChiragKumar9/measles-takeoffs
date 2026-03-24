@@ -27,19 +27,20 @@ def performance_table(
 ):
     if mode == "classification":
         fpr, tpr, _ = roc_curve(
-            true >= classification_threshold, samples / samples.max()
+            (true >= classification_threshold).astype(int), samples
         )
         if np.isnan(fpr[0]) or np.isnan(tpr[0]):
             sensitivity = np.nan
             specificity = np.nan
             roc_auc = np.nan
         else:
-            # select a specificity such that sensitivity is >= 80%
-            sensitivity = min(tpr[tpr >= 0.80])
-            specificity = 1.0 - min(fpr[tpr >= 0.80])
+            J = tpr - fpr
+            idx = np.argmax(J)
+            sensitivity = tpr[idx]
+            specificity = 1.0 - fpr[idx]
 
             roc_auc = roc_auc_score(
-                true >= classification_threshold, samples / samples.max()
+                (true >= classification_threshold).astype(int), samples
             )
 
         # make a dataframe
@@ -104,7 +105,7 @@ def performance_table(
             regression_percentile=80,
         )
 
-        # concate
+        # concatenate
         performance_summary = pl.concat(
             [classification, regression], how="horizontal"
         )
@@ -287,7 +288,7 @@ def other_tables(df, samples_unconditioned, samples, true, true_outbreak):
         samples_unconditioned,
         true,
         mode="regression",
-        regression_percentile=80,
+        regression_percentile=20,
     ).drop("Absolute difference (cases)")
     regression_80 = regression_80.rename(
         {
@@ -295,6 +296,51 @@ def other_tables(df, samples_unconditioned, samples, true, true_outbreak):
             "MAE (cases)": "MAE, top 80% (cases)",
             "Median fold error": "Median fold error, top 80%",
             "Spearman rho^2 (%)": "Spearman rho^2, top 80% (%)",
+        }
+    )
+
+    regression_20_wo_imports = performance_table(
+        samples,
+        true_outbreak,
+        mode="regression",
+        regression_percentile=80,
+    ).drop("Absolute difference (cases)")
+    regression_20_wo_imports = regression_20_wo_imports.rename(
+        {
+            "RMSE (cases)": "RMSE, top 20% (outbreak cases)",
+            "MAE (cases)": "MAE, top 20% (outbreak cases)",
+            "Median fold error": "Median outbreak fold error, top 20%",
+            "Spearman rho^2 (%)": "Spearman rho^2, top 20% outbreak (%)",
+        }
+    )
+
+    regression_50_wo_imports = performance_table(
+        samples,
+        true_outbreak,
+        mode="regression",
+        regression_percentile=50,
+    ).drop("Absolute difference (cases)")
+    regression_50_wo_imports = regression_50_wo_imports.rename(
+        {
+            "RMSE (cases)": "RMSE, top 50% (outbreak cases)",
+            "MAE (cases)": "MAE, top 50% (outbreak cases)",
+            "Median fold error": "Median outbreak fold error, top 50%",
+            "Spearman rho^2 (%)": "Spearman rho^2, top 50% outbreak (%)",
+        }
+    )
+
+    regression_80_wo_imports = performance_table(
+        samples,
+        true_outbreak,
+        mode="regression",
+        regression_percentile=20,
+    ).drop("Absolute difference (cases)")
+    regression_80_wo_imports = regression_80_wo_imports.rename(
+        {
+            "RMSE (cases)": "RMSE, top 80% (outbreak cases)",
+            "MAE (cases)": "MAE, top 80% (outbreak cases)",
+            "Median fold error": "Median outbreak fold error, top 80%",
+            "Spearman rho^2 (%)": "Spearman rho^2, top 80% outbreak (%)",
         }
     )
 
@@ -309,6 +355,9 @@ def other_tables(df, samples_unconditioned, samples, true, true_outbreak):
             classification20_wo_imports,
             regression_50,
             regression_80,
+            regression_20_wo_imports,
+            regression_50_wo_imports,
+            regression_80_wo_imports,
         ],
         how="horizontal",
     )
@@ -495,7 +544,9 @@ if __name__ == "__main__":
                     ) as f:
                         samples = pickle.load(f)
 
-                    samples_with_imports = samples * all_imports[idx]
+                    samples_with_imports = (
+                        samples * all_imports[idx] + all_imports[idx]
+                    )
                     samples_with_imports = jnp.sum(
                         samples_with_imports, axis=1
                     )
@@ -559,7 +610,9 @@ if __name__ == "__main__":
                         # pass through the performance table function
                         # under various modes
 
-                        samples_unconditioned = samples * all_imports[idx]
+                        samples_unconditioned = (
+                            samples * all_imports[idx] + all_imports[idx]
+                        )
 
                         samples_unconditioned = jnp.mean(
                             samples_unconditioned, axis=0
@@ -616,7 +669,9 @@ if __name__ == "__main__":
                     f,
                 )["cases"]
 
-            samples_unconditioned = samples * all_imports[idx]
+            samples_unconditioned = (
+                samples * all_imports[idx] + all_imports[idx]
+            )
 
             samples_unconditioned = jnp.mean(samples_unconditioned, axis=0)
             samples = jnp.mean(samples, axis=0)
@@ -692,53 +747,144 @@ if __name__ == "__main__":
     # we want the best performing statistical model with all vaccination metrics
     main_models = [
         find_best_model(model_performance, subset="Mechanistic"),
-        find_best_model(model_performance, subset="Statistical"),
         "Statistical: All covariates + spatial + state-specific vaccine coefficients, trained since 2019",
         find_best_model(
             model_performance, subset="Statistical", exclude="spatial"
         ),
-        find_best_model(model_performance, subset="exemptions"),
-        find_best_model(model_performance, subset="All covariates"),
     ]
 
-    # main table only requires certain columns
-    main_table_columns = [
-        # 'Absolute difference (cases)',
+    # main table has two rows per model: one with importations, one without
+    # shared column names used for both rows
+    shared_columns = [
+        "Sensitivity, 10+ (%)",
+        "Specificity, 10+ (%)",
+        "AUROC, 10+ (%)",
+        "Sensitivity, 20+ (%)",
+        "Specificity, 20+ (%)",
+        "RMSE, top 20% (cases)",
+        "MAE, top 20% (cases)",
+        "Spearman rho^2, top 50% (%)",
+    ]
+
+    # --- with importations row ---
+    # these are the column names as they exist in model_performance
+    with_imports_columns = [
         "Sensitivity, 10+ cases (%)",
         "Specificity, 10+ cases (%)",
         "AUROC, 10+ cases (%)",
         "Sensitivity, 20+ cases (%)",
         "Specificity, 20+ cases (%)",
-        "AUROC, 20+ cases (%)",
-        "Median fold error, top 20%",
-        "Spearman rho^2, top 20% (%)",
         "RMSE, top 20% (cases)",
         "MAE, top 20% (cases)",
+        "Spearman rho^2, top 50% (%)",
     ]
-    main_table = model_performance.select(
-        [
-            *[
-                "Model",
-            ],
-            *[
-                f"{col}{suffix}"
-                for col in main_table_columns
-                for suffix in ["", "_lower", "_upper"]
-            ],
+
+    with_imports = model_performance.select(
+        ["Model"]
+        + [
+            f"{col}{suffix}"
+            for col in with_imports_columns
+            for suffix in ["", "_lower", "_upper"]
         ]
     )
-    # select set models
-    main_table = main_table.filter(pl.col("Model").is_in(main_models))
-    # order the models in a particular way we want
-    main_table = main_table.with_columns(
-        pl.col("Model").cast(pl.Enum(main_models))
-    ).sort(by="Model")
+    with_imports = with_imports.filter(pl.col("Model").is_in(main_models))
 
-    main_table = beautify(main_table, main_table_columns)
+    # rename to shared schema (only columns whose names differ)
+    rename_map = {
+        orig: shared
+        for orig, shared in zip(with_imports_columns, shared_columns)
+        if orig != shared
+    }
+    rename_map.update(
+        {
+            f"{orig}{suf}": f"{shared}{suf}"
+            for orig, shared in zip(with_imports_columns, shared_columns)
+            for suf in ["_lower", "_upper"]
+            if orig != shared
+        }
+    )
+    with_imports = with_imports.rename(rename_map)
+    with_imports = with_imports.with_columns(
+        pl.lit("All cases (including imports)").alias("Condition")
+    )
+
+    # --- without importations (outbreak only) row ---
+    # these are the column names as they exist in model_performance
+    wo_imports_columns = [
+        "Sensitivity, 10+ outbreak cases (%)",
+        "Specificity, 10+ outbreak cases (%)",
+        "AUROC, 10+ outbreak cases (%)",
+        "Sensitivity, 20+ outbreak cases (%)",
+        "Specificity, 20+ outbreak cases (%)",
+        "RMSE, top 20% (outbreak cases)",
+        "MAE, top 20% (outbreak cases)",
+        "Spearman rho^2, top 20% outbreak (%)",
+    ]
+
+    wo_imports = model_performance.select(
+        ["Model"]
+        + [
+            f"{col}{suffix}"
+            for col in wo_imports_columns
+            for suffix in ["", "_lower", "_upper"]
+        ]
+    )
+    wo_imports = wo_imports.filter(pl.col("Model").is_in(main_models))
+
+    # rename to shared schema (only columns whose names differ)
+    rename_map = {
+        orig: shared
+        for orig, shared in zip(wo_imports_columns, shared_columns)
+        if orig != shared
+    }
+    rename_map.update(
+        {
+            f"{orig}{suf}": f"{shared}{suf}"
+            for orig, shared in zip(wo_imports_columns, shared_columns)
+            for suf in ["_lower", "_upper"]
+            if orig != shared
+        }
+    )
+    wo_imports = wo_imports.rename(rename_map)
+    wo_imports = wo_imports.with_columns(
+        pl.lit("Outbreak cases").alias("Condition")
+    )
+
+    # stack vertically, then sort so rows interleave:
+    # Model A (with imports), Model A (outbreak), Model B (with imports), ...
+    main_table = pl.concat([with_imports, wo_imports], how="vertical")
+
+    model_order = {m: i for i, m in enumerate(main_models)}
+    condition_order = {"All cases (including imports)": 0, "Outbreak cases": 1}
+    main_table = (
+        main_table.with_columns(
+            pl.col("Model")
+            .replace_strict(model_order, return_dtype=pl.Int32)
+            .alias("_model_order"),
+            pl.col("Condition")
+            .replace_strict(condition_order, return_dtype=pl.Int32)
+            .alias("_cond_order"),
+        )
+        .sort(["_model_order", "_cond_order"])
+        .drop(["_model_order", "_cond_order"])
+    )
+
+    # put Condition as the second column, then the metric columns
+    main_table = main_table.select(
+        ["Model", "Condition"]
+        + [
+            f"{col}{suffix}"
+            for col in shared_columns
+            for suffix in ["", "_lower", "_upper"]
+        ]
+    )
+
+    main_table = beautify(main_table, shared_columns)
     # export
     main_table.write_csv(
         os.path.join(fig_dir, "table_validation_performance_metrics.csv")
     )
+
     # supplemental classification table with imports only requires certain columns
     classification_with_imports_columns = [
         "Sensitivity, 5+ cases (%)",
@@ -836,5 +982,43 @@ if __name__ == "__main__":
     regression = beautify(regression, regression_columns)
     # export
     regression.write_csv(
-        os.path.join(fig_dir, "table_supplemental_regression_metrics.csv")
+        os.path.join(
+            fig_dir,
+            "table_supplemental_regression_metrics_with_importations.csv",
+        )
+    )
+
+    # supplemental regression table only requires certain columns
+    regression_columns = [
+        "Median outbreak fold error, top 20%",
+        "RMSE, top 20% (outbreak cases)",
+        "MAE, top 20% (outbreak cases)",
+        "Spearman rho^2, top 20% outbreak (%)",
+        "Median outbreak fold error, top 50%",
+        "RMSE, top 50% (outbreak cases)",
+        "MAE, top 50% (outbreak cases)",
+        "Spearman rho^2, top 50% outbreak (%)",
+        "Median outbreak fold error, top 80%",
+        "RMSE, top 80% (outbreak cases)",
+        "MAE, top 80% (outbreak cases)",
+        "Spearman rho^2, top 80% outbreak (%)",
+    ]
+    regression = model_performance.select(
+        [
+            *["Model"],
+            *[
+                f"{col}{suffix}"
+                for col in regression_columns
+                for suffix in ["", "_lower", "_upper"]
+            ],
+        ]
+    )
+    # beautify
+    regression = beautify(regression, regression_columns)
+    # export
+    regression.write_csv(
+        os.path.join(
+            fig_dir,
+            "table_supplemental_regression_metrics_without_importations.csv",
+        )
     )

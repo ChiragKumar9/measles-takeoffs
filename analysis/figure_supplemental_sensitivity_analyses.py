@@ -85,9 +85,10 @@ def plot_immunity_effects_on_vaccine_coverage(df, fig, ax):
     )
     # make a percent change
     samples_of_interest = jnp.exp(samples_of_interest) * 100 - 100
+    print(f"Baseline p-value: {jnp.mean(samples_of_interest > 0):.3f}")
     medians.append(jnp.median(samples_of_interest))
-    lowers.append(jnp.percentile(samples_of_interest, 2.5))
-    uppers.append(jnp.percentile(samples_of_interest, 97.5))
+    lowers.append(jnp.percentile(samples_of_interest, 5))
+    uppers.append(jnp.percentile(samples_of_interest, 95))
 
     with open(
         os.path.join(
@@ -106,6 +107,7 @@ def plot_immunity_effects_on_vaccine_coverage(df, fig, ax):
     )
     # make a percent change
     samples_of_interest = jnp.exp(samples_of_interest) * 100 - 100
+    print(f"No prior cases p-value: {jnp.mean(samples_of_interest > 0):.3f}")
     medians.append(jnp.median(samples_of_interest))
     lowers.append(jnp.percentile(samples_of_interest, 5))
     uppers.append(jnp.percentile(samples_of_interest, 95))
@@ -124,9 +126,12 @@ def plot_immunity_effects_on_vaccine_coverage(df, fig, ax):
     )
     # make a percent change
     samples_of_interest = jnp.exp(samples_of_interest) * 100 - 100
+    print(
+        f"Covariate for previous cases p-value: {jnp.mean(samples_of_interest > 0):.3f}"
+    )
     medians.append(jnp.median(samples_of_interest))
-    lowers.append(jnp.percentile(samples_of_interest, 2.5))
-    uppers.append(jnp.percentile(samples_of_interest, 97.5))
+    lowers.append(jnp.percentile(samples_of_interest, 5))
+    uppers.append(jnp.percentile(samples_of_interest, 95))
 
     x = np.arange(3)
     ax.errorbar(
@@ -150,7 +155,7 @@ def plot_immunity_effects_on_vaccine_coverage(df, fig, ax):
         ]
     )
     ax.set_ylabel(
-        "Percent change in outbreak size per\n1%  increase in MMR coverage"
+        "% change in outbreak size per\n1%  increase in MMR coverage"
     )
 
 
@@ -182,7 +187,9 @@ def plot_previous_outbreak_size_effects(df, fig, ax):
     samples_of_interest = samples_of_interest / std
     # make a percent change
     samples_of_interest = jnp.exp(samples_of_interest) * 100 - 100
-
+    print(
+        f"Covariate for previous cases p-value: {jnp.mean(jnp.abs(samples_of_interest) > 0)}"
+    )
     # plot the effect
     ax.hist(
         samples_of_interest,
@@ -193,11 +200,11 @@ def plot_previous_outbreak_size_effects(df, fig, ax):
     )
 
     ax.axvline(
-        x=jnp.percentile(samples_of_interest, 2.5),
+        x=jnp.percentile(samples_of_interest, 5),
         color="red",
     )
     ax.axvline(
-        x=jnp.percentile(samples_of_interest, 97.5),
+        x=jnp.percentile(samples_of_interest, 95),
         color="red",
     )
     ax.axvline(
@@ -207,7 +214,7 @@ def plot_previous_outbreak_size_effects(df, fig, ax):
     ax.axvline(x=0, color="blue", linestyle="--")
 
     ax.set_xlabel(
-        "Percent change in incidence per\n1%  increase in previous outbreak size"
+        "% change in outbreak size per\n1%  increase in previous outbreak size"
     )
     ax.set_ylabel("Density")
 
@@ -298,7 +305,7 @@ def plot_medical_exemption_coefficients(df, fig, ax):
     ax.set_xticks(x)
     ax.set_xticklabels(["All data", "ME ≤10%", "ME ≤5%"])
     ax.set_ylabel(
-        "Percent change in outbreak size per\n1%  increase in medical exemptions"
+        "% change in outbreak size per\n1%  increase in medical exemptions"
     )
     ax.legend(loc=(0.03, 0.78))
 
@@ -344,7 +351,7 @@ def plot_neighbors_significance(df, fig, ax):
     ax.axvline(x=0, color="blue", linestyle="--")
 
     ax.set_xlabel(
-        "Percent change in incidence per 1% increase\nin neighboring counties' MMR coverage"
+        "% change in outbreak size per 1% increase\nin neighboring counties' MMR coverage"
     )
     ax.set_ylabel("Density")
 

@@ -80,7 +80,7 @@ if __name__ == "__main__":
 
     df = df.with_columns(
         oddities_2025=pl.when(
-            (pl.col("cases_outbreak") <= 5)
+            (pl.col("cases_outbreak") <= 10)
             # pl.when(
             #     (
             #         (pl.col("state") == "South Carolina")

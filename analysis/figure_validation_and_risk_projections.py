@@ -10,6 +10,7 @@ import geopandas as gpd
 import jax.numpy as jnp
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
+import matplotlib.ticker as mtick
 import numpy as np
 import pandas as pd
 import polars as pl
@@ -30,38 +31,6 @@ rc("font", **font)
 # read analysis params yaml
 with open("params.yml", "r") as f:
     params = yaml.safe_load(f)
-
-
-def setup_plot(nrows, ncols, figsize=None):
-    fig, ax = plt.subplots(
-        nrows,
-        ncols,
-        figsize=(
-            figsize if figsize is not None else (10 * ncols, 7.5 * nrows)
-        ),
-    )
-    if nrows * ncols == 1:
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
-        ax.get_xaxis().tick_bottom()
-        ax.get_yaxis().tick_left()
-        ax.tick_params(axis="x", direction="out")
-        ax.tick_params(axis="y", direction="out")
-        for spine in ax.spines.values():
-            spine.set_position(("outward", 5))
-        ax.set_axisbelow(True)
-        return fig, ax
-    for temp in ax.flatten():  # type: ignore
-        temp.spines["top"].set_visible(False)
-        temp.spines["right"].set_visible(False)
-        temp.get_xaxis().tick_bottom()
-        temp.get_yaxis().tick_left()
-        temp.tick_params(axis="x", direction="out")
-        temp.tick_params(axis="y", direction="out")
-        for spine in temp.spines.values():
-            spine.set_position(("outward", 5))
-        temp.set_axisbelow(True)
-    return fig, ax
 
 
 def plot_total_cases_over_time(df_observed, all_counties, samples, fig, ax):
@@ -253,7 +222,7 @@ def plot_risk_predictions_by_county(df, samples, background_samples, fig, ax):
 
 def plot_future_scenario_cases(
     future_years,
-    scenarios,
+    plot_scenarios,
     scenario_colors,
     all_future_samples,
     importation_samples,
@@ -263,24 +232,23 @@ def plot_future_scenario_cases(
 ):
     scenario_labels = {
         "baseline": "Vaccination trends continue",
-        "targeted_worsening": "Vaccination declines accelerate",
-        "universal_worsening": "Universal declines",
-        "targeted_improvement": "Vaccination declines stagnate",
-        "universal_improvement": "Universal improvement",
+        "targeted_worsening": "Vaccinations universally decline",
+        "universal_worsening": "Vaccinations universally decline by 50% more",
+        "targeted_improvement": "Universal 95% coverage by 2030",
+        "universal_improvement": "1% improvement year-over-year",
     }
 
-    # Fixed order: worsening left, baseline center, improvement right
-    plot_scenarios = ["targeted_worsening", "baseline", "targeted_improvement"]
+    WORSENING_SCENARIOS = {"targeted_worsening", "universal_worsening"}
+    IMPROVING_SCENARIOS = {"targeted_improvement", "universal_improvement"}
+
     n_scenarios = len(plot_scenarios)
 
-    # Wider violins with more separation
     width = 0.25
-    gap = 0.30  # total spread per year group
+    gap = 0.30
     offsets = np.linspace(-gap, gap, n_scenarios)
 
-    # Store combined samples and violin tops per (scenario, year) for annotation
     combined_samples = {}
-    violin_tops = {}  # 97.5th percentile y value for each violin
+    violin_tops = {}
 
     vlns = []
     labels = []
@@ -289,8 +257,26 @@ def plot_future_scenario_cases(
         for y_idx, year in enumerate(future_years):
             x_pos = y_idx + offsets[s_idx]
 
-            raw = all_future_samples[(scenario, year)]
-            combined = raw * importation_samples
+            raw = all_future_samples[
+                (scenario, year)
+            ]  # (n_samples, n_counties)
+
+            # Apply monotonicity constraints at county level, sample-by-sample,
+            # relative to 2026 baseline, before multiplying by importation samples
+            if (
+                scenario in WORSENING_SCENARIOS
+                and ("baseline", 2026) in all_future_samples
+            ):
+                baseline_raw_2026 = all_future_samples[("baseline", 2026)]
+                raw = jnp.maximum(raw, baseline_raw_2026)
+            elif (
+                scenario in IMPROVING_SCENARIOS
+                and ("baseline", 2026) in all_future_samples
+            ):
+                baseline_raw_2026 = all_future_samples[("baseline", 2026)]
+                raw = jnp.minimum(raw, baseline_raw_2026)
+
+            combined = raw * importation_samples + importation_samples
             combined = jnp.sum(combined, axis=1) / scale
             combined_samples[(scenario, year)] = combined
 
@@ -337,113 +323,17 @@ def plot_future_scenario_cases(
                 capthick=2,
             )
 
+            print(
+                f"Year {year}, Scenario {scenario}: "
+                f"2.5th={lower:.1f}, 25th={jnp.percentile(combined, 25):.1f}, "
+                f"50th={jnp.median(combined):.1f}, 75th={jnp.percentile(combined, 75):.1f}, "
+                f"97.5th={upper:.1f}"
+            )
+
         labels.append(scenario_labels[scenario])
         vlns.append(vln)  # type: ignore
 
-    # Annotation brackets: sit just above the tops of the two violins being compared
-    # Bracket height is the max of the two violin tops plus a small padding
-    y_min, y_max = ax.get_ylim()
-    y_range = y_max - y_min
-    tick_len = y_range * 0.02  # length of downward ticks
-    pad = y_range * 0.05  # gap between violin top and bracket
-    text_pad = y_range * 0.015  # gap between bracket and text
-
-    for y_idx, year in enumerate(future_years):
-        baseline_samples = combined_samples[("baseline", year)]
-        worsening_samples = combined_samples[("targeted_worsening", year)]
-        improvement_samples = combined_samples[("targeted_improvement", year)]
-
-        # Paired differences (same posterior draw index, no mixing)
-        diff_worsening = worsening_samples - baseline_samples
-        diff_improvement = improvement_samples - baseline_samples
-
-        for tier, (
-            diff,
-            left_scenario,
-            right_scenario,
-            label_color,
-        ) in enumerate(
-            [
-                (
-                    diff_worsening,
-                    "targeted_worsening",
-                    "baseline",
-                    scenario_colors["targeted_worsening"],
-                ),
-                (
-                    diff_improvement,
-                    "baseline",
-                    "targeted_improvement",
-                    scenario_colors["targeted_improvement"],
-                ),
-            ]
-        ):
-            med = int(round(float(jnp.median(diff))))
-
-            s_idx_left = plot_scenarios.index(left_scenario)
-            s_idx_right = plot_scenarios.index(right_scenario)
-            x_left = y_idx + offsets[s_idx_left]
-            x_right = y_idx + offsets[s_idx_right]
-            x_mid = (x_left + x_right) / 2
-
-            # Tier 0 (worsening) higher, tier 1 (improvement) lower
-            tier_spacing = y_range * 0.10
-            base_height = max(
-                violin_tops[(left_scenario, year)],
-                violin_tops[(right_scenario, year)],
-            )
-            y_bracket = base_height + pad + (1 - tier) * tier_spacing
-
-            # Colored bracket
-            ax.plot(
-                [x_left, x_right],
-                [y_bracket, y_bracket],
-                color=label_color,
-                lw=1.5,
-                zorder=5,
-                alpha=0.8,
-            )
-            ax.plot(
-                [x_left, x_left],
-                [y_bracket, y_bracket - tick_len],
-                color=label_color,
-                lw=1.5,
-                zorder=5,
-                alpha=0.8,
-            )
-            ax.plot(
-                [x_right, x_right],
-                [y_bracket, y_bracket - tick_len],
-                color=label_color,
-                lw=1.5,
-                zorder=5,
-                alpha=0.8,
-            )
-
-            ax.text(
-                x_mid,
-                y_bracket + text_pad,
-                f"Δ={med:d}",
-                ha="center",
-                va="bottom",
-                color=label_color,
-            )
-
-        # Update y-limit calculation
-        highest_bracket = max(
-            max(
-                violin_tops[("targeted_worsening", y)],
-                violin_tops[("baseline", y)],
-            )
-            + pad
-            + tier_spacing  # type: ignore
-            for y in future_years
-        )
-    ax.set_ylim(
-        0,
-        highest_bracket + pad + text_pad + y_range * 0.12,  # type: ignore
-    )
-
+    ax.set_ylim(0)
     ax.legend(
         handles=[
             vlns[0]["bodies"][0],
@@ -451,11 +341,15 @@ def plot_future_scenario_cases(
             vlns[2]["bodies"][0],
         ],
         labels=labels,
+        loc=(0, 0.8),
     )
     ax.set_xticks(range(len(future_years)))
     ax.set_xticklabels(future_years)
     ax.set_xlabel("Year")
     ax.set_ylabel("Projected cases (N)")
+    ax.set_yscale("log")
+    ax.set_ylim(50)
+    ax.yaxis.set_major_formatter(mtick.StrMethodFormatter("{x:,.0f}"))
 
 
 def map_fips_code_data(
@@ -678,6 +572,82 @@ def map_fips_code_data(
     return fig, ax
 
 
+def create_supplemental_future_projections_figure(
+    future_years,
+    scenarios,
+    scenario_colors,
+    all_future_samples,
+    importation_samples,
+    scale,
+    output_path,
+):
+    """
+    Create a standalone figure showing alternative future projection scenarios.
+
+    Parameters
+    ----------
+    future_years : list
+        Years to plot (e.g., [2026, 2027, 2028, 2029, 2030])
+    scenarios : list
+        Scenario names to include in the plot
+    scenario_colors : dict
+        Mapping of scenario names to colors
+    all_future_samples : dict
+        Dictionary with (scenario, year) keys containing sample arrays
+    importation_samples : array
+        Importation probability samples
+    scale : float
+        Scaling factor for predictions
+    output_path : str
+        Path to save the figure (without extension)
+    """
+    # Create figure with single subplot
+    fig, ax = plt.subplots(1, 1, figsize=(15, 7.5))
+
+    # Apply standard styling
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.get_xaxis().tick_bottom()
+    ax.get_yaxis().tick_left()
+    ax.tick_params(axis="x", direction="out")
+    ax.tick_params(axis="y", direction="out")
+    for spine in ax.spines.values():
+        spine.set_position(("outward", 5))
+    ax.set_axisbelow(True)
+
+    # Plot the scenarios
+    plot_future_scenario_cases(
+        future_years=future_years,
+        plot_scenarios=scenarios,
+        scenario_colors=scenario_colors,
+        all_future_samples=all_future_samples,
+        importation_samples=importation_samples,
+        scale=scale,
+        fig=fig,
+        ax=ax,
+    )
+
+    fig.tight_layout()
+
+    # Save in both formats
+    fig.savefig(
+        f"{output_path}.png",
+        dpi=300,
+        bbox_inches="tight",
+    )
+    fig.savefig(
+        f"{output_path}.pdf",
+        dpi=300,
+        bbox_inches="tight",
+    )
+
+    plt.close(fig)
+
+    print(
+        f"Supplemental figure saved to {output_path}.png and {output_path}.pdf"
+    )
+
+
 if __name__ == "__main__":
     # Build figure with subplots a-d in a 2x2 grid and e spanning the full bottom row
     fig = plt.figure(figsize=(20, 22.5))
@@ -813,7 +783,9 @@ if __name__ == "__main__":
         importation_samples_year = importation_samples_observed[
             :, mask.to_numpy()
         ]
-        samples_year = samples_year * importation_samples_year
+        samples_year = (
+            samples_year * importation_samples_year + importation_samples_year
+        )
         true = df_train_observed.filter(pl.col("validation_year") == year)[
             "cases"
         ].sum()
@@ -829,7 +801,9 @@ if __name__ == "__main__":
         mask = all_counties["validation_year"] == year
         samples_year = samples[:, mask.to_numpy()]
         importation_samples_year = importation_samples[:, mask.to_numpy()]
-        samples_year = samples_year * importation_samples_year
+        samples_year = (
+            samples_year * importation_samples_year + importation_samples_year
+        )
         samples_year = jnp.sum(samples_year, axis=1)
         print(
             f"Year {year} total predicted cases: 2.5th={jnp.percentile(samples_year, 2.5)}, "
@@ -841,14 +815,19 @@ if __name__ == "__main__":
     scale = predicted_full / observed
     scale = np.mean(scale)
 
-    scale_2025 = (
-        predicted_full[validation_years.index(2025)]
-        / observed[validation_years.index(2025)]
-    )
+    scale_2025 = predicted_full[-1] / observed[-1]
 
-    samples_unconditioned = samples * importation_samples
+    # this is an important value, so let's save it
+    with open(
+        os.path.join(output_dir, "scale_2025.pkl"),
+        "wb",
+    ) as f:
+        pickle.dump(scale_2025, f)
+
+    samples_unconditioned = samples * importation_samples + importation_samples
     samples_observed_unconditioned = (
         samples_observed * importation_samples_observed
+        + importation_samples_observed
     )
     samples_scaled = samples_unconditioned / scale
     samples_observed_scaled = samples_observed_unconditioned / scale
@@ -884,10 +863,13 @@ if __name__ == "__main__":
 
     ranking_method = "average"
     samples_ranked = stats.rankdata(
-        jnp.mean(samples_scaled, axis=0),
+        samples_scaled,
+        axis=1,
         method=ranking_method,
     )
-    samples_ranked = samples_ranked / samples_ranked.max() * 100
+    samples_ranked = samples_ranked / samples_ranked.max(keepdims=True) * 100
+
+    samples_ranked = np.mean(samples_ranked, axis=0)
 
     observed_ranked = samples_ranked[all_counties["type"] == "train"]
     unobserved_ranked = samples_ranked[all_counties["type"] == "projection"]
@@ -937,10 +919,10 @@ if __name__ == "__main__":
     )
     map_fips_code_data(
         df["fips"],
-        df["median_unconditioned_risk_rank"],
+        df["unconditioned_count_rank"],
         fig,
         ax[1, 1],
-        cbar_label="Outbreak size percentile",
+        cbar_label="Outbreak risk percentile",
         cbar_type="percentile_risk",
         point_data=None,
     )
@@ -967,10 +949,10 @@ if __name__ == "__main__":
     ]
     scenario_colors = {
         "baseline": "#525252",
-        "targeted_worsening": "#d94701",
-        "universal_worsening": "#8c2d04",
-        "targeted_improvement": "#41ab5d",
-        "universal_improvement": "#006d2c",
+        "targeted_worsening": "#8c2d04",
+        "universal_worsening": "#d94701",
+        "targeted_improvement": "#006d2c",
+        "universal_improvement": "#41ab5d",
     }
 
     # Load future_base and restrict to counties present in the scenario pkl
@@ -1055,12 +1037,25 @@ if __name__ == "__main__":
             )
             all_future_samples[(scenario, future_year)] = loaded
 
+    with open(
+        os.path.join(
+            output_dir,
+            "import_scaler_2025.pkl",
+        ),
+        "rb",
+    ) as f:
+        import_scaler_2025 = pickle.load(f)
+
+    plot_scenarios = ["targeted_worsening", "baseline", "targeted_improvement"]
+
     plot_future_scenario_cases(
         future_years=future_years_plot,
-        scenarios=scenarios_ordered,
+        plot_scenarios=plot_scenarios,
         scenario_colors=scenario_colors,
         all_future_samples=all_future_samples,
-        importation_samples=importation_samples_future,
+        importation_samples=jnp.minimum(
+            importation_samples_future * import_scaler_2025, 1
+        ),
         scale=scale_2025,
         fig=fig,
         ax=ax_e,
@@ -1077,4 +1072,25 @@ if __name__ == "__main__":
         os.path.join(fig_dir, "figure_validation_and_risk_projections.pdf"),
         dpi=300,
         bbox_inches="tight",
+    )
+
+    # Create supplemental figure with alternative scenarios
+    alternative_scenarios = [
+        "universal_worsening",
+        "baseline",
+        "universal_improvement",
+    ]
+
+    create_supplemental_future_projections_figure(
+        future_years=future_years_plot,
+        scenarios=alternative_scenarios,
+        scenario_colors=scenario_colors,
+        all_future_samples=all_future_samples,
+        importation_samples=jnp.minimum(
+            importation_samples_future * import_scaler_2025, 1
+        ),
+        scale=scale_2025,
+        output_path=os.path.join(
+            fig_dir, "figure_supplemental_future_projections"
+        ),
     )

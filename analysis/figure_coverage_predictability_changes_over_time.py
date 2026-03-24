@@ -588,75 +588,76 @@ def plot_coverage_various_models(df, fig, ax):
 
     ax.set_xlabel("Year")
     ax.set_ylabel(
-        "% change in incidence rate per 1%\nincrease in MMR vaccine coverage"
+        "% change in outbreak size per 1%\nincrease in MMR vaccine coverage"
     )
     ax.legend(loc=(0.2, 0.70))
 
     return fig, ax
 
 
-def plot_effect_over_time(samples, df, years_in_order, fig, ax):
-    # scale by standard deviation to make it interpretable
+def plot_effect_over_time(
+    samples_16_17, samples_2025, df_16_17, df_2025, years_in_order, fig, ax
+):
+    def compute_year_effects(samples, df):
+        samples = samples["effects_over_time_and_group"][:, :, 0]
+        std_wh = df["estimated_mmr_cov"].to_numpy().std()
+        samples_wh = samples / std_wh
+        # exponentiate and multiply by 100
+        samples_wh = jnp.exp(samples_wh) * 100
+        # to express as percent change
+        samples_wh = samples_wh - 100
 
-    exclude_16_17 = pl.read_csv(
-        os.path.join(output_dir, "exclude_16_17.csv"),
-    )
-    df = df.with_columns(
-        year_county_state=pl.col("year").cast(pl.String)
-        + pl.col("county")
-        + pl.col("state")
-    )
+        # collect the values by years
+        median_effect = np.array([])
+        lower_effect = np.array([])
+        upper_effect = np.array([])
+        years_all_out = range(
+            int(min(years_in_order)), int(max(years_in_order)) + 1
+        )
+        for year in years_all_out:
+            mask = df["year"].is_in(year).to_jax()
+            year_samples = samples_wh[:, mask]
+            # simple average
+            year_samples = year_samples.mean(
+                axis=1
+            )  # average across county-years in each sample
+            median_effect = np.append(
+                median_effect, float(jnp.median(year_samples, axis=0))
+            )
+            lower_effect = np.append(
+                lower_effect, float(jnp.quantile(year_samples, 0.025, axis=0))
+            )
+            upper_effect = np.append(
+                upper_effect, float(jnp.quantile(year_samples, 0.975, axis=0))
+            )
 
-    df = df.filter(
-        ~pl.col("year_county_state").is_in(exclude_16_17["year_county_state"])
-    )
+        return median_effect, lower_effect, upper_effect
 
-    samples = samples["effects_over_time_and_group"][:, :, 0]
-    std_wh = df["estimated_mmr_cov"].to_numpy().std()
-    samples_wh = samples / std_wh
-    # exponentiate and multiply by 100
-    samples_wh = jnp.exp(samples_wh) * 100
-    # to express as percent change
-    samples_wh = samples_wh - 100
-
-    # collect the values by years
-    median_effect = np.array([])
-    lower_effect = np.array([])
-    upper_effect = np.array([])
     years_all_out = range(
         int(min(years_in_order)), int(max(years_in_order)) + 1
     )
-    for year in years_all_out:
-        mask = df["year"].is_in(year).to_jax()
-        samples = samples_wh[:, mask]
-        # average weighted by cases
-        # samples = (
-        #     samples * mu[:, mask] / mu[:, mask].sum(axis=1, keepdims=True)
-        # )
-        # samples = samples.sum(axis=1)
-        # simple average
-        samples = samples.mean(
-            axis=1
-        )  # average across county-years in each sample
-        median_effect = np.append(
-            median_effect, float(jnp.median(samples, axis=0))
-        )
-        lower_effect = np.append(
-            lower_effect, float(jnp.quantile(samples, 0.025, axis=0))
-        )
-        upper_effect = np.append(
-            upper_effect, float(jnp.quantile(samples, 0.975, axis=0))
-        )
 
-    n = 2  # smoothing window size
+    median_16_17, lower_16_17, upper_16_17 = compute_year_effects(
+        samples_16_17, df_16_17
+    )
+    median_2025, lower_2025, upper_2025 = compute_year_effects(
+        samples_2025, df_2025
+    )
+
+    # average the year-level estimates across the two variants
+    median_effect = (median_16_17 + median_2025) / 2
+    lower_effect = (lower_16_17 + lower_2025) / 2
+    upper_effect = (upper_16_17 + upper_2025) / 2
+
+    n = 3  # smoothing window size
     median_effect_expanded = jnp.convolve(
-        median_effect, jnp.ones(n) / n, mode="same"
+        jnp.pad(median_effect, (n - 1, 0)), jnp.ones(n) / n, mode="valid"
     )
     lower_effect_expanded = jnp.convolve(
-        lower_effect, jnp.ones(n) / n, mode="same"
+        jnp.pad(lower_effect, (n - 1, 0)), jnp.ones(n) / n, mode="valid"
     )
     upper_effect_expanded = jnp.convolve(
-        upper_effect, jnp.ones(n) / n, mode="same"
+        jnp.pad(upper_effect, (n - 1, 0)), jnp.ones(n) / n, mode="valid"
     )
 
     ax.fill_between(
@@ -672,7 +673,7 @@ def plot_effect_over_time(samples, df, years_in_order, fig, ax):
 
     ax.set_xlabel("Year")
     ax.set_ylabel(
-        "% change in incidence rate per 1%\nincrease in MMR vaccine coverage"
+        "% change in outbreak size per 1%\nincrease in MMR vaccine coverage"
     )
 
     return fig, ax
@@ -744,11 +745,29 @@ if __name__ == "__main__":
     with open(
         os.path.join(
             output_dir,
-            "predictive_random_walk_poisson_CAR_time_and_group_varying_2025_oddities=False_exclude_16_17_no_2025_oddities.pkl",
+            "predictive_random_walk_poisson_CAR_time_and_group_varying_2025_oddities=True_exclude_16_17.pkl",
         ),
         "rb",
     ) as file:
-        predictive_samples = pickle.load(file)
+        predictive_samples_1617 = pickle.load(file)
+
+    with open(
+        os.path.join(
+            output_dir,
+            "predictive_random_walk_poisson_CAR_time_and_group_varying_2025_oddities=False_no_2025_oddities.pkl",
+        ),
+        "rb",
+    ) as file:
+        predictive_samples_2025 = pickle.load(file)
+
+    exclude_16_17 = pl.read_csv(
+        os.path.join(output_dir, "exclude_16_17.csv"),
+    )
+    df = df.with_columns(
+        year_county_state=pl.col("year").cast(pl.String)
+        + pl.col("county")
+        + pl.col("state")
+    )
 
     # plot effect over time
     ax[1, 1].text(  # type: ignore
@@ -763,8 +782,14 @@ if __name__ == "__main__":
     )
 
     plot_effect_over_time(
-        predictive_samples,
-        df,
+        predictive_samples_1617,
+        predictive_samples_2025,
+        df.filter(
+            ~pl.col("year_county_state").is_in(
+                exclude_16_17["year_county_state"].to_list()
+            )
+        ),
+        df.filter(~pl.col("oddities_2025")),
         list([2011, 2012.5, 2014.5, 2016.5, 2018.5, 2020.5, 2022.5, 2025]),
         fig,
         ax[1, 1],  # type: ignore
