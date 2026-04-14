@@ -160,7 +160,7 @@ def plot_outbreak_identification_rate(
         linestyle="--",
     )
 
-    ax_sensitivity.legend(loc=(0.40, 0.0))
+    ax_sensitivity.legend(loc=(0.40, 0.0), edgecolor="black")
     ax_sensitivity.set_xlabel("MMR vaccine coverage (%)")
     ax_sensitivity.set_ylabel("True positive rate (%)")
     ax_sensitivity.set_ylim(0)

@@ -264,6 +264,37 @@ def plot_coverage_distribution(
         color="green",
     )
 
+    # Add significance bar between post-COVID 0 cases and ≥20 cases
+    # Position 0 corresponds to "0 cases", position 4 corresponds to "≥20 cases"
+    x1 = 0 + offset  # Position for "0" cases (green/post)
+    x2 = 4 + offset  # Position for "≥20" cases (green/post)
+
+    # Get the max y-value from both distributions to place the bar above them
+    y_max = max(
+        max(data_post[0]) if len(data_post[0]) > 0 else 0,
+        max(data_post[4]) if len(data_post[4]) > 0 else 0,
+    )
+    bar_height = y_max + 1
+
+    # Draw the significance bar
+    ax.plot(
+        [x1, x1, x2, x2],
+        [bar_height - 0.5, bar_height, bar_height, bar_height - 0.5],
+        "k-",
+        linewidth=1.5,
+    )
+
+    # Add the asterisk in the middle
+    ax.text(
+        (x1 + x2) / 2,
+        bar_height + 0.5,
+        "*",
+        ha="center",
+        va="bottom",
+        fontsize=16,
+        fontweight="bold",
+    )
+
     ax.set_xticks(range(len(data_pre)))
     ax.set_xticklabels(
         [
@@ -279,7 +310,102 @@ def plot_coverage_distribution(
         [violinparts1["bodies"][0], violinparts2["bodies"][0]],
         ["2011-2020", "2021-2025"],
         loc=(0.6, 0.01),
+        edgecolor="black",
     )
+    ax.axhline(y=vaccination_threshold, color="k", linestyle="--")
+    ax.set_ylabel("MMR vaccine coverage (%)")
+    ax.set_xlabel("Outbreak size (N)")
+    # ax.set_ylim(top=100)
+
+    return fig, ax
+
+
+# plot for the vaccination coverage in county-years with >= 10 cases
+def plot_coverage_distribution_all_years(
+    df,
+    vaccination_threshold,
+    fig,
+    ax,
+    vaccination_metric="estimated_mmr_cov",
+):
+    # want to make violin plots by outbreak size category
+    df = df.with_columns(
+        outbreak_size_buckets=pl.col("cases_outbreak").cut(
+            [0, 4, 9, 19],
+            labels=["-1", "0", "1", "2", "3"],
+            left_closed=False,
+        ),
+    )
+    df_correlation = df.filter(pl.col("cases_outbreak") >= 1)
+    print(
+        stats.spearmanr(
+            df_correlation[vaccination_metric],
+            df_correlation["cases_outbreak"],
+        )
+    )
+
+    df = df.group_by(["outbreak_size_buckets"]).agg(
+        pl.col(vaccination_metric), pl.col("cases_outbreak")
+    )
+    df = df.sort(by=["outbreak_size_buckets"])
+    df = df.with_columns(
+        avg_cov=pl.col(vaccination_metric).list.mean(),
+        median_cov=pl.col(vaccination_metric).list.median(),
+        lower_cov=pl.col(vaccination_metric).map_elements(
+            lambda x: np.percentile(x, 25)
+        ),
+        upper_cov=pl.col(vaccination_metric).map_elements(
+            lambda x: np.percentile(x, 75)
+        ),
+    )
+
+    data = df.to_dict()[vaccination_metric].to_list()
+    medians = df.to_dict()["median_cov"].to_numpy()
+    lowers = df.to_dict()["lower_cov"].to_numpy()
+    uppers = df.to_dict()["upper_cov"].to_numpy()
+    means = df.to_dict()["avg_cov"].to_list()
+
+    # boxplot and swarmplot of coverage distributions
+    violinparts = ax.violinplot(
+        data,
+        positions=range(len(data)),
+        widths=0.3,
+        showextrema=False,
+    )
+
+    for pc in violinparts["bodies"]:
+        pc.set(facecolor="grey")
+
+    ax.errorbar(
+        x=range(len(medians)),
+        y=medians,
+        yerr=[medians - lowers, uppers - medians],
+        fmt="o",
+        capsize=10,
+        capthick=2,
+        color="grey",
+    )
+
+    # add means as stars
+    ax.scatter(
+        range(len(means)),
+        means,
+        marker="*",
+        s=90,
+        color="grey",
+    )
+
+    ax.set_xticks(range(len(data)))
+    ax.set_xticklabels(
+        [
+            "0",
+            "1-4",
+            "5-9",
+            "10-19",
+            "≥20",
+        ]
+    )
+
     ax.axhline(y=vaccination_threshold, color="k", linestyle="--")
     ax.set_ylabel("MMR vaccine coverage (%)")
     ax.set_xlabel("Outbreak size (N)")
@@ -401,57 +527,59 @@ def plot_outbreak_identification_rate(df, fig, ax):
 
     # add a cdf of the coverage distribution across all county-years in the two time periods
     # add a second axis
-    min_coverage = min(coverage_old.min(), coverage_new.min())
-    ax2 = ax.twinx()
-    coverage_old_hist = np.histogram(
-        coverage_old, range=(min_coverage, 100), bins=200, density=True
-    )
-    coverage_new_hist = np.histogram(
-        coverage_new, range=(min_coverage, 100), bins=200, density=True
-    )
+    # min_coverage = min(coverage_old.min(), coverage_new.min())
+    # ax2 = ax.twinx()
+    # coverage_old_hist = np.histogram(
+    #     coverage_old, range=(min_coverage, 100), bins=200, density=True
+    # )
+    # coverage_new_hist = np.histogram(
+    #     coverage_new, range=(min_coverage, 100), bins=200, density=True
+    # )
 
-    ax2.bar(
-        coverage_old_hist[1][:-1],
-        np.cumsum(coverage_old_hist[0] / coverage_old_hist[0].sum()) * 100,
-        width=np.diff(coverage_old_hist[1]),
-        color="blue",
-        alpha=0.2,
-    )
-    ax2.bar(
-        coverage_new_hist[1][:-1],
-        np.cumsum(coverage_new_hist[0] / coverage_new_hist[0].sum()) * 100,
-        width=np.diff(coverage_new_hist[1]),
-        color="green",
-        alpha=0.2,
-    )
+    # ax2.bar(
+    #     coverage_old_hist[1][:-1],
+    #     np.cumsum(coverage_old_hist[0] / coverage_old_hist[0].sum()) * 100,
+    #     width=np.diff(coverage_old_hist[1]),
+    #     color="blue",
+    #     alpha=0.2,
+    # )
+    # ax2.bar(
+    #     coverage_new_hist[1][:-1],
+    #     np.cumsum(coverage_new_hist[0] / coverage_new_hist[0].sum()) * 100,
+    #     width=np.diff(coverage_new_hist[1]),
+    #     color="green",
+    #     alpha=0.2,
+    # )
 
-    # set some x axis limits
-    ax2.set_xlim(89.7, 100.0)
-    ax2.set_ylim(0, 101)
-    # set ticks at every two integer coverage values
-    ax2.set_xticks(range(90, 102, 2))
-    # make ax2 look good
-    ax2.set_ylabel(
-        "County-years with MMR vaccine\n" + r"coverage less than $x$ (%)",
-        rotation=-90,
-        labelpad=45,
-    )
-    ax2.spines["top"].set_visible(False)
-    ax2.spines["left"].set_visible(False)
-    ax2.get_xaxis().tick_bottom()
-    ax2.get_yaxis().tick_right()
-    ax2.tick_params(axis="x", direction="out")
-    ax2.tick_params(axis="y", direction="out")
-    # offset the spines
-    for spine in ax2.spines.values():
-        spine.set_position(("outward", 5))
-    # put the grid behind
-    ax2.set_axisbelow(True)
+    # # set some x axis limits
+    # ax2.set_xlim(89.7, 100.0)
+    # ax2.set_ylim(0, 101)
+    # # set ticks at every two integer coverage values
+    # ax2.set_xticks(range(90, 102, 2))
+    # # make ax2 look good
+    # ax2.set_ylabel(
+    #     "County-years with MMR vaccine\n" + r"coverage less than $x$ (%)",
+    #     rotation=-90,
+    #     labelpad=45,
+    # )
+    # ax2.spines["top"].set_visible(False)
+    # ax2.spines["left"].set_visible(False)
+    # ax2.get_xaxis().tick_bottom()
+    # ax2.get_yaxis().tick_right()
+    # ax2.tick_params(axis="x", direction="out")
+    # ax2.tick_params(axis="y", direction="out")
+    # # offset the spines
+    # for spine in ax2.spines.values():
+    #     spine.set_position(("outward", 5))
+    # # put the grid behind
+    # ax2.set_axisbelow(True)
 
-    ax.legend(loc=(0.25, 0.0), labelspacing=0.2)
+    ax.legend(loc=(0.3, 0.0), labelspacing=0.2, edgecolor="black")
     ax.set_xlabel("MMR vaccine coverage (%)")
-    ax.set_ylabel("Identification rate (sensitivity) (%)")
+    ax.set_ylabel("Outbreaks below vaccine threshold (%)")
     ax.set_ylim(0, 101)
+    ax.set_xlim(89.7, 100.2)
+    ax.set_xticks(range(90, 101, 2))
 
     return df_identification, fig, ax
 
@@ -556,6 +684,12 @@ def plot_coverage_various_models(df, fig, ax):
                 color=colors[model_name],
                 zorder=10,
             )
+            print(
+                f"{model_name} median effects: {model_effects['median_coverage_effect'].to_list()}"
+            )
+            print(
+                f"{model_name} 95% CI: {list(zip(model_effects['lower_coverage_effect'].to_list(), model_effects['upper_coverage_effect'].to_list()))}"
+            )
         else:
             ax.errorbar(
                 [0 + offset, 1 + offset],
@@ -590,7 +724,11 @@ def plot_coverage_various_models(df, fig, ax):
     ax.set_ylabel(
         "% change in outbreak size per 1%\nincrease in MMR vaccine coverage"
     )
-    ax.legend(loc=(0.2, 0.70))
+    ax.legend(
+        loc=(0.25, 0.70),
+        edgecolor="black",
+        title="Model:                                         ",
+    )
 
     return fig, ax
 
@@ -675,6 +813,7 @@ def plot_effect_over_time(
     ax.set_ylabel(
         "% change in outbreak size per 1%\nincrease in MMR vaccine coverage"
     )
+    ax.set_xticks([2011, 2015, 2020, 2025])
 
     return fig, ax
 
@@ -687,6 +826,7 @@ if __name__ == "__main__":
     )
 
     fig, ax = setup_plot(2, 2)  # type: ignore
+    fig_cov, ax_cov = setup_plot(1, 1)  # type: ignore
 
     # coverages and outbreak size relationship changes over time
     ax[0, 0].text(  # type: ignore
@@ -705,6 +845,20 @@ if __name__ == "__main__":
         fig,
         ax[0, 0],  # type: ignore
         vaccination_metric="estimated_mmr_cov",
+    )
+    plot_coverage_distribution_all_years(
+        df,
+        95,
+        fig_cov,
+        ax_cov,  # type: ignore
+        vaccination_metric="estimated_mmr_cov",
+    )
+    fig_cov.savefig(
+        os.path.join(
+            fig_dir, "figure_coverage_distribution_outbreak_size.png"
+        ),
+        dpi=300,
+        bbox_inches="tight",
     )
 
     # threshold analysis -- outbreak identification rate for thresholds

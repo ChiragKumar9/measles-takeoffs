@@ -274,9 +274,9 @@ def map_fips_code_data(
 def coverage_increase_nme_policy_change(df, fig, ax):
     states = {
         "California": 2016,
+        "Connecticut": 2022,
         "Maine": 2021,
         "New York": 2019,
-        "Connecticut": 2022,
     }
 
     all_dfs = []
@@ -441,13 +441,36 @@ def coverage_increase_nme_policy_change(df, fig, ax):
 
         all_dfs.append(temp)
 
+    # Calculate and print average bumps for each state
+    print("\nAverage MMR Coverage Changes by State:")
+    print("=" * 60)
+    for state, year in states.items():
+        state_df = all_dfs[list(states.keys()).index(state)]
+
+        # Policy year change
+        policy_change = (
+            state_df["estimated_mmr_cov_change_policy_year"]
+            .drop_nulls()
+            .mean()
+        )
+        print(f"\n{state} (Policy year: {year}):")
+        print(f"  Policy year change: {policy_change:.2f}%")
+
+        # 1 year after change
+        yr1_change = (
+            state_df["estimated_mmr_cov_change_1yr"].drop_nulls().mean()
+        )
+        print(f"  1 year after: {yr1_change:.2f}%")
+
+    result_df = pl.concat(all_dfs)
+
     result_df = pl.concat(all_dfs)
 
     state_colors = {
         "California": "lightblue",
+        "Connecticut": "orange",
         "Maine": "purple",
         "New York": "darkgreen",
-        "Connecticut": "orange",
     }
 
     for state in states.keys():
@@ -462,9 +485,14 @@ def coverage_increase_nme_policy_change(df, fig, ax):
         )
 
     ax.axhline(0, color="k", ls="--")
-    ax.legend(loc=(0.6, 0.0))
+    ax.set_ylim(-9)
+    ax.legend(
+        loc=(0.57, 0.02), edgecolor="black", title="Counties in:           "
+    )
     ax.set_xlabel("Pre-policy nonmedical exemption rate (%)")
-    ax.set_ylabel("Change in MMR coverage (%)")
+    ax.set_ylabel(
+        "Change in MMR coverage after removal of\nnonmedical exemptions (%)"
+    )
     ax.set_xlim(0)
 
     for year_mode in ["policy_year", "1yr", "2yr"]:
@@ -571,9 +599,9 @@ def coverage_increase_nme_policy_change(df, fig, ax):
     ax.fill_between(x_vals, y_lower, y_upper, color="grey", alpha=0.3)
 
     ax.text(
-        0.05,
+        0.02,
         0.95,
-        f"Slope: {slope:.3f} ({slope_lower:.3f}, {slope_upper:.3f})",
+        f"Slope: {slope:.2f} ({slope_lower:.2f}, {slope_upper:.2f})",
         transform=ax.transAxes,
         fontsize=32,
         verticalalignment="top",
@@ -582,7 +610,7 @@ def coverage_increase_nme_policy_change(df, fig, ax):
         (pl.col("State") == "All states") & (pl.col("Year") == "1 year after")
     )["R2"][0]
     ax.text(
-        0.05,
+        0.02,
         0.85,
         rf"$R^2$: {r2 * 100:.2f}%",
         transform=ax.transAxes,
@@ -644,9 +672,15 @@ def load_importation_samples_future(output_dir):
         "rb",
     ) as f:
         imp_raw = pickle.load(f)
+    with open(
+        os.path.join(output_dir, "empirical_importation_count_samples.pkl"),
+        "rb",
+    ) as f:
+        count_raw = pickle.load(f)
 
     import_df = import_df.with_columns(
-        importation_probability_samples=pl.Series(imp_raw)
+        importation_probability_samples=pl.Series(imp_raw),
+        expected_importations_samples=pl.Series(count_raw),
     )
     import_df = import_df.sort("type").unique(
         subset=["state", "county", "year", "fips"], keep="last"
@@ -656,18 +690,34 @@ def load_importation_samples_future(output_dir):
     )
 
     future_base = future_base.join(
-        import_df.select(["fips", "importation_probability_samples"]),
+        import_df.select(
+            [
+                "fips",
+                "importation_probability_samples",
+                "expected_importations_samples",
+            ]
+        ),
         on="fips",
         how="left",
     )
     assert future_base["importation_probability_samples"].null_count() == 0, (
         "Some future counties missing importation probability samples"
     )
+    assert future_base["expected_importations_samples"].null_count() == 0, (
+        "Some future counties missing importation count samples"
+    )
 
     importation_samples_future = jnp.array(
         np.vstack(future_base["importation_probability_samples"].to_numpy())  # type: ignore
     ).T
-    return importation_samples_future, future_base["fips"].to_list()
+    importation_count_samples_future = jnp.array(
+        np.vstack(future_base["expected_importations_samples"].to_numpy())  # type: ignore
+    ).T
+    return (
+        importation_samples_future,
+        importation_count_samples_future,
+        future_base["fips"].to_list(),
+    )
 
 
 def plot_intervention_effects(
@@ -677,6 +727,7 @@ def plot_intervention_effects(
     baseline_samples_by_year,
     intervention_data,
     importation_samples,
+    importation_count_samples,
     baseline_fips,
     scale,
     fig,
@@ -729,6 +780,7 @@ def plot_intervention_effects(
         )
 
         imp = importation_samples
+        imp_count = importation_count_samples
 
         cumulative_total_by_county = None
         cumulative_baseline_by_county = None
@@ -741,11 +793,11 @@ def plot_intervention_effects(
             b_county = (
                 baseline_samples_by_year[year][:, baseline_col_idx]
                 * imp[:, baseline_col_idx]
-                + imp[:, baseline_col_idx]
+                + imp_count[:, baseline_col_idx]
             ) / scale
             i_county = (
                 pred[:, proj_col_idx] * imp[:, baseline_col_idx]
-                + imp[:, baseline_col_idx]
+                + imp_count[:, baseline_col_idx]
             ) / scale
 
             if intervention in BAN_INTERVENTIONS:
@@ -779,6 +831,26 @@ def plot_intervention_effects(
             cumulative_diffs = jnp.sum(
                 cumulative_total_by_county - cumulative_baseline_by_county,
                 axis=1,
+            )
+
+            # --- Print % cumulative cases averted ---
+            baseline_total = jnp.sum(
+                cumulative_baseline_by_county, axis=1
+            )  # (n_samples,)
+
+            # Cases averted = baseline - intervention (negative diffs = averted)
+            pct_averted = (
+                -cumulative_diffs / baseline_total
+            ) * 100  # (n_samples,)
+
+            med_pct = float(jnp.median(pct_averted))
+            p25_pct = float(jnp.percentile(pct_averted, 2.5))
+            p75_pct = float(jnp.percentile(pct_averted, 97.5))
+
+            print(
+                f"{intervention} | Year {year}: "
+                f"median {med_pct:.2f}% averted "
+                f"[CrI: {p25_pct:.2f}% – {p75_pct:.2f}%]"
             )
 
             x_pos = y_idx + offsets[i_idx]
@@ -830,7 +902,9 @@ def plot_intervention_effects(
     ax.legend(
         handles=[h for h, _ in vln_handles],
         labels=[l for _, l in vln_handles],
-        loc=(0, 0),
+        loc=(0.025, 0.025),
+        edgecolor="black",
+        title="Removal of nonmedical\nexemptions in:",
     )
     ax.yaxis.set_major_formatter(ticker.StrMethodFormatter("{x:,.0f}"))
 
@@ -841,6 +915,7 @@ def plot_coverage_change_vs_cases(
     baseline_samples_by_year,
     intervention_data,
     importation_samples,
+    importation_count_samples,
     baseline_fips,
     scale,
     adjacency_data_path,
@@ -888,6 +963,7 @@ def plot_coverage_change_vs_cases(
 
     fips_to_idx = {f: i for i, f in enumerate(baseline_fips)}
     imp = importation_samples
+    imp_count = importation_count_samples
 
     # Load population data
     pop_df = (
@@ -947,9 +1023,11 @@ def plot_coverage_change_vs_cases(
                     )
 
             # Apply importation to both
-            baseline_samps = baseline_samps * imp[:, b_idx] + imp[:, b_idx]
+            baseline_samps = (
+                baseline_samps * imp[:, b_idx] + imp_count[:, b_idx]
+            )
             intervention_samps = (
-                intervention_samps * imp[:, b_idx] + imp[:, b_idx]
+                intervention_samps * imp[:, b_idx] + imp_count[:, b_idx]
             )
 
             # Calculate incidence (cases per 100,000 population)
@@ -1106,7 +1184,9 @@ def plot_coverage_change_vs_cases(
     cbar.set_ticklabels(tick_labels)
 
     ax.set_xlabel("Initial MMR coverage (%)")
-    ax.set_ylabel("Change in MMR coverage (%)")
+    ax.set_ylabel(
+        "Change in MMR coverage after removal\nof nonmedical exemptions (%)"
+    )
 
     ax.set_xlim(50, 100)
     ax.set_ylim(0)
@@ -1119,6 +1199,7 @@ def create_supplemental_intervention_scatter_figure(
     baseline_samples_by_year,
     intervention_data,
     importation_samples,
+    importation_count_samples,
     baseline_fips,
     scale,
     adjacency_data_path,
@@ -1175,7 +1256,7 @@ def create_supplemental_intervention_scatter_figure(
     # Add subplot labels
     axes[0].text(
         -0.05,
-        1.48,
+        1.08,
         "a",
         transform=axes[0].transAxes,
         fontsize=24,
@@ -1202,6 +1283,7 @@ def create_supplemental_intervention_scatter_figure(
             baseline_samples_by_year=baseline_samples_by_year,
             intervention_data=intervention_data,
             importation_samples=importation_samples,
+            importation_count_samples=importation_count_samples,
             baseline_fips=baseline_fips,
             scale=scale,
             adjacency_data_path=adjacency_data_path,
@@ -1241,6 +1323,7 @@ def create_supplemental_intervention_effects_by_scenario_figure(
     all_scenario_baseline_samples,
     all_scenario_intervention_data,
     importation_samples,
+    importation_count_samples,
     baseline_fips,
     scale,
     output_path,
@@ -1320,6 +1403,7 @@ def create_supplemental_intervention_effects_by_scenario_figure(
             baseline_samples_by_year=all_scenario_baseline_samples[scenario],
             intervention_data=all_scenario_intervention_data[scenario],
             importation_samples=importation_samples,
+            importation_count_samples=importation_count_samples,
             baseline_fips=baseline_fips,
             scale=scale,
             fig=fig,
@@ -1355,7 +1439,7 @@ if __name__ == "__main__":
     # -------------------------------------------------------------------------
     ax[0, 0].text(  # type: ignore
         -0.05,
-        1.08,
+        1.28,
         "a",
         transform=ax[0, 0].transAxes,  # type: ignore
         fontsize=24,
@@ -1369,6 +1453,15 @@ if __name__ == "__main__":
     df = pl.read_csv(
         os.path.join(output_dir, "projection_dataset_2026.csv"),
         schema_overrides={"fips": pl.String},
+    )
+
+    print(df["nonmed_exempt_pct"].describe())
+    print(
+        df.filter(
+            ~pl.col("state").is_in(
+                ["California", "Connecticut", "Maine", "New York"]
+            )
+        )["nonmed_exempt_pct"].describe()
     )
 
     map_fips_code_data(
@@ -1420,9 +1513,11 @@ if __name__ == "__main__":
     with open(os.path.join(output_dir, "scale_2025.pkl"), "rb") as f:
         scale_2025 = pickle.load(f)
 
-    importation_samples_future, baseline_fips = (
-        load_importation_samples_future(output_dir)
-    )
+    (
+        importation_samples_future,
+        importation_count_samples_future,
+        baseline_fips,
+    ) = load_importation_samples_future(output_dir)
 
     baseline_samples_by_year = {}
     for year in FUTURE_YEARS:
@@ -1477,6 +1572,9 @@ if __name__ == "__main__":
         importation_samples=jnp.minimum(
             importation_samples_future * import_scaler_2025, 1
         ),
+        importation_count_samples=(
+            importation_count_samples_future * import_scaler_2025
+        ),
         baseline_fips=baseline_fips,
         scale=scale_2025,
         fig=fig,
@@ -1506,6 +1604,9 @@ if __name__ == "__main__":
         intervention_data=intervention_data,
         importation_samples=jnp.minimum(
             importation_samples_future * import_scaler_2025, 1
+        ),
+        importation_count_samples=(
+            importation_count_samples_future * import_scaler_2025
         ),
         baseline_fips=baseline_fips,
         scale=scale_2025,
@@ -1551,6 +1652,9 @@ if __name__ == "__main__":
         importation_samples=jnp.minimum(
             importation_samples_future * import_scaler_2025, 1
         ),
+        importation_count_samples=(
+            importation_count_samples_future * import_scaler_2025
+        ),
         baseline_fips=baseline_fips,
         scale=scale_2025,
         adjacency_data_path=os.path.join(data_dir, "county_adjacencies.txt"),
@@ -1562,73 +1666,76 @@ if __name__ == "__main__":
         year=2026,
     )
 
-    # # -------------------------------------------------------------------------
-    # # Create supplemental figure: intervention effects across vaccination scenarios
-    # # -------------------------------------------------------------------------
+    # -------------------------------------------------------------------------
+    # Create supplemental figure: intervention effects across vaccination scenarios
+    # -------------------------------------------------------------------------
 
-    # # Define the 4 vaccination scenarios to show
-    # vaccination_scenarios_to_plot = [
-    #     "targeted_worsening",
-    #     "universal_worsening",
-    #     "targeted_improvement",
-    #     "universal_improvement",
-    # ]
+    # Define the 4 vaccination scenarios to show
+    vaccination_scenarios_to_plot = [
+        "targeted_worsening",
+        "universal_worsening",
+        "targeted_improvement",
+        "universal_improvement",
+    ]
 
-    # vaccination_scenario_labels = {
-    #     "targeted_worsening": "Vaccinations universally decline by 100% more",
-    #     "universal_worsening": "Universal Vaccinations universally decline by 50% more",
-    #     "targeted_improvement": "Universal 95% coverage by 2030",
-    #     "universal_improvement": "1% improvement year-over-year",
-    # }
+    vaccination_scenario_labels = {
+        "targeted_worsening": "Vaccinations universally decline by 100% more",
+        "universal_worsening": "Universal Vaccinations universally decline by 50% more",
+        "targeted_improvement": "Universal 95% coverage by 2030",
+        "universal_improvement": "1% improvement year-over-year",
+    }
 
-    # # Load baseline samples for each vaccination scenario
-    # all_scenario_baseline_samples = {}
-    # for vac_scenario in vaccination_scenarios_to_plot:
-    #     all_scenario_baseline_samples[vac_scenario] = {}
-    #     for year in FUTURE_YEARS:
-    #         with open(
-    #             os.path.join(
-    #                 output_dir, f"risk_projections_{vac_scenario}_{year}.pkl"
-    #             ),
-    #             "rb",
-    #         ) as f:
-    #             all_scenario_baseline_samples[vac_scenario][year] = (
-    #                 pickle.load(f)
-    #             )
+    # Load baseline samples for each vaccination scenario
+    all_scenario_baseline_samples = {}
+    for vac_scenario in vaccination_scenarios_to_plot:
+        all_scenario_baseline_samples[vac_scenario] = {}
+        for year in FUTURE_YEARS:
+            with open(
+                os.path.join(
+                    output_dir, f"risk_projections_{vac_scenario}_{year}.pkl"
+                ),
+                "rb",
+            ) as f:
+                all_scenario_baseline_samples[vac_scenario][year] = (
+                    pickle.load(f)
+                )
 
-    # # Load intervention data for each vaccination scenario
-    # all_scenario_intervention_data = {}
-    # for vac_scenario in vaccination_scenarios_to_plot:
-    #     all_scenario_intervention_data[vac_scenario] = {}
-    #     for intervention in INTERVENTIONS:
-    #         all_scenario_intervention_data[vac_scenario][intervention] = {}
-    #         for year in FUTURE_YEARS:
-    #             with open(
-    #                 os.path.join(
-    #                     output_dir,
-    #                     f"risk_projections_{intervention}_{vac_scenario}_{year}.pkl",
-    #                 ),
-    #                 "rb",
-    #             ) as f:
-    #                 all_scenario_intervention_data[vac_scenario][intervention][
-    #                     year
-    #                 ] = pickle.load(f)
+    # Load intervention data for each vaccination scenario
+    all_scenario_intervention_data = {}
+    for vac_scenario in vaccination_scenarios_to_plot:
+        all_scenario_intervention_data[vac_scenario] = {}
+        for intervention in INTERVENTIONS:
+            all_scenario_intervention_data[vac_scenario][intervention] = {}
+            for year in FUTURE_YEARS:
+                with open(
+                    os.path.join(
+                        output_dir,
+                        f"risk_projections_{intervention}_{vac_scenario}_{year}.pkl",
+                    ),
+                    "rb",
+                ) as f:
+                    all_scenario_intervention_data[vac_scenario][intervention][
+                        year
+                    ] = pickle.load(f)
 
-    # create_supplemental_intervention_effects_by_scenario_figure(
-    #     interventions=INTERVENTIONS,
-    #     intervention_labels=INTERVENTION_LABELS,
-    #     future_years=FUTURE_YEARS,
-    #     vaccination_scenarios=vaccination_scenarios_to_plot,
-    #     vaccination_scenario_labels=vaccination_scenario_labels,
-    #     all_scenario_baseline_samples=all_scenario_baseline_samples,
-    #     all_scenario_intervention_data=all_scenario_intervention_data,
-    #     importation_samples=jnp.minimum(
-    #         importation_samples_future * import_scaler_2025, 1
-    #     ),
-    #     baseline_fips=baseline_fips,
-    #     scale=scale_2025,
-    #     output_path=os.path.join(
-    #         fig_dir,
-    #         "figure_supplemental_nme_policies_by_vaccination_scenario",
-    #     ),
-    # )
+    create_supplemental_intervention_effects_by_scenario_figure(
+        interventions=INTERVENTIONS,
+        intervention_labels=INTERVENTION_LABELS,
+        future_years=FUTURE_YEARS,
+        vaccination_scenarios=vaccination_scenarios_to_plot,
+        vaccination_scenario_labels=vaccination_scenario_labels,
+        all_scenario_baseline_samples=all_scenario_baseline_samples,
+        all_scenario_intervention_data=all_scenario_intervention_data,
+        importation_samples=jnp.minimum(
+            importation_samples_future * import_scaler_2025, 1
+        ),
+        importation_count_samples=(
+            importation_count_samples_future * import_scaler_2025
+        ),
+        baseline_fips=baseline_fips,
+        scale=scale_2025,
+        output_path=os.path.join(
+            fig_dir,
+            "figure_supplemental_nme_policies_by_vaccination_scenario",
+        ),
+    )

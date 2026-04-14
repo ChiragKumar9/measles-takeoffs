@@ -62,6 +62,12 @@ with open(
     "rb",
 ) as f:
     samples = pickle.load(f)
+
+with open(
+    os.path.join(output_dir, "empirical_importation_count_samples.pkl"),
+    "rb",
+) as f:
+    count_samples = pickle.load(f)
 import_df = pl.read_csv(
     os.path.join(output_dir, "empirical_importation_probability.csv"),
     schema_overrides={"fips": pl.String},
@@ -69,7 +75,10 @@ import_df = pl.read_csv(
 import_df = import_df.with_columns(
     importation_probability_samples=pl.Series(
         samples["importation_probability_samples"].__array__()
-    )
+    ),
+    expected_importations_samples=pl.Series(  # <-- add
+        count_samples["expected_importations_samples"].__array__()
+    ),
 )
 df = df.join(
     import_df.select(
@@ -82,6 +91,7 @@ df = df.join(
             "importation_probability_upper",
             "importation_probability_median",
             "importation_probability_samples",
+            "expected_importations_samples",
         ]
     ),
     on=["fips", "year", "type"],
@@ -91,13 +101,20 @@ df = df.join(
 assert df["importation_probability_samples"].null_count() == 0, (
     "Missing importation probability samples after join — check fips/year/type alignment"
 )
+assert df["expected_importations_samples"].null_count() == 0, (  # <-- add
+    "Missing importation count samples after join — check fips/year/type alignment"
+)
 
 importation_probability_samples = np.vstack(
     df["importation_probability_samples"].to_numpy()  # type: ignore
 ).T
+importation_count_samples = np.vstack(
+    df["expected_importations_samples"].to_numpy()  # type: ignore
+).T
+
 unconditioned_count_samples = (
     importation_probability_samples * np.array(projections)
-    + importation_probability_samples
+    + importation_count_samples  # <-- was + importation_probability_samples
 )
 
 pop = df["pop"].to_numpy().reshape(1, -1)  # shape: (1, n_counties)

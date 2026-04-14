@@ -101,7 +101,7 @@ def plot_predictions(df, samples, naive_model, fig, ax):
     ax.set_yticks([0, 1, 10, 100], labels=["0", "1", "10", "100"])
     ax.set_xticks([0, 1, 10, 100], labels=["0", "1", "10", "100"])
 
-    ax.legend(loc=(0.0, 0.83))
+    ax.legend(loc=(0.0, 0.83), edgecolor="black")
 
     # Manually set minor tick locations on the x-axis
     minor_x_ticks = [
@@ -311,6 +311,7 @@ def plot_performance_comparison(df, fig, ax):
         [violinparts1["bodies"][0], violinparts2["bodies"][0]],
         ["2011-2020", "2021-2025"],
         loc="upper right",
+        edgecolor="black",
     )
 
     ax.set_xlabel("Outbreak size (cases)")
@@ -525,6 +526,7 @@ def plot_5yr_performance_comparison(df, fig, ax):
     ax.legend(
         [violinparts1["bodies"][0], violinparts2["bodies"][0]],
         ["One year", "Five year"],
+        edgecolor="black",
     )
 
     ax.set_xlabel("Year-to-year change in MMR coverage (%)")
@@ -684,7 +686,7 @@ def plot_ecological_determinants(samples_pre, samples_post, df, fig, ax):
     # line at 0%
     ax.axhline(0, ls="--", color="k")
 
-    ax.legend(loc=(0.01, 0.78))
+    ax.legend(loc=(0.01, 0.78), edgecolor="black")
 
     ax.set_xticks(range(len(all_covariates)))  # type: ignore
     # at a 45 degree angle

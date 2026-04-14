@@ -89,7 +89,7 @@ def plot_car_effect_correlation(samples, fig, ax):
     ax.fill_between(x, 0, prior, color="grey", alpha=0.3)
     ax.set_xlabel("Spatial correlation")
     ax.set_ylabel("Probability density")
-    ax.legend()
+    ax.legend(edgecolor="black")
     ax.set_xlim([-1, 1])
 
 
@@ -633,7 +633,7 @@ def plot_vaccine_vs_spatial(samples, df, adjacency, fig, ax):
     )
 
     # Legend
-    ax.legend(loc=(0.02, 0.85))
+    ax.legend(loc=(0.02, 0.85), edgecolor="black")
 
     # make the x axis look decent
     ax.set_xticks(

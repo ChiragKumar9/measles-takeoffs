@@ -2,13 +2,10 @@ import os
 import pickle
 
 from numpyro import enable_x64
-from scipy import stats
 
 enable_x64()
 
 import jax.numpy as jnp
-import matplotlib.cm as cm
-import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import matplotlib.ticker as tck
 import numpy as np
@@ -105,7 +102,7 @@ def plot_predictions(
     )
 
     ax.set_xlabel("Reported outbreak size (N)")
-    ax.set_ylabel("Predicted outbreak size (N)")
+    ax.set_ylabel("Model-predicted outbreak size (N)")
     ax.set_xscale("symlog")
     ax.set_yscale("symlog")
     ax.plot(
@@ -120,7 +117,7 @@ def plot_predictions(
     ax.set_yticks([0, 1, 10, 100], labels=["0", "1", "10", "100"])
     ax.set_xticks([0, 1, 10, 100], labels=["0", "1", "10", "100"])
 
-    ax.legend(loc=(0.0, 1.0))
+    ax.legend(loc=(0.0, 1.0), edgecolor="black")
 
     # Manually set minor tick locations on the x-axis
     minor_x_ticks = [
@@ -175,10 +172,10 @@ def plot_predictions(
         R2 = jnp.corrcoef(df["cases_outbreak"].to_jax(), median)[0, 1] ** 2
         R2 = R2 * 100  # as a percentage
         ax.text(
-            0.0001 * max(df["cases_outbreak"].max(), upper.max()),
-            0.35 * max(df["cases_outbreak"].max(), upper.max()),
+            0.00025 * max(df["cases_outbreak"].max(), upper.max()),
+            0.3 * max(df["cases_outbreak"].max(), upper.max()),
             f"$R^2$ = {R2:.2f}%",
-            fontsize=26,
+            fontsize=30,
             color="green",
         )
 
@@ -191,10 +188,10 @@ def plot_predictions(
         )
         R2 = R2 * 100  # as a percentage
         ax.text(
-            0.0001 * max(df["cases_outbreak"].max(), upper.max()),
-            0.63 * max(df["cases_outbreak"].max(), upper.max()),
+            0.00025 * max(df["cases_outbreak"].max(), upper.max()),
+            0.61 * max(df["cases_outbreak"].max(), upper.max()),
             f"$R^2$ = {R2:.2f}%",
-            fontsize=26,
+            fontsize=30,
             color="red",
         )
     ax.set_ylim(-0.05)
@@ -264,10 +261,10 @@ def plot_ecological_determinants(samples_pre, samples_post, df, fig, ax):
             samples_of_interest = samples_of_interest - 100
             median_effects.append(jnp.median(samples_of_interest, axis=0))
             lower_effects.append(
-                jnp.quantile(samples_of_interest, 0.05, axis=0)
+                jnp.quantile(samples_of_interest, 0.025, axis=0)
             )
             upper_effects.append(
-                jnp.quantile(samples_of_interest, 0.95, axis=0)
+                jnp.quantile(samples_of_interest, 0.975, axis=0)
             )
 
         # same process for unpooled covariates
@@ -309,10 +306,10 @@ def plot_ecological_determinants(samples_pre, samples_post, df, fig, ax):
             samples_of_interest = samples_of_interest - 100
             median_effects.append(jnp.median(samples_of_interest, axis=0))
             lower_effects.append(
-                jnp.quantile(samples_of_interest, 0.05, axis=0)
+                jnp.quantile(samples_of_interest, 0.025, axis=0)
             )
             upper_effects.append(
-                jnp.quantile(samples_of_interest, 0.95, axis=0)
+                jnp.quantile(samples_of_interest, 0.975, axis=0)
             )
 
         ax.errorbar(
@@ -336,7 +333,7 @@ def plot_ecological_determinants(samples_pre, samples_post, df, fig, ax):
 
     ax.axhline(0, ls="--", color="k")
 
-    ax.legend(loc=(0.01, 1.0))
+    ax.legend(loc=(0.01, 1.02), edgecolor="black")
 
     ax.set_xticks(range(len(all_covariates)))  # type: ignore
     # at a 45 degree angle
@@ -345,56 +342,8 @@ def plot_ecological_determinants(samples_pre, samples_post, df, fig, ax):
         rotation=-60,
         ha="left",
     )
-    ax.set_xlabel("Predictor")
-    ax.set_ylabel("% change in incidence per\n1 unit increase in predictor")
-    ax.set_yscale("symlog")
-    ax.set_yticks(
-        [-100, -10, -1, 0, 1, 10, 100],
-        ["-100", "-10", "-1", "0", "1", "10", "100"],
-    )
-
-    minor_y_ticks = [
-        -90,
-        -80,
-        -70,
-        -60,
-        -50,
-        -40,
-        -30,
-        -20,
-        -9,
-        -8,
-        -7,
-        -6,
-        -5,
-        -4,
-        -3,
-        -2,
-        2,
-        3,
-        4,
-        5,
-        6,
-        7,
-        8,
-        9,
-        20,
-        30,
-        40,
-        50,
-        60,
-        70,
-        80,
-        90,
-        200,
-        300,
-        400,
-        500,
-        600,
-        700,
-        800,
-    ]
-    ax.yaxis.set_minor_locator(tck.FixedLocator(minor_y_ticks))
+    ax.set_ylabel("% change in incidence per 1 unit\nincrease in predictor")
+    ax.set_ylim(-100, 100)
 
     return fig, ax
 
@@ -595,7 +544,6 @@ def plot_increasing_spread_over_time(
     thresholds_and_styles = [
         (None, "black", "All"),
         (0.95, "orangered", "$p < 0.05$"),
-        (0.99, "darkmagenta", "$p < 0.01$"),
     ]
 
     # Set up year bins
@@ -686,7 +634,7 @@ def plot_increasing_spread_over_time(
     group_spacing = 0.3  # Space between groups
     total_group_width = group_width + group_spacing
 
-    x_positions = np.arange(n_bins) * total_group_width
+    x_positions = np.arange(n_bins) * total_group_width  # type: ignore
 
     # Plot bars for each threshold
     for bar_idx, (threshold, color, threshold_label) in enumerate(
@@ -703,15 +651,17 @@ def plot_increasing_spread_over_time(
             label=threshold_label,
             alpha=0.8,
         )
+        print(x_pos)
+        print(counts)
 
     # Set x-axis labels centered under each group of 3 bars
     ax.set_xticks(x_positions + group_width / 2 - bar_width / 2)
     ax.set_xticklabels(bin_labels, rotation=-45, ha="left")
 
     ax.set_xlabel("Year")
-    ax.set_ylabel("Counties in outbreak clusters (N)")
+    ax.set_ylabel("Counties with neighboring outbreaks (N)")
     ax.set_ylim(bottom=0)
-    ax.legend(loc=(0.02, 0.79))
+    ax.legend(loc=(0.02, 0.81), edgecolor="black")
 
     return fig, ax
 
@@ -738,7 +688,7 @@ if __name__ == "__main__":
     with open(
         os.path.join(
             output_dir,
-            "final_outbreak_size_predictions_[2021, 2022, 2023, 2024, 2025].pkl",
+            "final_outbreak_size_predictions_[2021, 2022, 2023, 2024, 2025]_five_year=False.pkl",
         ),
         "rb",
     ) as f:
@@ -761,6 +711,7 @@ if __name__ == "__main__":
         naive_model,
         fig,
         ax[0],  # type: ignore
+        show_r2=True,
     )
 
     # while we're here, make a plot of the performance for the R01

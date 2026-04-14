@@ -364,6 +364,7 @@ def plot_cases_over_time(df, fig, ax):
         markersize=10,
         color="black",
         linestyle="--",
+        label="Annual cases",
     )
     ax.set_xlabel("Year")
     ax.set_ylabel("Measles cases (N)")
@@ -379,6 +380,7 @@ def plot_cases_over_time(df, fig, ax):
         alpha=0.2,
         align="edge",
         edgecolor="grey",
+        label="Number of counties",
     )
     ax2.set_ylabel("County-year outbreaks (N)", rotation=-90, labelpad=30)
     ax2.spines["top"].set_visible(False)
@@ -392,6 +394,10 @@ def plot_cases_over_time(df, fig, ax):
         spine.set_position(("outward", 5))
     # put the grid behind
     ax2.set_axisbelow(True)
+
+    l1, h1 = ax.get_legend_handles_labels()
+    l2, h2 = ax2.get_legend_handles_labels()
+    ax.legend([*l1, *l2], [*h1, *h2], edgecolor="black")
 
     return fig, ax
 
@@ -1589,6 +1595,58 @@ if __name__ == "__main__":
 
     vaccination_data_roc = vaccination_data_roc.filter(
         pl.col("slope").is_not_nan()
+    )
+
+    # --- Summary statistics ---
+    avg_2011 = (
+        vaccination_data.filter(
+            (pl.col("year") == 2010)
+            & pl.col("estimated_mmr_cov").is_not_null()
+        )
+        .filter(pl.col("fips").str.len_chars() > 2)["estimated_mmr_cov"]
+        .mean()
+    )
+
+    avg_2011_15 = (
+        vaccination_data.filter(
+            (pl.col("year") <= 2015)
+            & pl.col("estimated_mmr_cov").is_not_null()
+        )
+        .filter(pl.col("fips").str.len_chars() > 2)["estimated_mmr_cov"]
+        .mean()
+    )
+
+    avg_2025 = (
+        vaccination_data.filter(
+            (pl.col("year") == 2024)
+            & pl.col("estimated_mmr_cov").is_not_null()
+        )
+        .filter(pl.col("fips").str.len_chars() > 2)["estimated_mmr_cov"]
+        .mean()
+    )
+
+    avg_2021_25 = (
+        vaccination_data.filter(
+            (pl.col("year") >= 2020)
+            & pl.col("estimated_mmr_cov").is_not_null()
+        )
+        .filter(pl.col("fips").str.len_chars() > 2)["estimated_mmr_cov"]
+        .mean()
+    )
+
+    avg_roc = vaccination_data_roc["slope"].mean()
+
+    print(f"Average MMR coverage in 2011 (counties reporting): {avg_2011}%")
+    print(f"Average MMR coverage in 2025 (counties reporting): {avg_2025}%")
+    print(
+        f"Average annual rate of change since 2020 (across counties): {avg_roc}%/year"
+    )
+
+    print(
+        f"Average MMR coverage in 2011-15 (counties reporting): {avg_2011_15}%"
+    )
+    print(
+        f"Average MMR coverage in 2021-25 (counties reporting): {avg_2021_25}%"
     )
 
     # map of the change in vaccination coverage

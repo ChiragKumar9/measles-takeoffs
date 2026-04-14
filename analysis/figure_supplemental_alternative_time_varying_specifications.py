@@ -121,7 +121,7 @@ def plot_time_varying_vaccine_effect(
     # horizontal line at 0
     ax.axhline(0, ls="--", color="black")
 
-    ax.legend(loc=(0.34, 0.7))
+    ax.legend(loc=(0.34, 0.7), edgecolor="black")
 
     ax.set_xlabel("Year")
     ax.set_ylabel(
@@ -150,7 +150,7 @@ def plot_time_variance_group_variance_distributions(
         bins=30,
         label="Year-to-year",
     )
-    ax.legend(loc="lower right")
+    ax.legend(loc="lower right", edgecolor="black")
     ax.set_xlabel("Standard deviation in vaccine effect")
     ax.set_ylabel("Density")
     ax.set_xlim(0)
@@ -191,7 +191,7 @@ def plot_coverage_cases(df1, df2, label1, label2, loc, fig, ax):
     ax.set_yscale("symlog")
     ax.set_ylim(-0.1)
     ax.yaxis.set_major_formatter(ScalarFormatter())
-    ax.legend(loc=loc)
+    ax.legend(loc=loc, edgecolor="black")
 
 
 if __name__ == "__main__":

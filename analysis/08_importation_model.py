@@ -268,6 +268,13 @@ def distribute_state_level_risk_to_county(
     # calculate summary statistics on the importation probabilities
     # first we need to convert the rate parameter to poisson probabilities of
     # at least one import
+
+    # Save the rate samples (expected number of importations) before transforming
+    df = df.with_columns(
+        expected_importations_samples=pl.col("importation_probability_samples")
+    )
+
+    # Transform rate samples to probability of at least one import
     df = df.with_columns(
         importation_probability_samples=pl.col(
             "importation_probability_samples"
@@ -275,6 +282,7 @@ def distribute_state_level_risk_to_county(
             lambda x: (1 - np.exp(-np.array(x))).tolist(), pl.List(pl.Float64)
         )
     )
+
     # now we can calculate mean, median, 2.5th and 97.5th percentiles
     df = df.with_columns(
         importation_probability_mean=pl.col(
@@ -321,6 +329,7 @@ def distribute_state_level_risk_to_county(
                 "importation_probability_median",
                 "importation_probability_lower",
                 "importation_probability_upper",
+                "expected_importations_samples",
             ],
         ]
     )
@@ -436,8 +445,15 @@ if __name__ == "__main__":
     )
     # save
     # save the values separately from the samples
+
     samples = df.select("importation_probability_samples")
-    df = df.drop("importation_probability_samples")
+    importation_count_samples = df.select(
+        "expected_importations_samples"
+    )  # <-- add
+    df = df.drop(
+        ["importation_probability_samples", "expected_importations_samples"]
+    )  # <-- drop both
+
     with open(
         os.path.join(
             output_dir, "empirical_importation_probability_samples.pkl"
@@ -445,6 +461,13 @@ if __name__ == "__main__":
         "wb",
     ) as f:
         pickle.dump(samples, f)
+
+    with open(  # <-- add
+        os.path.join(output_dir, "empirical_importation_count_samples.pkl"),
+        "wb",
+    ) as f:
+        pickle.dump(importation_count_samples, f)
+
     df.write_csv(
         os.path.join(output_dir, "empirical_importation_probability.csv")
     )

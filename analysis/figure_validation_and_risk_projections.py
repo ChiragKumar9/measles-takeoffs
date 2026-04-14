@@ -104,11 +104,13 @@ def plot_total_cases_over_time(df_observed, all_counties, samples, fig, ax):
             ),
         ],
         ["Forecasted", "Observed"],
+        loc=(0.6, 0.02),
+        edgecolor="black",
     )
 
     ax.set_xticks(range(len(years)))
     ax.set_xticklabels(years)
-    ax.set_ylabel("Cases (N)")
+    ax.set_ylabel("Nationwide cases (N)")
     ax.set_yscale("log")
     ax.set_xlabel("Year")
     ax.set_yticks([1, 10, 100, 1000, 10000])
@@ -214,7 +216,7 @@ def plot_risk_predictions_by_county(df, samples, background_samples, fig, ax):
     ax.set_xticks([0, *df["bucket"].sort().unique().to_list()])
     ax.set_xticklabels(["0", "1-4", "5-9", "10-19", "≥20"])
     ax.set_xlabel("Observed cases (N)")
-    ax.set_ylabel("Forecasted outbreak size percentile")
+    ax.set_ylabel("Forecasted county outbreak\nsize percentile")
     ax.set_ylim([0, 100])
 
     return df
@@ -226,6 +228,7 @@ def plot_future_scenario_cases(
     scenario_colors,
     all_future_samples,
     importation_samples,
+    importation_count_samples,
     scale,
     fig,
     ax,
@@ -247,7 +250,6 @@ def plot_future_scenario_cases(
     gap = 0.30
     offsets = np.linspace(-gap, gap, n_scenarios)
 
-    combined_samples = {}
     violin_tops = {}
 
     vlns = []
@@ -276,9 +278,11 @@ def plot_future_scenario_cases(
                 baseline_raw_2026 = all_future_samples[("baseline", 2026)]
                 raw = jnp.minimum(raw, baseline_raw_2026)
 
-            combined = raw * importation_samples + importation_samples
-            combined = jnp.sum(combined, axis=1) / scale
-            combined_samples[(scenario, year)] = combined
+            combined_raw = (
+                raw * importation_samples + importation_count_samples
+            )
+            combined = jnp.sum(combined_raw, axis=1) / scale
+            combined_raw = combined_raw / scale
 
             lower = jnp.percentile(combined, 2.5)
             upper = jnp.percentile(combined, 97.5)
@@ -326,8 +330,11 @@ def plot_future_scenario_cases(
             print(
                 f"Year {year}, Scenario {scenario}: "
                 f"2.5th={lower:.1f}, 25th={jnp.percentile(combined, 25):.1f}, "
-                f"50th={jnp.median(combined):.1f}, 75th={jnp.percentile(combined, 75):.1f}, "
+                f"50th={jnp.median(combined):.1f}, mean={jnp.mean(combined):.1f}, 75th={jnp.percentile(combined, 75):.1f}, "
                 f"97.5th={upper:.1f}"
+                f"\nCounties with over 20 cases in median: {jnp.sum(jnp.median(combined_raw, axis=0) >= 20) / combined_raw.shape[1]}"
+                f"\nCounties with over 20 cases in 2.5th percentile: {jnp.sum(jnp.percentile(combined_raw, 2.5, axis=0) >= 20) / combined_raw.shape[1]}"
+                f"\nCounties with over 20 cases in 97.5th percentile: {jnp.sum(jnp.percentile(combined_raw, 97.5, axis=0) >= 20) / combined_raw.shape[1]}"
             )
 
         labels.append(scenario_labels[scenario])
@@ -341,7 +348,8 @@ def plot_future_scenario_cases(
             vlns[2]["bodies"][0],
         ],
         labels=labels,
-        loc=(0, 0.8),
+        loc=(0.02, 0.8),
+        edgecolor="black",
     )
     ax.set_xticks(range(len(future_years)))
     ax.set_xticklabels(future_years)
@@ -350,6 +358,47 @@ def plot_future_scenario_cases(
     ax.set_yscale("log")
     ax.set_ylim(50)
     ax.yaxis.set_major_formatter(mtick.StrMethodFormatter("{x:,.0f}"))
+
+    # Add this section here - after all scenarios and years have been processed
+    print("\n" + "=" * 60)
+    print("CUMULATIVE CASES BY SCENARIO (2026-2030)")
+    print("=" * 60)
+    for scenario in plot_scenarios:
+        cumulative_samples = None
+        for year in future_years:
+            raw = all_future_samples[(scenario, year)]
+
+            # Apply same monotonicity constraints
+            if (
+                scenario in WORSENING_SCENARIOS
+                and ("baseline", 2026) in all_future_samples
+            ):
+                baseline_raw_2026 = all_future_samples[("baseline", 2026)]
+                raw = jnp.maximum(raw, baseline_raw_2026)
+            elif (
+                scenario in IMPROVING_SCENARIOS
+                and ("baseline", 2026) in all_future_samples
+            ):
+                baseline_raw_2026 = all_future_samples[("baseline", 2026)]
+                raw = jnp.minimum(raw, baseline_raw_2026)
+
+            combined_raw = (
+                raw * importation_samples + importation_count_samples
+            )
+            combined = jnp.sum(combined_raw, axis=1) / scale
+
+            if cumulative_samples is None:
+                cumulative_samples = combined
+            else:
+                cumulative_samples += combined
+
+        print(f"\n{scenario_labels[scenario]}:")
+        print(f"  Median: {jnp.median(cumulative_samples):,.1f}")  # type: ignore
+        print(f"  Mean: {jnp.mean(cumulative_samples):,.1f}")  # type: ignore
+        print(
+            f"  95% CI: [{jnp.percentile(cumulative_samples, 2.5):,.1f}, {jnp.percentile(cumulative_samples, 97.5):,.1f}]"
+        )  # type: ignore
+    print("=" * 60 + "\n")
 
 
 def map_fips_code_data(
@@ -578,6 +627,7 @@ def create_supplemental_future_projections_figure(
     scenario_colors,
     all_future_samples,
     importation_samples,
+    importation_count_samples,
     scale,
     output_path,
 ):
@@ -596,6 +646,8 @@ def create_supplemental_future_projections_figure(
         Dictionary with (scenario, year) keys containing sample arrays
     importation_samples : array
         Importation probability samples
+    importation_count_samples : array
+        Importation count samples
     scale : float
         Scaling factor for predictions
     output_path : str
@@ -622,6 +674,7 @@ def create_supplemental_future_projections_figure(
         scenario_colors=scenario_colors,
         all_future_samples=all_future_samples,
         importation_samples=importation_samples,
+        importation_count_samples=importation_count_samples,
         scale=scale,
         fig=fig,
         ax=ax,
@@ -712,8 +765,14 @@ if __name__ == "__main__":
         "rb",
     ) as f:
         samples = pickle.load(f)
+    with open(
+        os.path.join(output_dir, "empirical_importation_count_samples.pkl"),
+        "rb",
+    ) as f:
+        count_samples = pickle.load(f)
     import_df = import_df.with_columns(
-        importation_probability_samples=pl.Series(samples)
+        importation_probability_samples=pl.Series(samples),
+        expected_importations_samples=pl.Series(count_samples),
     )
     import_df = import_df.sort("type").unique(
         subset=["state", "county", "year"], keep="last"
@@ -726,6 +785,7 @@ if __name__ == "__main__":
                 "state",
                 "year",
                 "importation_probability_samples",
+                "expected_importations_samples",
                 "type",
             ]
         ),
@@ -734,6 +794,9 @@ if __name__ == "__main__":
     )
     importation_samples = jnp.array(
         np.vstack(all_counties["importation_probability_samples"].to_numpy())
+    ).T
+    importation_count_samples = jnp.array(
+        np.vstack(all_counties["expected_importations_samples"].to_numpy())
     ).T
 
     samples = []
@@ -761,6 +824,7 @@ if __name__ == "__main__":
     mask = (all_counties["type"] == "train").to_numpy()
     samples_observed = samples[:, mask]
     importation_samples_observed = importation_samples[:, mask]
+    importation_count_samples_observed = importation_count_samples[:, mask]
     df_train_observed = all_counties.filter(pl.col("type") == "train")
 
     analysis = pl.read_csv(
@@ -783,8 +847,12 @@ if __name__ == "__main__":
         importation_samples_year = importation_samples_observed[
             :, mask.to_numpy()
         ]
+        importation_count_samples_year = importation_count_samples_observed[
+            :, mask.to_numpy()
+        ]
         samples_year = (
-            samples_year * importation_samples_year + importation_samples_year
+            samples_year * importation_samples_year
+            + importation_count_samples_year
         )
         true = df_train_observed.filter(pl.col("validation_year") == year)[
             "cases"
@@ -801,8 +869,12 @@ if __name__ == "__main__":
         mask = all_counties["validation_year"] == year
         samples_year = samples[:, mask.to_numpy()]
         importation_samples_year = importation_samples[:, mask.to_numpy()]
+        importation_count_samples_year = importation_count_samples[
+            :, mask.to_numpy()
+        ]
         samples_year = (
-            samples_year * importation_samples_year + importation_samples_year
+            samples_year * importation_samples_year
+            + importation_count_samples_year
         )
         samples_year = jnp.sum(samples_year, axis=1)
         print(
@@ -824,10 +896,12 @@ if __name__ == "__main__":
     ) as f:
         pickle.dump(scale_2025, f)
 
-    samples_unconditioned = samples * importation_samples + importation_samples
+    samples_unconditioned = (
+        samples * importation_samples + importation_count_samples
+    )
     samples_observed_unconditioned = (
         samples_observed * importation_samples_observed
-        + importation_samples_observed
+        + importation_count_samples_observed
     )
     samples_scaled = samples_unconditioned / scale
     samples_observed_scaled = samples_observed_unconditioned / scale
@@ -988,8 +1062,14 @@ if __name__ == "__main__":
         "rb",
     ) as f:
         importation_samples_raw = pickle.load(f)
+    with open(
+        os.path.join(output_dir, "empirical_importation_count_samples.pkl"),
+        "rb",
+    ) as f:
+        importation_count_samples_raw = pickle.load(f)
     import_df_latest = import_df_latest.with_columns(
-        importation_probability_samples=pl.Series(importation_samples_raw)
+        importation_probability_samples=pl.Series(importation_samples_raw),
+        expected_importations_samples=pl.Series(importation_count_samples_raw),
     )
     # Defer to projection over train where both exist
     import_df_latest = import_df_latest.sort("type").unique(
@@ -1005,7 +1085,13 @@ if __name__ == "__main__":
     )
 
     future_base = future_base.join(
-        import_df_latest.select(["fips", "importation_probability_samples"]),
+        import_df_latest.select(
+            [
+                "fips",
+                "importation_probability_samples",
+                "expected_importations_samples",
+            ]
+        ),
         on="fips",
         how="left",
     )
@@ -1016,9 +1102,15 @@ if __name__ == "__main__":
     assert future_base["importation_probability_samples"].null_count() == 0, (
         "Some future counties are missing importation probability samples"
     )
+    assert future_base["expected_importations_samples"].null_count() == 0, (
+        "Some future counties are missing importation count samples"
+    )
 
     importation_samples_future = jnp.array(
         np.vstack(future_base["importation_probability_samples"].to_numpy())  # type: ignore
+    ).T
+    importation_count_samples_future = jnp.array(
+        np.vstack(future_base["expected_importations_samples"].to_numpy())  # type: ignore
     ).T
 
     all_future_samples = {}
@@ -1056,6 +1148,7 @@ if __name__ == "__main__":
         importation_samples=jnp.minimum(
             importation_samples_future * import_scaler_2025, 1
         ),
+        importation_count_samples=importation_count_samples_future,
         scale=scale_2025,
         fig=fig,
         ax=ax_e,
@@ -1089,6 +1182,7 @@ if __name__ == "__main__":
         importation_samples=jnp.minimum(
             importation_samples_future * import_scaler_2025, 1
         ),
+        importation_count_samples=importation_count_samples_future,
         scale=scale_2025,
         output_path=os.path.join(
             fig_dir, "figure_supplemental_future_projections"

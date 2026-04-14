@@ -2,9 +2,11 @@ import os
 import pickle
 
 import matplotlib.pyplot as plt
+import numpy as np
 import polars as pl
 import yaml
 from matplotlib import rc
+from scipy.stats import gamma
 from sklearn.metrics import (
     average_precision_score,
     precision_recall_curve,
@@ -100,7 +102,7 @@ def plot_state_std_imports(df, fig, ax):
     ax.set_xlabel("Standard deviation in yearly imported cases\nby state (N)")
     ax.set_xlim(0)
     ax.set_ylabel("Counts")
-    ax.legend()
+    ax.legend(edgecolor="black")
 
 
 def plot_importation_probability_roc_validation(df, fig, ax):
@@ -142,7 +144,7 @@ def plot_importation_probability_roc_validation(df, fig, ax):
     ax.set_ylabel("False positive rate (%)")
     ax.set_xlim([0, 100])
     ax.set_ylim([0, 100])
-    ax.legend(loc="lower right")
+    ax.legend(loc="lower right", edgecolor="black")
     return fig, ax
 
 
@@ -195,7 +197,7 @@ def plot_importation_probability_prc_validation(df, fig, ax):
             (df["imported"] >= 1).mean()
         ),
     )
-    ax.legend(loc=(0.3, 0.4))
+    ax.legend(loc=(0.3, 0.4), edgecolor="black")
     return fig, ax
 
 
@@ -301,9 +303,37 @@ if __name__ == "__main__":
         pl.first("importation_probability_lower"),
         pl.first("importation_probability_upper"),
         pl.first("mu"),
+        pl.first("posterior_alpha"),
+        pl.first("posterior_beta"),
     )
     # sum
     print(count_imports.sum())
+
+    rng = np.random.default_rng(42)
+    N_SAMPLES = 100_000
+
+    # Sample lambda_i ~ Gamma(alpha_i, beta_i) for each county, then
+    # sample counts ~ Poisson(lambda_i). Sum across counties per sample.
+    alphas = count_imports["posterior_alpha"].to_numpy()
+    betas = count_imports["posterior_beta"].to_numpy()
+
+    # Shape: (N_SAMPLES, n_counties)
+    lambda_samples = rng.gamma(
+        shape=alphas, scale=1.0 / betas, size=(N_SAMPLES, len(alphas))
+    )
+    count_samples = rng.poisson(
+        lam=lambda_samples
+    )  # Poisson draw per county per sample
+    national_totals = count_samples.sum(axis=1)  # Sum across counties
+
+    print(f"Median national imports:          {np.median(national_totals)}")
+    print(
+        f"2.5th percentile national imports: {np.percentile(national_totals, 2.5)}"
+    )
+    print(
+        f"97.5th percentile national imports: {np.percentile(national_totals, 97.5)}"
+    )
+
     print((df_2025["imported"].sum() / count_imports.sum()["mu"])[0])
     with open(
         os.path.join(

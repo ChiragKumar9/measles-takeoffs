@@ -147,7 +147,7 @@ def plot_std_vaccine_coverage(df, fig, ax):
         density=True,
         bins=np.arange(0, max(df_year["std_coverage"]) + 0.5, 0.5),
     )
-    ax.legend()
+    ax.legend(edgecolor="black")
     ax.set_xlabel("Standard deviation of vaccine coverage (%)")
     ax.set_ylabel("Density")
     ax.set_xlim(0)

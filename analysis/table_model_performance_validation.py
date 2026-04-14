@@ -43,11 +43,26 @@ def performance_table(
                 (true >= classification_threshold).astype(int), samples
             )
 
+        # Calculate prevalence and PPV/NPV
+        prevalence = np.mean((true >= classification_threshold).astype(int))
+        if np.isnan(sensitivity) or np.isnan(specificity):
+            ppv = np.nan
+            npv = np.nan
+        else:
+            ppv = (sensitivity * prevalence) / (
+                sensitivity * prevalence + (1 - specificity) * (1 - prevalence)
+            )
+            npv = (specificity * (1 - prevalence)) / (
+                (1 - sensitivity) * prevalence + specificity * (1 - prevalence)
+            )
+
         # make a dataframe
         performance_summary = {
             "Sensitivity (%)": sensitivity * 100,
             "Specificity (%)": specificity * 100,
             "AUROC (%)": roc_auc * 100,
+            "PPV (%)": ppv * 100,
+            "NPV (%)": npv * 100,
         }
 
         performance_summary = pl.DataFrame(performance_summary)
@@ -192,6 +207,8 @@ def other_tables(df, samples_unconditioned, samples, true, true_outbreak):
             "AUROC (%)": "AUROC, 10+ cases (%)",
             "Sensitivity (%)": "Sensitivity, 10+ cases (%)",
             "Specificity (%)": "Specificity, 10+ cases (%)",
+            "PPV (%)": "PPV, 10+ cases (%)",
+            "NPV (%)": "NPV, 10+ cases (%)",
             "RMSE (cases)": "RMSE, top 20% (cases)",
             "MAE (cases)": "MAE, top 20% (cases)",
             "Median fold error": "Median fold error, top 20%",
@@ -210,6 +227,8 @@ def other_tables(df, samples_unconditioned, samples, true, true_outbreak):
             "Sensitivity (%)": "Sensitivity, 5+ cases (%)",
             "Specificity (%)": "Specificity, 5+ cases (%)",
             "AUROC (%)": "AUROC, 5+ cases (%)",
+            "PPV (%)": "PPV, 5+ cases (%)",
+            "NPV (%)": "NPV, 5+ cases (%)",
         }
     )
 
@@ -224,6 +243,8 @@ def other_tables(df, samples_unconditioned, samples, true, true_outbreak):
             "Sensitivity (%)": "Sensitivity, 20+ cases (%)",
             "Specificity (%)": "Specificity, 20+ cases (%)",
             "AUROC (%)": "AUROC, 20+ cases (%)",
+            "PPV (%)": "PPV, 20+ cases (%)",
+            "NPV (%)": "NPV, 20+ cases (%)",
         }
     )
 
@@ -238,6 +259,8 @@ def other_tables(df, samples_unconditioned, samples, true, true_outbreak):
             "Sensitivity (%)": "Sensitivity, 5+ outbreak cases (%)",
             "Specificity (%)": "Specificity, 5+ outbreak cases (%)",
             "AUROC (%)": "AUROC, 5+ outbreak cases (%)",
+            "PPV (%)": "PPV, 5+ outbreak cases (%)",
+            "NPV (%)": "NPV, 5+ outbreak cases (%)",
         }
     )
 
@@ -252,6 +275,8 @@ def other_tables(df, samples_unconditioned, samples, true, true_outbreak):
             "Sensitivity (%)": "Sensitivity, 10+ outbreak cases (%)",
             "Specificity (%)": "Specificity, 10+ outbreak cases (%)",
             "AUROC (%)": "AUROC, 10+ outbreak cases (%)",
+            "PPV (%)": "PPV, 10+ outbreak cases (%)",
+            "NPV (%)": "NPV, 10+ outbreak cases (%)",
         }
     )
 
@@ -266,6 +291,8 @@ def other_tables(df, samples_unconditioned, samples, true, true_outbreak):
             "Sensitivity (%)": "Sensitivity, 20+ outbreak cases (%)",
             "Specificity (%)": "Specificity, 20+ outbreak cases (%)",
             "AUROC (%)": "AUROC, 20+ outbreak cases (%)",
+            "PPV (%)": "PPV, 20+ outbreak cases (%)",
+            "NPV (%)": "NPV, 20+ outbreak cases (%)",
         }
     )
 
@@ -296,6 +323,21 @@ def other_tables(df, samples_unconditioned, samples, true, true_outbreak):
             "MAE (cases)": "MAE, top 80% (cases)",
             "Median fold error": "Median fold error, top 80%",
             "Spearman rho^2 (%)": "Spearman rho^2, top 80% (%)",
+        }
+    )
+
+    regression_100 = performance_table(
+        samples_unconditioned,
+        true,
+        mode="regression",
+        regression_percentile=0,
+    ).drop("Absolute difference (cases)")
+    regression_100 = regression_100.rename(
+        {
+            "RMSE (cases)": "RMSE, top 100% (cases)",
+            "MAE (cases)": "MAE, top 100% (cases)",
+            "Median fold error": "Median fold error, top 100%",
+            "Spearman rho^2 (%)": "Spearman rho^2, top 100% (%)",
         }
     )
 
@@ -355,6 +397,7 @@ def other_tables(df, samples_unconditioned, samples, true, true_outbreak):
             classification20_wo_imports,
             regression_50,
             regression_80,
+            regression_100,
             regression_20_wo_imports,
             regression_50_wo_imports,
             regression_80_wo_imports,
@@ -438,8 +481,17 @@ if __name__ == "__main__":
         "rb",
     ) as f:
         samples = pickle.load(f)
+    with open(
+        os.path.join(
+            output_dir,
+            "empirical_importation_count_samples.pkl",
+        ),
+        "rb",
+    ) as f:
+        count_samples = pickle.load(f)
     import_df = import_df.with_columns(
-        importation_probability_samples=pl.Series(samples)
+        importation_probability_samples=pl.Series(samples),
+        expected_importations_samples=pl.Series(count_samples),
     )
     # each place can only occur once per year
     # we want to drop duplicates, deferring to projection rather than train
@@ -452,6 +504,7 @@ if __name__ == "__main__":
     validation_years = [2021, 2022, 2023, 2024, 2025]
     all_counties = []
     all_imports = []
+    all_import_counts = []
     for year in validation_years:
         temp = pl.read_csv(
             os.path.join(output_dir, f"projection_dataset_{year}.csv"),
@@ -492,6 +545,7 @@ if __name__ == "__main__":
                     "state",
                     "year",
                     "importation_probability_samples",
+                    "expected_importations_samples",
                 ]
             ),
             on=["county", "state", "year"],
@@ -505,6 +559,11 @@ if __name__ == "__main__":
             np.vstack(temp["importation_probability_samples"].to_numpy())  # type: ignore
         ).T
         all_imports.append(temp_import)
+
+        temp_import_counts = jnp.array(
+            np.vstack(temp["expected_importations_samples"].to_numpy())  # type: ignore
+        ).T
+        all_import_counts.append(temp_import_counts)
 
         all_counties.append(temp)
 
@@ -545,7 +604,7 @@ if __name__ == "__main__":
                         samples = pickle.load(f)
 
                     samples_with_imports = (
-                        samples * all_imports[idx] + all_imports[idx]
+                        samples * all_imports[idx] + all_import_counts[idx]
                     )
                     samples_with_imports = jnp.sum(
                         samples_with_imports, axis=1
@@ -576,7 +635,6 @@ if __name__ == "__main__":
                 years = list(range(start_year, validation_year))
 
             cases = all_counties[idx]["cases"].sum()
-            log_total_cases = cases
             true = all_counties[idx]["cases"].to_numpy()
             true_outbreak = all_counties[idx]["cases_outbreak"].to_numpy()
 
@@ -611,7 +669,7 @@ if __name__ == "__main__":
                         # under various modes
 
                         samples_unconditioned = (
-                            samples * all_imports[idx] + all_imports[idx]
+                            samples * all_imports[idx] + all_import_counts[idx]
                         )
 
                         samples_unconditioned = jnp.mean(
@@ -670,7 +728,7 @@ if __name__ == "__main__":
                 )["cases"]
 
             samples_unconditioned = (
-                samples * all_imports[idx] + all_imports[idx]
+                samples * all_imports[idx] + all_import_counts[idx]
             )
 
             samples_unconditioned = jnp.mean(samples_unconditioned, axis=0)
@@ -759,8 +817,13 @@ if __name__ == "__main__":
         "Sensitivity, 10+ (%)",
         "Specificity, 10+ (%)",
         "AUROC, 10+ (%)",
+        "PPV, 10+ (%)",
+        "NPV, 10+ (%)",
         "Sensitivity, 20+ (%)",
         "Specificity, 20+ (%)",
+        "AUROC, 20+ (%)",
+        "PPV, 20+ (%)",
+        "NPV, 20+ (%)",
         "RMSE, top 20% (cases)",
         "MAE, top 20% (cases)",
         "Spearman rho^2, top 50% (%)",
@@ -772,8 +835,13 @@ if __name__ == "__main__":
         "Sensitivity, 10+ cases (%)",
         "Specificity, 10+ cases (%)",
         "AUROC, 10+ cases (%)",
+        "PPV, 10+ cases (%)",
+        "NPV, 10+ cases (%)",
         "Sensitivity, 20+ cases (%)",
         "Specificity, 20+ cases (%)",
+        "AUROC, 20+ cases (%)",
+        "PPV, 20+ cases (%)",
+        "NPV, 20+ cases (%)",
         "RMSE, top 20% (cases)",
         "MAE, top 20% (cases)",
         "Spearman rho^2, top 50% (%)",
@@ -814,8 +882,13 @@ if __name__ == "__main__":
         "Sensitivity, 10+ outbreak cases (%)",
         "Specificity, 10+ outbreak cases (%)",
         "AUROC, 10+ outbreak cases (%)",
+        "PPV, 10+ outbreak cases (%)",
+        "NPV, 10+ outbreak cases (%)",
         "Sensitivity, 20+ outbreak cases (%)",
         "Specificity, 20+ outbreak cases (%)",
+        "AUROC, 20+ outbreak cases (%)",
+        "PPV, 20+ outbreak cases (%)",
+        "NPV, 20+ outbreak cases (%)",
         "RMSE, top 20% (outbreak cases)",
         "MAE, top 20% (outbreak cases)",
         "Spearman rho^2, top 20% outbreak (%)",
@@ -890,12 +963,18 @@ if __name__ == "__main__":
         "Sensitivity, 5+ cases (%)",
         "Specificity, 5+ cases (%)",
         "AUROC, 5+ cases (%)",
+        "PPV, 5+ cases (%)",
+        "NPV, 5+ cases (%)",
         "Sensitivity, 10+ cases (%)",
         "Specificity, 10+ cases (%)",
         "AUROC, 10+ cases (%)",
+        "PPV, 10+ cases (%)",
+        "NPV, 10+ cases (%)",
         "Sensitivity, 20+ cases (%)",
         "Specificity, 20+ cases (%)",
         "AUROC, 20+ cases (%)",
+        "PPV, 20+ cases (%)",
+        "NPV, 20+ cases (%)",
     ]
     classification_with_imports = model_performance.select(
         [
@@ -924,12 +1003,18 @@ if __name__ == "__main__":
         "Sensitivity, 5+ outbreak cases (%)",
         "Specificity, 5+ outbreak cases (%)",
         "AUROC, 5+ outbreak cases (%)",
+        "PPV, 5+ outbreak cases (%)",
+        "NPV, 5+ outbreak cases (%)",
         "Sensitivity, 10+ outbreak cases (%)",
         "Specificity, 10+ outbreak cases (%)",
         "AUROC, 10+ outbreak cases (%)",
+        "PPV, 10+ outbreak cases (%)",
+        "NPV, 10+ outbreak cases (%)",
         "Sensitivity, 20+ outbreak cases (%)",
         "Specificity, 20+ outbreak cases (%)",
         "AUROC, 20+ outbreak cases (%)",
+        "PPV, 20+ outbreak cases (%)",
+        "NPV, 20+ outbreak cases (%)",
     ]
     classification_wo_imports = model_performance.select(
         [
@@ -967,6 +1052,10 @@ if __name__ == "__main__":
         "RMSE, top 80% (cases)",
         "MAE, top 80% (cases)",
         "Spearman rho^2, top 80% (%)",
+        "Median fold error, top 100%",
+        "RMSE, top 100% (cases)",
+        "MAE, top 100% (cases)",
+        "Spearman rho^2, top 100% (%)",
     ]
     regression = model_performance.select(
         [
@@ -985,6 +1074,41 @@ if __name__ == "__main__":
         os.path.join(
             fig_dir,
             "table_supplemental_regression_metrics_with_importations.csv",
+        )
+    )
+
+    # supplemental regression table only requires certain columns
+    regression_columns = [
+        "Median outbreak fold error, top 20%",
+        "RMSE, top 20% (outbreak cases)",
+        "MAE, top 20% (outbreak cases)",
+        "Spearman rho^2, top 20% outbreak (%)",
+        "Median outbreak fold error, top 50%",
+        "RMSE, top 50% (outbreak cases)",
+        "MAE, top 50% (outbreak cases)",
+        "Spearman rho^2, top 50% outbreak (%)",
+        "Median outbreak fold error, top 80%",
+        "RMSE, top 80% (outbreak cases)",
+        "MAE, top 80% (outbreak cases)",
+        "Spearman rho^2, top 80% outbreak (%)",
+    ]
+    regression = model_performance.select(
+        [
+            *["Model"],
+            *[
+                f"{col}{suffix}"
+                for col in regression_columns
+                for suffix in ["", "_lower", "_upper"]
+            ],
+        ]
+    )
+    # beautify
+    regression = beautify(regression, regression_columns)
+    # export
+    regression.write_csv(
+        os.path.join(
+            fig_dir,
+            "table_supplemental_regression_metrics_without_importations.csv",
         )
     )
 
