@@ -8,7 +8,6 @@ import pickle
 import geopandas as gpd
 import jax.numpy as jnp
 import matplotlib.colors as mcolors
-import matplotlib.lines as mlines
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 import numpy as np
@@ -35,15 +34,22 @@ with open("params.yml", "r") as f:
 FUTURE_YEARS = [2026, 2027, 2028, 2029, 2030]
 INTERVENTIONS = [
     # "remove_bans",
+    "improve_bottom_decile_5pct",
+    "improve_cases_previously_counties",
     "ban_top_nme_states",
     "ban_top_risk_states",
+    # "improve_top_risk_states_5pct",
     "ban_top_risk_counties",
 ]
+
 INTERVENTION_LABELS = {
     "remove_bans": "Remove existing\nNME policies",
     "ban_top_risk_states": "Top risk states",
     "ban_top_nme_states": "Top NME states",
     "ban_top_risk_counties": "Top risk counties",
+    "improve_cases_previously_counties": "Counties with\n           previous outbreaks",
+    "improve_bottom_decile_5pct": "Lowest coverage counties",
+    "improve_top_risk_states_5pct": "Top risk states",
 }
 
 DIRECT_COLOR = "#298C8C"
@@ -51,7 +57,7 @@ TOTAL_COLOR = "#800074"
 
 
 def setup_plot(nrows, ncols):
-    fig, ax = plt.subplots(nrows, ncols, figsize=(20, 17))
+    fig, ax = plt.subplots(nrows, ncols, figsize=(16, 20))
     if nrows * ncols == 1:
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
@@ -733,13 +739,21 @@ def plot_intervention_effects(
     fig,
     ax,
 ):
-    violin_width = 0.15
-    pair_gap = 0.25
+    violin_width = 0.12
+    pair_gap = 0.35
 
+    # In plot_intervention_effects, update INTERVENTION_COLORS:
     INTERVENTION_COLORS = {
-        interventions[0]: DIRECT_COLOR,
-        interventions[1]: TOTAL_COLOR,
-        interventions[2]: "#8B5CF6",
+        "ban_top_risk_states": DIRECT_COLOR,
+        "ban_top_nme_states": TOTAL_COLOR,
+        "ban_top_risk_counties": "#8B5CF6",
+        "improve_cases_previously_counties": "#F59E0B",
+        "improve_bottom_decile_5pct": "#10B981",
+        "improve_bottom_decile_10pct": "#10B981",
+        "improve_top_risk_states_5pct": "#EF4444",
+        "improve_top_risk_states_10pct": "#EF4444",
+        "improve_top_risk_counties_5pct": "#8B5CF6",
+        "improve_top_risk_counties_10pct": "#8B5CF6",
     }
 
     fips_to_idx = {f: i for i, f in enumerate(baseline_fips)}
@@ -770,8 +784,8 @@ def plot_intervention_effects(
 
         proj_fips_to_idx = {f: j for j, f in enumerate(first_fips_list)}
         common_fips = [f for f in baseline_fips if f in proj_fips_to_idx]
-        baseline_col_idx = [fips_to_idx[f] for f in common_fips]
-        proj_col_idx = [proj_fips_to_idx[f] for f in common_fips]
+        baseline_col_idx = jnp.array([fips_to_idx[f] for f in common_fips])
+        proj_col_idx = jnp.array([proj_fips_to_idx[f] for f in common_fips])
 
         int_fips = [f for f, a in zip(first_fips_list, first_int_applied) if a]
         int_fips_set = set(int_fips)
@@ -800,15 +814,15 @@ def plot_intervention_effects(
                 + imp_count[:, baseline_col_idx]
             ) / scale
 
-            if intervention in BAN_INTERVENTIONS:
+            if intervention not in REMOVE_INTERVENTIONS:
                 i_county = jnp.where(
-                    int_in_common_mask,
+                    True,  # int_in_common_mask,
                     jnp.minimum(i_county, b_county),
                     i_county,
                 )
             elif intervention in REMOVE_INTERVENTIONS:
                 i_county = jnp.where(
-                    int_in_common_mask,
+                    True,  # int_in_common_mask,
                     jnp.maximum(i_county, b_county),
                     i_county,
                 )
@@ -880,10 +894,10 @@ def plot_intervention_effects(
                 med,
                 yerr=np.array([[med - p25], [p75 - med]]),
                 fmt="o",
-                markersize=7,
+                markersize=6,
                 color=color,
                 ecolor=color,
-                capsize=5,
+                capsize=4,
                 capthick=2,
             )
 
@@ -899,14 +913,135 @@ def plot_intervention_effects(
     ax.set_xticklabels(future_years)
     ax.set_xlabel("Year")
     ax.set_ylabel("Cumulative change in projected cases")
-    ax.legend(
-        handles=[h for h, _ in vln_handles],
-        labels=[l for _, l in vln_handles],
-        loc=(0.025, 0.025),
-        edgecolor="black",
-        title="Removal of nonmedical\nexemptions in:",
-    )
+
     ax.yaxis.set_major_formatter(ticker.StrMethodFormatter("{x:,.0f}"))
+
+    # Calculate average coverage changes for NME ban interventions
+    avg_cov_changes = {}
+
+    NME_BAN_INTERVENTIONS = {
+        "ban_top_risk_states",
+        "ban_top_nme_states",
+        "ban_top_risk_counties",
+    }
+
+    for intervention in interventions:
+        if intervention in NME_BAN_INTERVENTIONS:
+            # Load intervention base file to get coverage changes
+            int_base = pl.read_csv(
+                os.path.join(
+                    output_dir, f"intervention_base_{intervention}.csv"
+                ),
+                schema_overrides={"fips": pl.String},
+            )
+            base_2026 = pl.read_csv(
+                os.path.join(output_dir, "projection_dataset_2026.csv"),
+                schema_overrides={"fips": pl.String},
+            ).filter(pl.col("type") == "projection")
+
+            # Join to get baseline coverage
+            coverage_comparison = (
+                int_base.join(
+                    base_2026.select(
+                        [
+                            "fips",
+                            pl.col("estimated_mmr_cov").alias("baseline_cov"),
+                        ]
+                    ),
+                    on="fips",
+                    how="left",
+                )
+                .with_columns(
+                    [
+                        (
+                            pl.col("estimated_mmr_cov")
+                            - pl.col("baseline_cov")
+                        ).alias("cov_change")
+                    ]
+                )
+                .filter(pl.col("intervention_applied"))
+            )
+
+            # Calculate average coverage change across all intervened counties
+            avg_change = coverage_comparison["cov_change"].mean()
+            avg_cov_changes[intervention] = avg_change
+
+            print(
+                f"{intervention}: Average coverage change = {avg_change:.2f}pp across {coverage_comparison.height} counties"
+            )
+
+    from matplotlib.legend_handler import HandlerBase
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Rectangle
+
+    class HeaderHandler(HandlerBase):
+        def create_artists(
+            self,
+            legend,
+            orig_handle,
+            xdescent,
+            ydescent,
+            width,
+            height,
+            fontsize,
+            trans,
+        ):
+            line = Line2D([0], [0], linestyle="none", marker="none", alpha=0)
+            line.set_transform(trans)
+            return [line]
+
+    dummy = Rectangle(
+        (0, 0), 1, 1, fc="white", ec="white", linewidth=0, alpha=0
+    )
+
+    nme_items = []
+    alt_items = []
+
+    for h, label in vln_handles:
+        intervention_name = [
+            k for k, v in intervention_labels.items() if v == label
+        ][0]
+        if intervention_name in NME_BAN_INTERVENTIONS:
+            # Add average coverage change to label
+            avg_change = avg_cov_changes.get(intervention_name, 0)
+            updated_label = f"{label} (Δ coverage: {avg_change:+.1f}pp)"
+            nme_items.append((h, updated_label))
+        else:
+            alt_items.append((h, label))
+
+    combined_handles = [
+        dummy,
+        alt_items[0][0],
+        alt_items[1][0],
+        dummy,  # col 1: header, item, item
+        dummy,
+        nme_items[0][0],
+        nme_items[1][0],
+        nme_items[2][0],  # col 2: header, item, item, item
+    ]
+    spaces = "           "
+    combined_labels = [
+        "5pp coverage increase in:",
+        spaces + alt_items[0][1],
+        spaces + alt_items[1][1],
+        "",
+        "Remove nonmedical exemptions in:",
+        spaces + nme_items[0][1],
+        spaces + nme_items[1][1],
+        spaces + nme_items[2][1],
+    ]
+
+    ax.legend(
+        handles=combined_handles,
+        labels=combined_labels,
+        handler_map={dummy: HeaderHandler()},
+        loc=(0.001, 0.005),
+        edgecolor="black",
+        frameon=True,
+        ncol=2,
+        columnspacing=2.0,
+        handletextpad=-2,
+    )
 
 
 def plot_coverage_change_vs_cases(
@@ -1192,131 +1327,7 @@ def plot_coverage_change_vs_cases(
     ax.set_ylim(0)
 
 
-def create_supplemental_intervention_scatter_figure(
-    interventions,
-    intervention_labels,
-    future_years,
-    baseline_samples_by_year,
-    intervention_data,
-    importation_samples,
-    importation_count_samples,
-    baseline_fips,
-    scale,
-    adjacency_data_path,
-    output_dir,
-    output_path,
-    year=2026,
-):
-    """
-    Create a supplemental figure showing coverage change vs incidence change
-    for additional intervention scenarios.
-
-    Parameters
-    ----------
-    interventions : list
-        List of intervention names to plot (should be 2 interventions)
-    intervention_labels : dict
-        Mapping of intervention names to display labels
-    future_years : list
-        Years available for projection
-    baseline_samples_by_year : dict
-        Baseline risk samples by year
-    intervention_data : dict
-        Intervention prediction data
-    importation_samples : array
-        Importation probability samples
-    baseline_fips : list
-        List of FIPS codes in baseline order
-    scale : float
-        Scaling factor for predictions
-    adjacency_data_path : str
-        Path to county adjacency file
-    output_dir : str
-        Directory containing intervention and projection data
-    output_path : str
-        Path to save the figure (without extension)
-    year : int, optional
-        Year to analyze (default: 2026)
-    """
-    # Create figure with 1 row, 2 columns
-    fig, axes = plt.subplots(1, 2, figsize=(20, 7.5))
-
-    # Apply standard styling to both subplots
-    for ax in axes:
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
-        ax.get_xaxis().tick_bottom()
-        ax.get_yaxis().tick_left()
-        ax.tick_params(axis="x", direction="out")
-        ax.tick_params(axis="y", direction="out")
-        for spine in ax.spines.values():
-            spine.set_position(("outward", 5))
-        ax.set_axisbelow(True)
-
-    # Add subplot labels
-    axes[0].text(
-        -0.05,
-        1.08,
-        "a",
-        transform=axes[0].transAxes,
-        fontsize=24,
-        fontweight="bold",
-        va="top",
-        ha="right",
-    )
-    axes[1].text(
-        -0.05,
-        1.08,
-        "b",
-        transform=axes[1].transAxes,
-        fontsize=24,
-        fontweight="bold",
-        va="top",
-        ha="right",
-    )
-
-    # Plot each intervention
-    for idx, intervention in enumerate(interventions):
-        plot_coverage_change_vs_cases(
-            intervention=intervention,
-            future_years=future_years,
-            baseline_samples_by_year=baseline_samples_by_year,
-            intervention_data=intervention_data,
-            importation_samples=importation_samples,
-            importation_count_samples=importation_count_samples,
-            baseline_fips=baseline_fips,
-            scale=scale,
-            adjacency_data_path=adjacency_data_path,
-            output_dir=output_dir,
-            fig=fig,
-            ax=axes[idx],
-            year=year,
-        )
-
-    fig.tight_layout()
-
-    # Save in both formats
-    fig.savefig(
-        f"{output_path}.png",
-        dpi=300,
-        bbox_inches="tight",
-    )
-    fig.savefig(
-        f"{output_path}.pdf",
-        dpi=300,
-        bbox_inches="tight",
-    )
-
-    plt.close(fig)
-
-    print(
-        f"Supplemental intervention scatter figure saved to {output_path}.png and {output_path}.pdf"
-    )
-
-
-def create_supplemental_intervention_effects_by_scenario_figure(
-    interventions,
-    intervention_labels,
+def create_supplemental_nme_ban_interventions_figure(
     future_years,
     vaccination_scenarios,
     vaccination_scenario_labels,
@@ -1329,34 +1340,21 @@ def create_supplemental_intervention_effects_by_scenario_figure(
     output_path,
 ):
     """
-    Create a supplemental figure showing intervention effects across
-    different vaccination scenarios in a 2x2 grid.
-
-    Parameters
-    ----------
-    interventions : list
-        List of intervention names to plot
-    intervention_labels : dict
-        Mapping of intervention names to display labels
-    future_years : list
-        Years to plot
-    vaccination_scenarios : list
-        List of 4 vaccination scenario names (e.g., ['targeted_worsening', ...])
-    vaccination_scenario_labels : dict
-        Mapping of scenario names to display labels
-    all_scenario_baseline_samples : dict
-        Nested dict: {scenario: {year: samples}}
-    all_scenario_intervention_data : dict
-        Nested dict: {scenario: {intervention: {year: {predictions, fips, ...}}}}
-    importation_samples : array
-        Importation probability samples
-    baseline_fips : list
-        List of FIPS codes in baseline order
-    scale : float
-        Scaling factor for predictions
-    output_path : str
-        Path to save the figure (without extension)
+    Create supplemental figure showing NME ban intervention effects
+    across vaccination scenarios in a 2x2 grid.
     """
+    interventions = [
+        "ban_top_risk_states",
+        "ban_top_nme_states",
+        "ban_top_risk_counties",
+    ]
+
+    intervention_labels = {
+        "ban_top_risk_states": "Top risk states",
+        "ban_top_nme_states": "Top NME states",
+        "ban_top_risk_counties": "Top risk counties",
+    }
+
     # Create figure with 2x2 subplots
     fig, axes = plt.subplots(2, 2, figsize=(20, 17))
 
@@ -1410,38 +1408,251 @@ def create_supplemental_intervention_effects_by_scenario_figure(
             ax=ax,
         )
 
+        # Add scenario title to each subplot
+        ax.set_title(
+            vaccination_scenario_labels[scenario], fontsize=28, pad=20
+        )
+
     fig.tight_layout()
-
-    # Save in both formats
-    fig.savefig(
-        f"{output_path}.png",
-        dpi=300,
-        bbox_inches="tight",
-    )
-    fig.savefig(
-        f"{output_path}.pdf",
-        dpi=300,
-        bbox_inches="tight",
-    )
-
+    fig.savefig(f"{output_path}.png", dpi=300, bbox_inches="tight")
+    fig.savefig(f"{output_path}.pdf", dpi=300, bbox_inches="tight")
     plt.close(fig)
 
     print(
-        f"Supplemental intervention effects by scenario figure saved to {output_path}.png and {output_path}.pdf"
+        f"NME ban interventions figure saved to {output_path}.png and {output_path}.pdf"
+    )
+
+
+def create_supplemental_5pp_improvement_interventions_figure(
+    future_years,
+    vaccination_scenarios,
+    vaccination_scenario_labels,
+    all_scenario_baseline_samples,
+    all_scenario_intervention_data,
+    importation_samples,
+    importation_count_samples,
+    baseline_fips,
+    scale,
+    output_path,
+):
+    """
+    Create supplemental figure showing 5pp coverage improvement intervention effects
+    across vaccination scenarios in a 2x2 grid.
+    """
+    interventions = [
+        "improve_cases_previously_counties",
+        "improve_bottom_decile_5pct",
+        "improve_top_risk_states_5pct",
+        "improve_top_risk_counties_5pct",
+    ]
+
+    intervention_labels = {
+        "improve_cases_previously_counties": "Counties with\noutbreaks",
+        "improve_bottom_decile_5pct": "Lowest coverage\ncounties",
+        "improve_top_risk_states_5pct": "Top risk states",
+        "improve_top_risk_counties_5pct": "Top risk counties",
+    }
+
+    # Create figure with 2x2 subplots
+    fig, axes = plt.subplots(2, 2, figsize=(20, 17))
+
+    # Apply standard styling to all subplots
+    for ax_row in axes:
+        for ax in ax_row:
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+            ax.get_xaxis().tick_bottom()
+            ax.get_yaxis().tick_left()
+            ax.tick_params(axis="x", direction="out")
+            ax.tick_params(axis="y", direction="out")
+            for spine in ax.spines.values():
+                spine.set_position(("outward", 5))
+            ax.set_axisbelow(True)
+
+    # Add subplot labels
+    labels = ["a", "b", "c", "d"]
+    for idx, (ax_row, label_row) in enumerate(
+        zip(axes, [labels[:2], labels[2:]])
+    ):
+        for jdx, (ax, label) in enumerate(zip(ax_row, label_row)):
+            ax.text(
+                -0.05,
+                1.08,
+                label,
+                transform=ax.transAxes,
+                fontsize=24,
+                fontweight="bold",
+                va="top",
+                ha="right",
+            )
+
+    # Plot each vaccination scenario
+    for idx, scenario in enumerate(vaccination_scenarios):
+        row = idx // 2
+        col = idx % 2
+        ax = axes[row, col]
+
+        plot_intervention_effects(
+            interventions=interventions,
+            intervention_labels=intervention_labels,
+            future_years=future_years,
+            baseline_samples_by_year=all_scenario_baseline_samples[scenario],
+            intervention_data=all_scenario_intervention_data[scenario],
+            importation_samples=importation_samples,
+            importation_count_samples=importation_count_samples,
+            baseline_fips=baseline_fips,
+            scale=scale,
+            fig=fig,
+            ax=ax,
+        )
+
+        # Add scenario title to each subplot
+        ax.set_title(
+            vaccination_scenario_labels[scenario], fontsize=28, pad=20
+        )
+
+    fig.tight_layout()
+    fig.savefig(f"{output_path}.png", dpi=300, bbox_inches="tight")
+    fig.savefig(f"{output_path}.pdf", dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+    print(
+        f"5pp improvement interventions figure saved to {output_path}.png and {output_path}.pdf"
+    )
+
+
+def create_supplemental_10pp_improvement_interventions_figure(
+    future_years,
+    vaccination_scenarios,
+    vaccination_scenario_labels,
+    all_scenario_baseline_samples,
+    all_scenario_intervention_data,
+    importation_samples,
+    importation_count_samples,
+    baseline_fips,
+    scale,
+    output_path,
+):
+    """
+    Create supplemental figure showing 10pp coverage improvement intervention effects
+    across vaccination scenarios in a 2x2 grid.
+    """
+    interventions = [
+        "improve_bottom_decile_10pct",
+        "improve_top_risk_states_10pct",
+        "improve_top_risk_counties_10pct",
+    ]
+
+    intervention_labels = {
+        "improve_bottom_decile_10pct": "Lowest coverage\ncounties",
+        "improve_top_risk_states_10pct": "Top risk states",
+        "improve_top_risk_counties_10pct": "Top risk counties",
+    }
+
+    # Create figure with 2x2 subplots
+    fig, axes = plt.subplots(2, 2, figsize=(20, 17))
+
+    # Apply standard styling to all subplots
+    for ax_row in axes:
+        for ax in ax_row:
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+            ax.get_xaxis().tick_bottom()
+            ax.get_yaxis().tick_left()
+            ax.tick_params(axis="x", direction="out")
+            ax.tick_params(axis="y", direction="out")
+            for spine in ax.spines.values():
+                spine.set_position(("outward", 5))
+            ax.set_axisbelow(True)
+
+    # Add subplot labels
+    labels = ["a", "b", "c", "d"]
+    for idx, (ax_row, label_row) in enumerate(
+        zip(axes, [labels[:2], labels[2:]])
+    ):
+        for jdx, (ax, label) in enumerate(zip(ax_row, label_row)):
+            ax.text(
+                -0.05,
+                1.08,
+                label,
+                transform=ax.transAxes,
+                fontsize=24,
+                fontweight="bold",
+                va="top",
+                ha="right",
+            )
+
+    # Plot each vaccination scenario
+    for idx, scenario in enumerate(vaccination_scenarios):
+        row = idx // 2
+        col = idx % 2
+        ax = axes[row, col]
+
+        plot_intervention_effects(
+            interventions=interventions,
+            intervention_labels=intervention_labels,
+            future_years=future_years,
+            baseline_samples_by_year=all_scenario_baseline_samples[scenario],
+            intervention_data=all_scenario_intervention_data[scenario],
+            importation_samples=importation_samples,
+            importation_count_samples=importation_count_samples,
+            baseline_fips=baseline_fips,
+            scale=scale,
+            fig=fig,
+            ax=ax,
+        )
+
+        # Add scenario title to each subplot
+        ax.set_title(
+            vaccination_scenario_labels[scenario], fontsize=28, pad=20
+        )
+
+    fig.tight_layout()
+    fig.savefig(f"{output_path}.png", dpi=300, bbox_inches="tight")
+    fig.savefig(f"{output_path}.pdf", dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+    print(
+        f"10pp improvement interventions figure saved to {output_path}.png and {output_path}.pdf"
     )
 
 
 if __name__ == "__main__":
-    fig, ax = setup_plot(2, 2)  # type: ignore
+    # Create figure with 2 rows: top row has 2 subplots, bottom row has 1 wide subplot
+    fig = plt.figure(figsize=(20, 17))
+
+    # Create GridSpec for custom layout
+    import matplotlib.gridspec as gridspec
+
+    gs = gridspec.GridSpec(2, 2, figure=fig)
+
+    # Top row: two subplots
+    ax_a = fig.add_subplot(gs[0, 0])
+    ax_b = fig.add_subplot(gs[0, 1])
+
+    # Bottom row: one wide subplot spanning both columns
+    ax_c = fig.add_subplot(gs[1, :])
+
+    # Apply styling to all axes
+    for ax in [ax_a, ax_b, ax_c]:
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.get_xaxis().tick_bottom()
+        ax.get_yaxis().tick_left()
+        ax.tick_params(axis="x", direction="out")
+        ax.tick_params(axis="y", direction="out")
+        for spine in ax.spines.values():
+            spine.set_position(("outward", 5))
+        ax.set_axisbelow(True)
 
     # -------------------------------------------------------------------------
     # Subplot a: map of NME rates
     # -------------------------------------------------------------------------
-    ax[0, 0].text(  # type: ignore
+    ax_a.text(
         -0.05,
         1.28,
         "a",
-        transform=ax[0, 0].transAxes,  # type: ignore
+        transform=ax_a.transAxes,
         fontsize=24,
         fontweight="bold",
         va="top",
@@ -1468,7 +1679,7 @@ if __name__ == "__main__":
         df["fips"],
         df["nonmed_exempt_pct"],
         fig,
-        ax[0, 0],  # type: ignore
+        ax_a,
         cbar_label="Nonmedical exemption rate (%)",
         cbar_type="exemptions",
         point_data=None,
@@ -1477,11 +1688,11 @@ if __name__ == "__main__":
     # -------------------------------------------------------------------------
     # Subplot b: coverage change vs NME policy
     # -------------------------------------------------------------------------
-    ax[0, 1].text(  # type: ignore
+    ax_b.text(
         -0.05,
         1.08,
         "b",
-        transform=ax[0, 1].transAxes,  # type: ignore
+        transform=ax_b.transAxes,
         fontsize=24,
         fontweight="bold",
         va="top",
@@ -1498,7 +1709,7 @@ if __name__ == "__main__":
     regression_df = coverage_increase_nme_policy_change(
         vac_df,
         fig,
-        ax[0, 1],  # type: ignore
+        ax_b,
     )
     regression_df.write_csv(
         os.path.join(
@@ -1508,7 +1719,7 @@ if __name__ == "__main__":
     )
 
     # -------------------------------------------------------------------------
-    # Load shared data for subplots c and d
+    # Load shared data for subplot c
     # -------------------------------------------------------------------------
     with open(os.path.join(output_dir, "scale_2025.pkl"), "rb") as f:
         scale_2025 = pickle.load(f)
@@ -1541,13 +1752,13 @@ if __name__ == "__main__":
                 intervention_data[intervention][year] = pickle.load(f)
 
     # -------------------------------------------------------------------------
-    # Subplot c: intervention effects
+    # Subplot c: intervention effects (now spanning full width)
     # -------------------------------------------------------------------------
-    ax[1, 0].text(  # type: ignore
+    ax_c.text(
         -0.05,
         1.08,
         "c",
-        transform=ax[1, 0].transAxes,  # type: ignore
+        transform=ax_c.transAxes,
         fontsize=24,
         fontweight="bold",
         va="top",
@@ -1578,43 +1789,7 @@ if __name__ == "__main__":
         baseline_fips=baseline_fips,
         scale=scale_2025,
         fig=fig,
-        ax=ax[1, 0],  # type: ignore
-    )
-
-    # -------------------------------------------------------------------------
-    # Subplot d: coverage change vs cases scatter
-    # Change SUBPLOT_D_INTERVENTION to switch which intervention is shown
-    # -------------------------------------------------------------------------
-    SUBPLOT_D_INTERVENTION = "ban_top_risk_states"
-
-    ax[1, 1].text(  # type: ignore
-        -0.05,
-        1.08,
-        "d",
-        transform=ax[1, 1].transAxes,  # type: ignore
-        fontsize=24,
-        fontweight="bold",
-        va="top",
-        ha="right",
-    )
-    plot_coverage_change_vs_cases(
-        intervention=SUBPLOT_D_INTERVENTION,
-        future_years=FUTURE_YEARS,
-        baseline_samples_by_year=baseline_samples_by_year,
-        intervention_data=intervention_data,
-        importation_samples=jnp.minimum(
-            importation_samples_future * import_scaler_2025, 1
-        ),
-        importation_count_samples=(
-            importation_count_samples_future * import_scaler_2025
-        ),
-        baseline_fips=baseline_fips,
-        scale=scale_2025,
-        adjacency_data_path=os.path.join(data_dir, "county_adjacencies.txt"),
-        output_dir=output_dir,
-        fig=fig,
-        ax=ax[1, 1],  # type: ignore
-        year=2026,
+        ax=ax_c,
     )
 
     fig.tight_layout()
@@ -1635,54 +1810,18 @@ if __name__ == "__main__":
         bbox_inches="tight",
     )
 
-    # -------------------------------------------------------------------------
-    # Create supplemental figure with alternative intervention scenarios
-    # -------------------------------------------------------------------------
-    alternative_interventions = [
-        "ban_top_nme_states",
-        "ban_top_risk_counties",
-    ]
-
-    create_supplemental_intervention_scatter_figure(
-        interventions=alternative_interventions,
-        intervention_labels=INTERVENTION_LABELS,
-        future_years=FUTURE_YEARS,
-        baseline_samples_by_year=baseline_samples_by_year,
-        intervention_data=intervention_data,
-        importation_samples=jnp.minimum(
-            importation_samples_future * import_scaler_2025, 1
-        ),
-        importation_count_samples=(
-            importation_count_samples_future * import_scaler_2025
-        ),
-        baseline_fips=baseline_fips,
-        scale=scale_2025,
-        adjacency_data_path=os.path.join(data_dir, "county_adjacencies.txt"),
-        output_dir=output_dir,
-        output_path=os.path.join(
-            fig_dir,
-            "figure_supplemental_intervention_coverage_vs_incidence",
-        ),
-        year=2026,
-    )
-
-    # -------------------------------------------------------------------------
-    # Create supplemental figure: intervention effects across vaccination scenarios
-    # -------------------------------------------------------------------------
-
-    # Define the 4 vaccination scenarios to show
+    # Define the 4 vaccination scenarios
     vaccination_scenarios_to_plot = [
         "targeted_worsening",
         "universal_worsening",
         "targeted_improvement",
-        "universal_improvement",
     ]
 
     vaccination_scenario_labels = {
-        "targeted_worsening": "Vaccinations universally decline by 100% more",
-        "universal_worsening": "Universal Vaccinations universally decline by 50% more",
-        "targeted_improvement": "Universal 95% coverage by 2030",
-        "universal_improvement": "1% improvement year-over-year",
+        "targeted_worsening": "Targeted worsening",
+        "universal_worsening": "Universal worsening",
+        "targeted_improvement": "Targeted improvement",
+        "universal_improvement": "Universal improvement",
     }
 
     # Load baseline samples for each vaccination scenario
@@ -1700,27 +1839,44 @@ if __name__ == "__main__":
                     pickle.load(f)
                 )
 
-    # Load intervention data for each vaccination scenario
+    # Load ALL intervention data for each vaccination scenario
+    all_interventions = [
+        "ban_top_risk_states",
+        "ban_top_nme_states",
+        "ban_top_risk_counties",
+        "improve_cases_previously_counties",
+        "improve_bottom_decile_5pct",
+        "improve_bottom_decile_10pct",
+        "improve_top_risk_states_5pct",
+        "improve_top_risk_states_10pct",
+        "improve_top_risk_counties_5pct",
+        "improve_top_risk_counties_10pct",
+    ]
+
     all_scenario_intervention_data = {}
     for vac_scenario in vaccination_scenarios_to_plot:
         all_scenario_intervention_data[vac_scenario] = {}
-        for intervention in INTERVENTIONS:
+        for intervention in all_interventions:
             all_scenario_intervention_data[vac_scenario][intervention] = {}
             for year in FUTURE_YEARS:
-                with open(
-                    os.path.join(
-                        output_dir,
-                        f"risk_projections_{intervention}_{vac_scenario}_{year}.pkl",
-                    ),
-                    "rb",
-                ) as f:
-                    all_scenario_intervention_data[vac_scenario][intervention][
-                        year
-                    ] = pickle.load(f)
+                try:
+                    with open(
+                        os.path.join(
+                            output_dir,
+                            f"risk_projections_{intervention}_{vac_scenario}_{year}.pkl",
+                        ),
+                        "rb",
+                    ) as f:
+                        all_scenario_intervention_data[vac_scenario][
+                            intervention
+                        ][year] = pickle.load(f)
+                except FileNotFoundError:
+                    print(
+                        f"Warning: Could not find data for {intervention} in {vac_scenario} {year}"
+                    )
 
-    create_supplemental_intervention_effects_by_scenario_figure(
-        interventions=INTERVENTIONS,
-        intervention_labels=INTERVENTION_LABELS,
+    # Create three supplemental figures
+    create_supplemental_nme_ban_interventions_figure(
         future_years=FUTURE_YEARS,
         vaccination_scenarios=vaccination_scenarios_to_plot,
         vaccination_scenario_labels=vaccination_scenario_labels,
@@ -1736,6 +1892,46 @@ if __name__ == "__main__":
         scale=scale_2025,
         output_path=os.path.join(
             fig_dir,
-            "figure_supplemental_nme_policies_by_vaccination_scenario",
+            "figure_supplemental_nme_ban_interventions",
+        ),
+    )
+
+    create_supplemental_5pp_improvement_interventions_figure(
+        future_years=FUTURE_YEARS,
+        vaccination_scenarios=vaccination_scenarios_to_plot,
+        vaccination_scenario_labels=vaccination_scenario_labels,
+        all_scenario_baseline_samples=all_scenario_baseline_samples,
+        all_scenario_intervention_data=all_scenario_intervention_data,
+        importation_samples=jnp.minimum(
+            importation_samples_future * import_scaler_2025, 1
+        ),
+        importation_count_samples=(
+            importation_count_samples_future * import_scaler_2025
+        ),
+        baseline_fips=baseline_fips,
+        scale=scale_2025,
+        output_path=os.path.join(
+            fig_dir,
+            "figure_supplemental_5pp_improvement_interventions",
+        ),
+    )
+
+    create_supplemental_10pp_improvement_interventions_figure(
+        future_years=FUTURE_YEARS,
+        vaccination_scenarios=vaccination_scenarios_to_plot,
+        vaccination_scenario_labels=vaccination_scenario_labels,
+        all_scenario_baseline_samples=all_scenario_baseline_samples,
+        all_scenario_intervention_data=all_scenario_intervention_data,
+        importation_samples=jnp.minimum(
+            importation_samples_future * import_scaler_2025, 1
+        ),
+        importation_count_samples=(
+            importation_count_samples_future * import_scaler_2025
+        ),
+        baseline_fips=baseline_fips,
+        scale=scale_2025,
+        output_path=os.path.join(
+            fig_dir,
+            "figure_supplemental_10pp_improvement_interventions",
         ),
     )
