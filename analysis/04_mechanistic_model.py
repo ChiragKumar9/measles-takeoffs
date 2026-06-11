@@ -38,50 +38,91 @@ if __name__ == "__main__":
             susceptible_fraction = 1 - immune
             # calculate final outbreak size
             R0 = 12.0  # measles basic reproduction number
-            # final outbreak size calculation
-            final_sizes = np.array(
-                [
-                    final_outbreak_size.final_outbreak_size(R0, s0) * N
-                    for s0, N in zip(susceptible_fraction, population)
-                ]
+            Re = R0 * susceptible_fraction
+
+            # compute per-row final sizes and variances
+            # for Re >= 1, final_outbreak_size returns z_final (infected fraction)
+            # for Re < 1, returns expected count in individuals
+            results = [
+                final_outbreak_size.final_outbreak_size(R0, s0, N)
+                for s0, N in zip(susceptible_fraction, population)
+            ]
+            final_sizes = np.array([r[0] for r in results])
+            final_variances = np.array(
+                [r[1] if r[1] is not None else np.nan for r in results]
             )
 
-            # now scale these values to match the scale of the observed outbreaks
+            # split rows by regime
+            subcritical_mask = Re < 1
+            supercritical_mask = ~subcritical_mask
+
             observed_outbreaks = df["cases_outbreak"].to_numpy()
-            # fit a regression
-            # include state and year fixed effects
+
+            # --- subcritical rows: use stuttering chains directly ---
+            # final_sizes for subcritical rows are already expected counts
+            # (capped at N), so use them directly as median predictions.
+            # Approximate 95% interval via Poisson quantiles around the mean.
+            sc_mu = final_sizes[subcritical_mask]
+            sc_median = stats.poisson.ppf(0.5, sc_mu)
+            sc_lower = stats.poisson.ppf(0.025, sc_mu)
+            sc_upper = stats.poisson.ppf(0.975, sc_mu)
+
+            # --- supercritical rows: Poisson GLM with intercept and
+            # population offset. final_sizes here are z_final fractions,
+            # so log(population) enters as an exposure term. ---
+            df_dummies = df.to_dummies(
+                columns="state", separator="_", drop_first=True
+            )
             year_fixed_effects = df.select(
                 [f"year_{y}" for y in years[1:]]
             ).to_numpy()
-            df = df.to_dummies(
-                columns="state", separator="_", drop_first=False
-            )
-            state_fixed_effects = [
+            state_fixed_effect_cols = [
                 col
-                for col in df.columns
+                for col in df_dummies.columns
                 if col.startswith("state_") and col != "state_ap"
             ]
-            state_fixed_effects = df.select(state_fixed_effects).to_numpy()
-            X = np.hstack(
+            state_fixed_effects = df_dummies.select(
+                state_fixed_effect_cols
+            ).to_numpy()
+
+            X_super = np.hstack(
                 [
-                    final_sizes.reshape(-1, 1),
-                    year_fixed_effects,
-                    state_fixed_effects,
+                    final_sizes[supercritical_mask].reshape(-1, 1),
+                    year_fixed_effects[supercritical_mask],
+                    state_fixed_effects[supercritical_mask],
                 ]
             )
+            X_super = sm.add_constant(X_super)
+
             model = sm.GLM(
-                observed_outbreaks, X, family=sm.families.Poisson()
+                observed_outbreaks[supercritical_mask],
+                X_super,
+                family=sm.families.Poisson(),
+                # offset=np.log(population[supercritical_mask]),
             ).fit()
 
-            # get the predictions
-            mu = model.fittedvalues
+            print(model.summary())
 
-            # extract median and 95th percentile interval
-            median = stats.poisson.ppf(0.5, mu)
-            lower = stats.poisson.ppf(0.025, mu)
-            upper = stats.poisson.ppf(0.975, mu)
+            sp_mu = model.fittedvalues
+            sp_median = stats.poisson.ppf(0.5, sp_mu)
+            sp_lower = stats.poisson.ppf(0.025, sp_mu)
+            sp_upper = stats.poisson.ppf(0.975, sp_mu)
 
-            # pickle these three
+            # --- recombine into full-length arrays in original row order ---
+            n = len(observed_outbreaks)
+            median = np.empty(n)
+            lower = np.empty(n)
+            upper = np.empty(n)
+
+            median[subcritical_mask] = sc_median
+            lower[subcritical_mask] = sc_lower
+            upper[subcritical_mask] = sc_upper
+
+            median[supercritical_mask] = sp_median
+            lower[supercritical_mask] = sp_lower
+            upper[supercritical_mask] = sp_upper
+
+            # pickle results
             with open(
                 os.path.join(
                     output_dir,
@@ -94,6 +135,8 @@ if __name__ == "__main__":
                         "median": median,
                         "lower": lower,
                         "upper": upper,
+                        "subcritical_mask": subcritical_mask,
+                        "supercritical_mask": supercritical_mask,
                     },
                     f,
                 )

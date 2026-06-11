@@ -310,7 +310,7 @@ def plot_performance_comparison(df, fig, ax):
     ax.legend(
         [violinparts1["bodies"][0], violinparts2["bodies"][0]],
         ["2011-2020", "2021-2025"],
-        loc="upper right",
+        loc="upper left",
         edgecolor="black",
     )
 
@@ -527,12 +527,14 @@ def plot_5yr_performance_comparison(df, fig, ax):
         [violinparts1["bodies"][0], violinparts2["bodies"][0]],
         ["One year", "Five year"],
         edgecolor="black",
+        loc="upper left",
     )
 
     ax.set_xlabel("Year-to-year change in MMR coverage (%)")
     ax.set_ylabel("Residuals (reported - predicted cases)")
 
     # ax.set_yticks([-10, 0, 10, 20])
+    ax.set_yscale("symlog")
 
     return fig, ax
 
@@ -655,7 +657,7 @@ def plot_ecological_determinants(samples_pre, samples_post, df, fig, ax):
             )
             # print the covariate and its coefficient
             print(
-                f"{covariate} ({years[0]}-{years[-1]}): {median_effects[-1]:.2f}% change in incidence rate per 1 unit increase in predictor (95% CI: {lower_effects[-1]:.2f}%, {upper_effects[-1]:.2f}%)"
+                f"{covariate} ({years[0]}-{years[-1]}): {median_effects[-1]:.2f}% change in incidence rate per 1 unit increase in predictor (90% CI: {lower_effects[-1]:.2f}%, {upper_effects[-1]:.2f}%)"
             )
 
         ax.errorbar(
@@ -686,7 +688,7 @@ def plot_ecological_determinants(samples_pre, samples_post, df, fig, ax):
     # line at 0%
     ax.axhline(0, ls="--", color="k")
 
-    ax.legend(loc=(0.01, 0.78), edgecolor="black")
+    ax.legend(loc=(0.5, 0.78), edgecolor="black")
 
     ax.set_xticks(range(len(all_covariates)))  # type: ignore
     # at a 45 degree angle
@@ -728,7 +730,7 @@ if __name__ == "__main__":
     with open(
         os.path.join(
             output_dir,
-            "final_outbreak_size_predictions_[2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020].pkl",
+            "final_outbreak_size_predictions_[2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020]_five_year=False.pkl",
         ),
         "rb",
     ) as f:

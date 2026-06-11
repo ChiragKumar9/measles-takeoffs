@@ -169,8 +169,8 @@ if __name__ == "__main__":
             for mode in [
                 "time_and_group_varying",
                 "time_varying_only",
-                "group_varying_only",
-                "constant",
+                # "group_varying_only",
+                # "constant",
             ]:
                 controls = jnp.hstack([df_model.select(years).to_jax()])
                 if mode == "time_and_group_varying":
@@ -217,7 +217,7 @@ if __name__ == "__main__":
                 nuts_kernel = NUTS(
                     model.fit,
                     init_strategy=init_to_median(),
-                    target_accept_prob=0.80,
+                    target_accept_prob=0.98,
                 )
                 mcmc = MCMC(
                     nuts_kernel,

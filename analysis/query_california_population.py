@@ -12,7 +12,8 @@ load_dotenv()
 
 df = pl.read_excel(
     os.path.join(
-        "data", "Compiled_Vaccine_Exemption_Data_R1_110225_Hawaiied.xlsx"
+        "data",
+        "Compiled_Vaccine_Exemption_Data_R1_110225_Hawaiied_AK_CA_Updated.xlsx",
     ),
     schema_overrides={"FIPS": pl.String},
 )

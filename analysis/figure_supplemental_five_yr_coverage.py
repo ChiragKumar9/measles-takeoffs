@@ -178,7 +178,7 @@ def plot_coverage_various_models(df, fig, ax):
 
     ax.set_xlabel("Year")
     ax.set_ylabel(
-        "% change in incidence rate per 1% increase\nin 5 year MMR vaccine coverage"
+        "% change in incidence rate per 1pp increase\nin 5 year MMR vaccine coverage"
     )
     ax.legend(loc=(0.2, 0.65), edgecolor="black")
 
@@ -361,6 +361,7 @@ def plot_5yr_performance_comparison(df, fig, ax):
         [violinparts1["bodies"][0], violinparts2["bodies"][0]],
         ["One year", "Five year"],
         edgecolor="black",
+        loc="lower left",
     )
 
     ax.set_xlabel("Year-to-year change in MMR coverage (%)")
@@ -520,9 +521,12 @@ def plot_5yr_performance_comparison_mechanistic(df, fig, ax):
         [violinparts1["bodies"][0], violinparts2["bodies"][0]],
         ["One year", "Five year"],
         edgecolor="black",
+        loc="lower left",
     )
     ax.set_xlabel("Year-to-year change in MMR coverage (%)")
     ax.set_ylabel("Residuals (reported - predicted cases)")
+
+    ax.set_yscale("symlog")
 
     return fig, ax
 

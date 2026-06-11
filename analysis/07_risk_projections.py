@@ -24,6 +24,7 @@ output_dir = os.path.join(
     os.path.dirname(os.path.dirname(__file__)), "outputs"
 )
 
+GLOBALS_PRIOR_SD = 1
 
 if __name__ == "__main__":
     # read the projection dataset
@@ -178,13 +179,15 @@ if __name__ == "__main__":
         adjacency_matrix=adjacency_matrix,
         spatial_sigma=dist.HalfNormal(0.25),
         car_sigma=dist.HalfNormal(0.25),
+        global_priors=dist.Normal(0, GLOBALS_PRIOR_SD),
+        baseline=dist.Normal(0, GLOBALS_PRIOR_SD),
     )
 
     # fit model
     nuts_kernel = NUTS(
         model.fit,
-        init_strategy=init_to_median(),
-        target_accept_prob=0.85,
+        init_strategy=init_to_median(num_samples=50),
+        target_accept_prob=0.7,
     )
     mcmc = MCMC(
         nuts_kernel,
@@ -202,7 +205,13 @@ if __name__ == "__main__":
 
     posterior_samples = mcmc.get_samples()
 
-    with open(os.path.join(output_dir, "posterior_samples.pkl"), "wb") as f:
+    with open(
+        os.path.join(
+            output_dir,
+            f"posterior_samples_globals_prior_sd={GLOBALS_PRIOR_SD}.pkl",
+        ),
+        "wb",
+    ) as f:
         pickle.dump(posterior_samples, f)
 
     # pass the posterior samples to the model to generate predictions
@@ -223,7 +232,7 @@ if __name__ == "__main__":
     with open(
         os.path.join(
             output_dir,
-            "risk_projections.pkl",
+            f"risk_projections_globals_prior_sd={GLOBALS_PRIOR_SD}.pkl",
         ),
         "wb",
     ) as f:
@@ -251,6 +260,7 @@ if __name__ == "__main__":
         "universal_worsening",
         "targeted_improvement",
         "universal_improvement",
+        "no_change",
     ]
 
     for scenario in scenarios:
@@ -325,13 +335,13 @@ if __name__ == "__main__":
             with open(
                 os.path.join(
                     output_dir,
-                    f"risk_projections_{scenario}_{future_year}.pkl",
+                    f"risk_projections_{scenario}_{future_year}_globals_prior_sd={GLOBALS_PRIOR_SD}.pkl",
                 ),
                 "wb",
             ) as f:
                 pickle.dump(future_predictions, f)
 
             print(
-                f"  Saved: risk_projections_{scenario}_{future_year}.pkl  "
+                f"  Saved: risk_projections_{scenario}_{future_year}_globals_prior_sd={GLOBALS_PRIOR_SD}.pkl  "
                 f"({future_predictions.shape[1]} counties)"
             )

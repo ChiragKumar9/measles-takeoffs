@@ -1,7 +1,14 @@
 import os
+
+os.environ["XLA_FLAGS"] = "--xla_gpu_enable_fast_min_max=false"
+os.environ["JAX_COMPILATION_CACHE_DIR"] = "/tmp/jax_cache"
+
+import jax
+
+jax.config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
+
 import pickle
 
-import jax.numpy as jnp
 import numpyro.distributions as dist
 import polars as pl
 import yaml
@@ -11,9 +18,11 @@ from numpyro.infer import Predictive
 from sklearn.preprocessing import StandardScaler
 
 enable_x64()
-set_host_device_count(4)
+set_host_device_count(1)
 
 from outbreak_size import adjacency, poisson
+
+GLOBALS_PRIOR_SD = 1
 
 with open("params.yml", "r") as f:
     params = yaml.safe_load(f)
@@ -43,9 +52,17 @@ INTERVENTIONS = [
     "ban_top_risk_states",
     "ban_top_nme_states",
     "ban_top_risk_counties",
+    "improve_cases_previously_counties",
+    "improve_bottom_decile_5pct",
+    "improve_bottom_decile_10pct",
+    "improve_top_risk_states_5pct",
+    "improve_top_risk_states_10pct",
+    "improve_top_risk_counties_5pct",
+    "improve_top_risk_counties_10pct",
 ]
 
 VACCINATION_SCENARIOS = [
+    "no_change",
     "baseline",
     "targeted_worsening",
     "universal_worsening",
@@ -71,13 +88,15 @@ if __name__ == "__main__":
     # -------------------------------------------------------------------------
     # Step 2: Load posterior samples from main projection run (fit once, reuse)
     # -------------------------------------------------------------------------
-    with open(os.path.join(output_dir, "risk_projections.pkl"), "rb") as f:
-        # We only need the posterior samples, not the predictions themselves.
-        # Load the MCMC samples separately — they should have been saved.
-        pass
 
     # posterior_samples must be saved from the main run. Load them:
-    with open(os.path.join(output_dir, "posterior_samples.pkl"), "rb") as f:
+    with open(
+        os.path.join(
+            output_dir,
+            f"posterior_samples_globals_prior_sd={GLOBALS_PRIOR_SD}.pkl",
+        ),
+        "rb",
+    ) as f:
         posterior_samples = pickle.load(f)
     print(f"Loaded posterior samples: {list(posterior_samples.keys())}")
 
@@ -110,28 +129,34 @@ if __name__ == "__main__":
     )
 
     # -------------------------------------------------------------------------
-    # Step 5: Run all combinations
+    # Step 5: Run all combinations - OUTER LOOP: vaccination scenarios
     # -------------------------------------------------------------------------
-    for intervention in INTERVENTIONS:
-        intervention_base = intervention_bases[intervention]
-        intervened_fips = intervention_base.filter(
-            pl.col("intervention_applied")
-        )["fips"].to_list()
+    for vax_scenario in VACCINATION_SCENARIOS:
+        print(f"\n{'=' * 80}")
+        print(f"VACCINATION SCENARIO: {vax_scenario}")
+        print(f"{'=' * 80}\n")
 
-        for vax_scenario in VACCINATION_SCENARIOS:
-            for future_year in FUTURE_YEARS:
-                print(
-                    f"\n--- {intervention} | {vax_scenario} | {future_year} ---"
-                )
+        for future_year in FUTURE_YEARS:
+            print(f"\n{'-' * 80}")
+            print(f"Year: {future_year}")
+            print(f"{'-' * 80}\n")
 
-                # Load the vaccination scenario projection for this year
-                vax_df = pl.read_csv(
-                    os.path.join(
-                        output_dir,
-                        f"projection_dataset_{vax_scenario}_{future_year}.csv",
-                    ),
-                    schema_overrides={"fips": pl.String},
-                )
+            # Load the vaccination scenario projection for this year once
+            vax_df = pl.read_csv(
+                os.path.join(
+                    output_dir,
+                    f"projection_dataset_{vax_scenario}_{future_year}.csv",
+                ),
+                schema_overrides={"fips": pl.String},
+            )
+
+            for intervention in INTERVENTIONS:
+                print(f"  Processing: {intervention}")
+
+                intervention_base = intervention_bases[intervention]
+                intervened_fips = intervention_base.filter(
+                    pl.col("intervention_applied")
+                )["fips"].to_list()
 
                 # Build combined dataset:
                 # - remove_bans: apply delta offset to vaccination scenario
@@ -243,7 +268,7 @@ if __name__ == "__main__":
                 # Predictive only — no MCMC refitting
                 predictive = Predictive(model.fit, posterior_samples)
                 pred_samples = predictive(
-                    PRNGKey(params["seed"]),
+                    PRNGKey(params["seed"] + 1),
                     is_observed=combined["in_train"].to_jax(),
                     cases=None,
                 )
@@ -277,6 +302,6 @@ if __name__ == "__main__":
                     )
 
                 print(
-                    f"  Saved {out_path} — shape {predictions.shape}, "
+                    f"    Saved {out_path} — shape {predictions.shape}, "
                     f"{sum(proj_df['intervention_applied'].to_list())} intervened counties"
                 )

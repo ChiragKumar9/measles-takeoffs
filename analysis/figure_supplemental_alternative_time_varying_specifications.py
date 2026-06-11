@@ -54,42 +54,28 @@ def plot_time_varying_vaccine_effect(
     std_wh = df["estimated_mmr_cov"].to_numpy().std()
     # get the relevant part of the sample for each sample
     for idx, model in enumerate(sample_dict_wh.keys()):
-        mu = sample_dict_wh[model]["mu"]
-        samples = sample_dict_wh[model]["effects_over_time_and_group"][:, :, 0]
-        samples_wh = samples / std_wh
-        # exponentiate and multiply by 100
-        samples_wh = jnp.exp(samples_wh) * 100
-        # to express as percent change
-        samples_wh = samples_wh - 100
+        # Extract the nationwide population-level effect
+        # Shape: [n_samples, n_years, n_covariates]
+        effects = sample_dict_wh[model]["effects_over_time"][:, :, 0]
 
-        # collect the values by years
-        median_effect = np.array([])
-        lower_effect = np.array([])
-        upper_effect = np.array([])
+        # Model stores: index 0 = newest year, index -1 = oldest year
+        # Reverse to chronological order (oldest to newest)
+        effects = effects[:, ::-1]
+
+        # Scale by standard deviation
+        samples_wh = effects / std_wh
+
+        # Exponentiate and convert to percent change
+        samples_wh = jnp.exp(samples_wh) * 100 - 100
+
+        # Compute median and credible intervals across samples for each year
+        median_effect = jnp.median(samples_wh, axis=0)
+        lower_effect = jnp.quantile(samples_wh, 0.025, axis=0)
+        upper_effect = jnp.quantile(samples_wh, 0.975, axis=0)
+
         years_all_out = range(
             int(min(years_in_order)), int(max(years_in_order)) + 1
         )
-        for year in years_all_out:
-            mask = df["year"].is_in(year).to_jax()
-            samples = samples_wh[:, mask]
-            # average weighted by cases
-            # samples = (
-            #     samples * mu[:, mask] / mu[:, mask].sum(axis=1, keepdims=True)
-            # )
-            # samples = samples.sum(axis=1)
-            # simple average
-            samples = samples.mean(
-                axis=1
-            )  # average across county-years in each sample
-            median_effect = np.append(
-                median_effect, float(jnp.median(samples, axis=0))
-            )
-            lower_effect = np.append(
-                lower_effect, float(jnp.quantile(samples, 0.025, axis=0))
-            )
-            upper_effect = np.append(
-                upper_effect, float(jnp.quantile(samples, 0.975, axis=0))
-            )
 
         if rolling_average:
             n = 2
@@ -125,7 +111,7 @@ def plot_time_varying_vaccine_effect(
 
     ax.set_xlabel("Year")
     ax.set_ylabel(
-        "% change in outbreak size per 1%\nincrease in vaccine coverage"
+        "% change in outbreak size per 1pp\nincrease in vaccine coverage"
     )
 
     return fig, ax
@@ -194,6 +180,32 @@ def plot_coverage_cases(df1, df2, label1, label2, loc, fig, ax):
     ax.legend(loc=loc, edgecolor="black")
 
 
+def plot_importation_distribution(d_2025, d_not_2025, fig, ax):
+    # consistent integer bins of 0, 1, 2, 3, 4, 5, 6
+    bins = np.arange(-0.5, 7.5, 1)
+    ax.hist(
+        d_2025,
+        alpha=0.5,
+        label="2025",
+        density=True,
+        bins=bins,  # type: ignore
+        # brown
+        color="brown",
+    )
+    ax.hist(
+        d_not_2025,
+        alpha=0.5,
+        label="2011-2024",
+        density=True,
+        bins=bins,  # type: ignore
+        # purple
+        color="purple",
+    )
+    ax.legend(edgecolor="black")
+    ax.set_xlabel("Number of known imported measles cases")
+    ax.set_ylabel("Density")
+
+
 if __name__ == "__main__":
     fig, ax = setup_plot(4, 2)  # type: ignore
 
@@ -239,27 +251,27 @@ if __name__ == "__main__":
         samples = pickle.load(file)
     sample_dict_wh["Time varying only"] = samples
 
-    # controls are group varying only
-    with open(
-        os.path.join(
-            output_dir,
-            "predictive_random_walk_poisson_CAR_group_varying_only_2025_oddities=True.pkl",
-        ),
-        "rb",
-    ) as file:
-        samples = pickle.load(file)
-    sample_dict_wh["State varying only"] = samples
+    # # controls are group varying only
+    # with open(
+    #     os.path.join(
+    #         output_dir,
+    #         "predictive_random_walk_poisson_CAR_group_varying_only_2025_oddities=True.pkl",
+    #     ),
+    #     "rb",
+    # ) as file:
+    #     samples = pickle.load(file)
+    # sample_dict_wh["State varying only"] = samples
 
-    # controls are constant
-    with open(
-        os.path.join(
-            output_dir,
-            "predictive_random_walk_poisson_CAR_constant_2025_oddities=True.pkl",
-        ),
-        "rb",
-    ) as file:
-        samples = pickle.load(file)
-    sample_dict_wh["Constant"] = samples
+    # # controls are constant
+    # with open(
+    #     os.path.join(
+    #         output_dir,
+    #         "predictive_random_walk_poisson_CAR_constant_2025_oddities=True.pkl",
+    #     ),
+    #     "rb",
+    # ) as file:
+    #     samples = pickle.load(file)
+    # sample_dict_wh["Constant"] = samples
 
     ax[0, 0].text(  # type: ignore
         -0.25,
@@ -370,27 +382,27 @@ if __name__ == "__main__":
         samples = pickle.load(file)
     sample_dict_wh["Time varying only"] = samples
 
-    # controls are group varying only
-    with open(
-        os.path.join(
-            output_dir,
-            "predictive_random_walk_poisson_CAR_group_varying_only_2025_oddities=True_exclude_16_17.pkl",
-        ),
-        "rb",
-    ) as file:
-        samples = pickle.load(file)
-    sample_dict_wh["State varying only"] = samples
+    # # controls are group varying only
+    # with open(
+    #     os.path.join(
+    #         output_dir,
+    #         "predictive_random_walk_poisson_CAR_group_varying_only_2025_oddities=True_exclude_16_17.pkl",
+    #     ),
+    #     "rb",
+    # ) as file:
+    #     samples = pickle.load(file)
+    # sample_dict_wh["State varying only"] = samples
 
-    # controls are constant
-    with open(
-        os.path.join(
-            output_dir,
-            "predictive_random_walk_poisson_CAR_constant_2025_oddities=True_exclude_16_17.pkl",
-        ),
-        "rb",
-    ) as file:
-        samples = pickle.load(file)
-    sample_dict_wh["Constant"] = samples
+    # # controls are constant
+    # with open(
+    #     os.path.join(
+    #         output_dir,
+    #         "predictive_random_walk_poisson_CAR_constant_2025_oddities=True_exclude_16_17.pkl",
+    #     ),
+    #     "rb",
+    # ) as file:
+    #     samples = pickle.load(file)
+    # sample_dict_wh["Constant"] = samples
 
     ax[2, 0].text(  # type: ignore
         -0.25,
@@ -421,7 +433,7 @@ if __name__ == "__main__":
         ),
         "2017 cases",
         "2017 Minnesota Hennepin\nOutbreak",
-        (0.2, 0.5),
+        (0.2, 0.6),
         fig,
         ax[2, 0],  # type: ignore
     )
@@ -474,27 +486,27 @@ if __name__ == "__main__":
         samples = pickle.load(file)
     sample_dict_wh["Time varying only"] = samples
 
-    # controls are group varying only
-    with open(
-        os.path.join(
-            output_dir,
-            "predictive_random_walk_poisson_CAR_group_varying_only_2025_oddities=False_no_2025_oddities.pkl",
-        ),
-        "rb",
-    ) as file:
-        samples = pickle.load(file)
-    sample_dict_wh["State varying only"] = samples
+    # # controls are group varying only
+    # with open(
+    #     os.path.join(
+    #         output_dir,
+    #         "predictive_random_walk_poisson_CAR_group_varying_only_2025_oddities=False_no_2025_oddities.pkl",
+    #     ),
+    #     "rb",
+    # ) as file:
+    #     samples = pickle.load(file)
+    # sample_dict_wh["State varying only"] = samples
 
-    # controls are constant
-    with open(
-        os.path.join(
-            output_dir,
-            "predictive_random_walk_poisson_CAR_constant_2025_oddities=False_no_2025_oddities.pkl",
-        ),
-        "rb",
-    ) as file:
-        samples = pickle.load(file)
-    sample_dict_wh["Constant"] = samples
+    # # controls are constant
+    # with open(
+    #     os.path.join(
+    #         output_dir,
+    #         "predictive_random_walk_poisson_CAR_constant_2025_oddities=False_no_2025_oddities.pkl",
+    #     ),
+    #     "rb",
+    # ) as file:
+    #     samples = pickle.load(file)
+    # sample_dict_wh["Constant"] = samples
 
     ax[3, 0].text(  # type: ignore
         -0.25,
@@ -506,13 +518,10 @@ if __name__ == "__main__":
         va="top",
         ha="right",
     )
-    plot_coverage_cases(
-        df.filter((pl.col("year") == 2025) & (~pl.col("oddities_2025"))),
-        df.filter((pl.col("year") == 2025) & (pl.col("oddities_2025"))),
-        "2025 cases",
-        r"Outbreak cases $\leq$ 10",
-        (0.2, 0.5),
-        fig,
+    plot_importation_distribution(
+        df.filter(pl.col("year") == 2025)["imported"].to_numpy(),
+        df.filter(pl.col("year") != 2025)["imported"].to_numpy(),
+        fig,  # type: ignore
         ax[3, 0],  # type: ignore
     )
 

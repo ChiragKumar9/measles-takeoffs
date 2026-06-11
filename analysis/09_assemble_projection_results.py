@@ -15,6 +15,8 @@ output_dir = os.path.join(
 
 percentile_method = "average"
 
+GLOBALS_PRIOR_SD = 1
+
 
 def mean_percentile_rank(samples_2d: np.ndarray) -> np.ndarray:
     """
@@ -44,7 +46,12 @@ def mean_percentile_rank(samples_2d: np.ndarray) -> np.ndarray:
     return percentiles.mean(axis=0) * 100
 
 
-with open(os.path.join(output_dir, "risk_projections.pkl"), "rb") as f:
+with open(
+    os.path.join(
+        output_dir, f"risk_projections_globals_prior_sd={GLOBALS_PRIOR_SD}.pkl"
+    ),
+    "rb",
+) as f:
     projections = pickle.load(f)
 
 df = pl.read_csv(
@@ -114,7 +121,7 @@ importation_count_samples = np.vstack(
 
 unconditioned_count_samples = (
     importation_probability_samples * np.array(projections)
-    + importation_count_samples  # <-- was + importation_probability_samples
+    + importation_count_samples
 )
 
 pop = df["pop"].to_numpy().reshape(1, -1)  # shape: (1, n_counties)

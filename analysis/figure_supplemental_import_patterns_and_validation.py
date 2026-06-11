@@ -350,47 +350,47 @@ if __name__ == "__main__":
     )
 
     counties_with_known_imports = counties_with_known_imports.filter(
-        pl.col("posterior_alpha_pre_2023").is_not_null()
-        & pl.col("posterior_beta_pre_2023").is_not_null()
-        & pl.col("posterior_alpha_pre_2023_log").is_not_null()
+        pl.col("posterior_alpha_pre_2021").is_not_null()
+        & pl.col("posterior_beta_pre_2021").is_not_null()
+        & pl.col("posterior_alpha_pre_2021_log").is_not_null()
     )
     # filter the year to be either the latest year for that county or at least
-    # be 2022
+    # be 2020
     counties_with_known_imports = counties_with_known_imports.with_columns(
         latest_year=pl.col("year").max().over(["state", "county"])
     )
     counties_with_known_imports = counties_with_known_imports.filter(
-        (pl.col("year") == pl.col("latest_year")) | (pl.col("year") >= 2022)
+        (pl.col("year") == pl.col("latest_year")) | (pl.col("year") >= 2020)
     )
     counties_with_known_imports = counties_with_known_imports.with_columns(
         # recall that gamma-poisson mixture is a negative binomial
         # so P(X >= 1) can be calculated using a neg binomial PMF
         probability_at_least_one_import_log=pl.struct(
-            ["posterior_alpha_pre_2023_log", "posterior_beta_pre_2023"]
+            ["posterior_alpha_pre_2021_log", "posterior_beta_pre_2021"]
         ).map_elements(
             lambda x: 1
             - (
-                x["posterior_beta_pre_2023"]
+                x["posterior_beta_pre_2021"]
                 / (
-                    x["posterior_alpha_pre_2023_log"]
-                    + x["posterior_beta_pre_2023"]
+                    x["posterior_alpha_pre_2021_log"]
+                    + x["posterior_beta_pre_2021"]
                 )
             )
-            ** x["posterior_alpha_pre_2023_log"],
+            ** x["posterior_alpha_pre_2021_log"],
             return_dtype=pl.Float64,
         ),
         probability_at_least_one_import=pl.struct(
-            ["posterior_alpha_pre_2023", "posterior_beta_pre_2023"]
+            ["posterior_alpha_pre_2021", "posterior_beta_pre_2021"]
         ).map_elements(
             lambda x: 1
             - (
-                x["posterior_beta_pre_2023"]
+                x["posterior_beta_pre_2021"]
                 / (
-                    x["posterior_alpha_pre_2023"]
-                    + x["posterior_beta_pre_2023"]
+                    x["posterior_alpha_pre_2021"]
+                    + x["posterior_beta_pre_2021"]
                 )
             )
-            ** x["posterior_alpha_pre_2023"],
+            ** x["posterior_alpha_pre_2021"],
             return_dtype=pl.Float64,
         ),
     )

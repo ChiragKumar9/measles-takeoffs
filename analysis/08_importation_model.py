@@ -19,52 +19,26 @@ with open("params.yml", "r") as f:
 def read_outbreaks(
     data_dir=data_dir,
 ) -> tuple[pl.DataFrame, pl.DataFrame]:
-    df = pl.read_excel(os.path.join(data_dir, "Combined Measles Dataset.xlsx"))
+    df = pl.read_excel(
+        os.path.join(data_dir, "Combined Measles Dataset QCed.xlsx")
+    )
 
     # to ensure consistent lower case column names
     df = df.rename({col: col.lower() for col in df.columns})
 
     df_2025 = pl.read_csv(
-        os.path.join(
-            data_dir, "measles_data", "measles_county_all_updates_detailed.csv"
-        ),
-        schema_overrides={"location_id": pl.String},
-    )
-    # add 0 padding to 4 digit fips codes
-    df_2025 = df_2025.with_columns(
-        location_id=pl.when(pl.col("location_id").str.len_chars() >= 2)
-        .then(pl.col("location_id").str.zfill(5))
-        .otherwise(pl.col("location_id"))
-    )
-    # rename columns to match the main df
-    df_2025 = df_2025.rename(
-        {
-            "location_id": "fips",
-            "location_name": "county",
-            "value": "cases",
-        }
+        os.path.join(data_dir, "2025CasesImports QCed clean.csv"),
+        schema_overrides={"fips": pl.String},
     )
 
-    df_2025 = df_2025.filter(pl.col("date").str.starts_with("2025"))
-
-    df_2025 = df_2025.with_columns(
-        year=pl.lit(2025),
-        state=pl.col("county").str.split(", ").list.get(1),
-        county=pl.col("county").str.split(", ").list.get(0),
+    # set the fips for any county that is a higher level region to be the name
+    # of the county
+    df_2025 = df_2025.filter(pl.col("Lauren Case").is_not_null()).with_columns(
+        cases=pl.col("Lauren Case")
     )
 
-    # map the outcome type to differentiate indigenous vs imported cases
-    df_2025 = df_2025.with_columns(
-        outcome_type=pl.when(pl.col("outcome_type") == "case_imported")
-        .then(pl.lit("imported"))
-        .otherwise(pl.lit("indigenous"))
-    )
-    # group by the case type to get imports vs indigenous cases
-    df_2025 = df_2025.group_by(
-        ["year", "state", "county", "fips", "outcome_type"]
-    ).agg(pl.sum("cases"))
-    # pivot the outcome type to columns
-    df_2025 = df_2025.pivot(on="outcome_type", values="cases")
+    # drop anything south carolina because we have our own south carolina data
+    df_2025 = df_2025.filter(pl.col("state") != "South Carolina")
 
     # concatenate and return
     df = pl.concat([df, df_2025], how="diagonal_relaxed")
@@ -447,12 +421,10 @@ if __name__ == "__main__":
     # save the values separately from the samples
 
     samples = df.select("importation_probability_samples")
-    importation_count_samples = df.select(
-        "expected_importations_samples"
-    )  # <-- add
+    importation_count_samples = df.select("expected_importations_samples")
     df = df.drop(
         ["importation_probability_samples", "expected_importations_samples"]
-    )  # <-- drop both
+    )
 
     with open(
         os.path.join(
@@ -462,7 +434,7 @@ if __name__ == "__main__":
     ) as f:
         pickle.dump(samples, f)
 
-    with open(  # <-- add
+    with open(
         os.path.join(output_dir, "empirical_importation_count_samples.pkl"),
         "wb",
     ) as f:

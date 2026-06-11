@@ -1,20 +1,13 @@
 import argparse
 import os
 
-import matplotlib.pyplot as plt
-import numpy as np
 import polars as pl
 import yaml
 from addfips import AddFIPS
 from dotenv import load_dotenv
-from matplotlib import rc
 from tqdm.auto import tqdm
 
-from outbreak_size import utils, vaccination_wrangling
-
-plt.rcParams["figure.figsize"] = [9, 9]
-font = {"family": "Nimbus Roman", "size": 28}
-rc("font", **font)
+from outbreak_size import synth_pop_clusters, utils, vaccination_wrangling
 
 data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 
@@ -47,13 +40,43 @@ def read_outbreaks(data_dir=data_dir) -> pl.DataFrame:
         schema_overrides={"fips": pl.String},
     )
 
+    # correct a year = 2925 to a 2025
+    df_2025 = df_2025.with_columns(
+        year=pl.when(pl.col("year") == 2925)
+        .then(2025)
+        .otherwise(pl.col("year"))
+    )
+
+    # # drop Central, Eastern, and Western Iowa bc no clue where these are
+    # # county is "Central" and state is "Iowa"
+    # df_2025 = df_2025.filter(
+    #     ~(
+    #         (pl.col("county") == "Central")
+    #         & (pl.col("state") == "Iowa")
+    #     )
+    # )
+    # df_2025 = df_2025.filter(
+    #     ~(
+    #         (pl.col("county") == "Eastern")
+    #         & (pl.col("state") == "Iowa")
+    #     )
+    # )
+    # df_2025 = df_2025.filter(
+    #     ~(
+    #         (pl.col("county") == "Western")
+    #         & (pl.col("state") == "Iowa")
+    #     )
+    # )
+    # same with Central Utah
+    df_2025 = df_2025.filter(
+        ~((pl.col("county") == "Central") & (pl.col("state") == "Utah"))
+    )
+
     # set the fips for any county that is a higher level region to be the name
     # of the county
     # override the cases column with Lauren Case
-    df_2025 = df_2025.with_columns(
-        cases=pl.when(pl.col("Lauren Case").is_not_null())
-        .then(pl.col("Lauren Case"))
-        .otherwise(pl.col("cases"))
+    df_2025 = df_2025.filter(pl.col("Lauren Case").is_not_null()).with_columns(
+        cases=pl.col("Lauren Case")
     )
 
     # drop anything south carolina because we have our own south carolina data
@@ -79,6 +102,8 @@ def read_outbreaks(data_dir=data_dir) -> pl.DataFrame:
 
 
 def process_outbreaks_df(outbreaks_df: pl.DataFrame) -> pl.DataFrame:
+    # remove anything pre 2011 because we declare study period as 2011-2025
+    outbreaks_df = outbreaks_df.filter(pl.col("year") >= 2011)
     # the last row in outbreaks is a null row with the total number of cases over
     # the study period
     outbreaks_df = outbreaks_df.filter(pl.col("year").is_not_null())
@@ -92,16 +117,6 @@ def process_outbreaks_df(outbreaks_df: pl.DataFrame) -> pl.DataFrame:
         fips=pl.when(pl.col("fips").str.len_chars() > 2)
         .then(pl.col("fips").str.zfill(5))
         .otherwise(pl.col("fips"))
-    )
-    # for now, let's drop 2025 outbreaks with one or two digit fips codes because
-    # in these cases the data are not at the state level but rather in an unknown
-    # county
-    outbreaks_df = outbreaks_df.filter(
-        ~(
-            (pl.col("year") == 2025)
-            & (pl.col("fips").str.len_chars() < 5)
-            & pl.col("fips").is_not_null()
-        )
     )
 
     # last column seems to be urls of sources, drop it
@@ -216,6 +231,10 @@ def process_outbreaks_df(outbreaks_df: pl.DataFrame) -> pl.DataFrame:
 def higher_level_regions() -> dict[str, list[str]]:
     assignment_special_places = {
         "Fulton and Gwynett": ["13121", "13135"],
+        # "Fulton, Gwinett": ["13121", "13135"],
+        # "Forsyth, Fulton, Paulding": ['13117', '13121', '13223'],
+        # "Blue Ridge": ['51023', '51067', '51161'],
+        # 'District 1': ['22051', '22071', '21075', '21087'],
         "Gulf Coast": ["02150", "02122", "02063", "02066"],
         "East tennessee?": [
             "47001",
@@ -301,67 +320,95 @@ def higher_level_regions() -> dict[str, list[str]]:
             "27163",
         ],
         "Region 9, Louisiana": ["22063", "22091", "22103", "22105", "22107"],
-        "Northwest Region, Virginia": [
-            "51015",
-            "51017",
-            "51091",
-            "51163",
-            "51165",
-            "51530",
-            "51660",
-            "51790",
-            "51820",
-            "51043",
-            "51069",
-            "51139",
-            "51171",
-            "51187",
-            "51840",
-            "51033",
-            "51099",
-            "51177",
-            "51179",
-            "51630",
-            "51047",
-            "51061",
-            "51113",
-            "51137",
-            "51157",
-            "51003",
-            "51065",
-            "51079",
-            "51109",
-            "51125",
-            "51540",
+        "North, Alabama": [
+            "01019",
+            "01033",
+            "01043",
+            "01049",
+            "01071",
+            "01077",
+            "01079",
+            "01083",
+            "01089",
+            "01095",
+            "01103",
+            "01133",
         ],
-        "Eastern Region, Virginia": [
-            "51550",
-            "51001",
-            "51131",
-            "51650",
-            "51710",
-            "51095",
-            "51199",
-            "51700",
-            "51735",
-            "51830",
-            "51740",
-            "51057",
-            "51073",
-            "51097",
-            "51101",
-            "51103",
-            "51115",
-            "51119",
-            "51133",
-            "51159",
-            "51193",
-            "51810",
-            "51093",
-            "51175",
-            "51620",
-            "51800",
+        "Region 1, Louisiana": ["22051", "22071", "22075", "22087"],
+        # https://www.vdh.virginia.gov/content/uploads/2020/05/Locality-to-HD-to-HPR.pdf
+        "Piedmont, Virginia": [
+            "51007",
+            "51029",
+            "51037",
+            "51049",
+            "51111",
+            "51135",
+            "51147",
         ],
+        # 'Central Region, Virginia': [
+        #     '51007', '51025', '51029', '51036', '51037', '51041', '51570', '51049', '51053', '51595', '51075', '51081', '51083', '51650', '51085', '51087', '51670', '51111', '51117', '51127', '51135', '51730', '51145', '51147', '51149', '51760', '51181', '51183'
+        # ],
+        # "Northwest Region, Virginia": [
+        #     "51015",
+        #     "51017",
+        #     "51091",
+        #     "51163",
+        #     "51165",
+        #     "51530",
+        #     "51660",
+        #     "51790",
+        #     "51820",
+        #     "51043",
+        #     "51069",
+        #     "51139",
+        #     "51171",
+        #     "51187",
+        #     "51840",
+        #     "51033",
+        #     "51099",
+        #     "51177",
+        #     "51179",
+        #     "51630",
+        #     "51047",
+        #     "51061",
+        #     "51113",
+        #     "51137",
+        #     "51157",
+        #     "51003",
+        #     "51065",
+        #     "51079",
+        #     "51109",
+        #     "51125",
+        #     "51540",
+        # ],
+        # "Eastern Region, Virginia": [
+        #     "51550",
+        #     "51001",
+        #     "51131",
+        #     "51650",
+        #     "51710",
+        #     "51095",
+        #     "51199",
+        #     "51700",
+        #     "51735",
+        #     "51830",
+        #     "51740",
+        #     "51057",
+        #     "51073",
+        #     "51097",
+        #     "51101",
+        #     "51103",
+        #     "51115",
+        #     "51119",
+        #     "51133",
+        #     "51159",
+        #     "51193",
+        #     "51810",
+        #     "51093",
+        #     "51175",
+        #     "51620",
+        #     "51800",
+        # ],
     }
     return assignment_special_places
 
@@ -721,6 +768,7 @@ def add_pop_variables(
 ) -> pl.DataFrame:
     census_query = utils.CensusQuery(census_key)
     fips = merged_df["fips"].to_list()
+    fips_unique = merged_df["fips"].unique(maintain_order=True).to_list()
     years_census = merged_df["year"].to_list()
     pop_df = census_query.query_5_9_pop(years_census, fips)
     merged_df = merged_df.with_columns(
@@ -740,7 +788,7 @@ def add_pop_variables(
             ]
         ]
     )
-    land_df = census_query.query_land_size(fips)
+    land_df = census_query.query_land_size(fips_unique)
     merged_df = merged_df.join(land_df, on="fips", how="left")
 
     merged_df = merged_df.with_columns(
@@ -754,119 +802,31 @@ def add_pop_variables(
     return merged_df
 
 
-def require_vaccine_data(merged_df: pl.DataFrame) -> pl.DataFrame:
-    merged_df = merged_df.filter(
+def require_vaccine_data(
+    merged_df: pl.DataFrame,
+) -> tuple[pl.DataFrame, pl.DataFrame]:
+    merged_df_return = merged_df.filter(
         pl.col("estimated_mmr_cov").is_not_null()
         & pl.col("nonmed_exempt_pct").is_not_null()
         & pl.col("med_exempt_pct").is_not_null()
     )
-    return merged_df
-
-
-def compare_distributions(
-    data1: pl.Series,
-    data2: pl.Series,
-    xlabel: str,
-    label1: str,
-    label2: str,
-    log_scale: bool = False,
-    bins=None,
-    density=False,
-    cumulative=False,
-):
-    fig, ax = plt.subplots(1, 1)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    ax.get_xaxis().tick_bottom()
-    ax.get_yaxis().tick_left()
-    ax.tick_params(axis="x", direction="out")
-    ax.tick_params(axis="y", direction="out")
-    for spine in ax.spines.values():
-        spine.set_position(("outward", 5))
-    ax.set_axisbelow(True)
-
-    if bins is None:
-        bins = range(
-            min(data1.min(), data2.min()),  # type: ignore
-            max(data1.max(), data2.max()) + 1,  # type: ignore
-        )
-    ax.hist(
-        data1,
-        bins=bins,
-        color="blue",
-        alpha=0.7,
-        label=label1,
-        density=density,
-        cumulative=cumulative,
+    # also get out the opposite
+    merged_df_no_vaccine_data = merged_df.filter(
+        pl.col("estimated_mmr_cov").is_null()
+        | pl.col("nonmed_exempt_pct").is_null()
+        | pl.col("med_exempt_pct").is_null()
     )
-    ax.hist(
-        data2,
-        bins=bins,
-        color="red",
-        alpha=0.7,
-        label=label2,
-        density=density,
-        cumulative=cumulative,
-    )
-    ax.set_xlabel(xlabel)
-    if density:
-        if cumulative:
-            ax.set_ylabel("Cumulative probability density")
-        else:
-            ax.set_ylabel("Probability density")
-    else:
-        if cumulative:
-            ax.set_ylabel("Cumulative number of outbreaks")
-        else:
-            ax.set_ylabel("Number of outbreaks")
-    if log_scale:
-        ax.set_yscale("log")
-    ax.legend()
-
-    return fig, ax
-
-
-def pairplot(
-    x: pl.Series,
-    y: pl.Series,
-    ylabel,
-    xlabel="MMR vaccination coverage (%)",
-    log=True,
-    **kwargs,
-):
-    fig, ax = plt.subplots(1, 1)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    ax.get_xaxis().tick_bottom()
-    ax.get_yaxis().tick_left()
-    ax.tick_params(axis="x", direction="out")
-    ax.tick_params(axis="y", direction="out")
-    for spine in ax.spines.values():
-        spine.set_position(("outward", 5))
-    ax.set_axisbelow(True)
-
-    if "c" not in kwargs:
-        kwargs["c"] = "blue"
-    scatter = ax.scatter(x, y, **kwargs)
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel(ylabel)
-    if log:
-        if y.min() > 0:  # type: ignore
-            ax.set_yscale("log")
-        else:
-            ax.set_yscale("symlog")
-
-    return fig, ax, scatter
+    return merged_df_return, merged_df_no_vaccine_data
 
 
 def assemble_analysis_dataset(
     merged_df: pl.DataFrame, params: dict = params
 ) -> pl.DataFrame:
-    include = pl.col("cases") == 1
-    include = include | (pl.col("imported") == pl.col("cases"))
-    include = include | (pl.col("imported") < pl.col("cases"))
-    include = include | (pl.col("cases") >= params["inclusion_threshold"])
-    merged_df = merged_df.filter(include)
+    # include = pl.col("cases") == 1
+    # include = include | (pl.col("imported") == pl.col("cases"))
+    # include = include | (pl.col("imported") < pl.col("cases"))
+    # include = include | (pl.col("cases") >= params["inclusion_threshold"])
+    # merged_df = merged_df.filter(include)
 
     merged_df = merged_df.with_columns(
         cases_outbreak=pl.when(
@@ -879,6 +839,264 @@ def assemble_analysis_dataset(
     )
 
     return merged_df
+
+
+def impute_from_bordering_years(
+    missing_df: pl.DataFrame,
+    vaccinations_df: pl.DataFrame,
+    state_level_file: str,
+) -> pl.DataFrame:
+    """
+    Impute missing vaccination data with the following priority:
+    1. Same county, outbreak year (year+0)
+    2. Same county, outbreak year-2
+    3. State-level CDC data for outbreak year-1
+
+    Only imputes for regular counties, not special regions.
+    """
+    # Load and process state-level data
+    state_data = pl.read_csv(state_level_file)
+
+    # Convert Estimate (%) to numeric, treating NR/NA as null
+    state_data = state_data.with_columns(
+        estimate_pct=pl.col("Estimate (%)").cast(pl.Float64, strict=False)
+    )
+
+    # Filter out null estimates
+    state_data = state_data.filter(pl.col("estimate_pct").is_not_null())
+
+    # Filter to state-level data only
+    state_data = state_data.filter(pl.col("Geography Type") == "States")
+
+    # Parse the school year to get the year
+    # School Year format is like "2010-11" which represents fall 2010 data
+    state_data = state_data.with_columns(
+        year=pl.col("School Year").str.extract(r"^(\d{4})", 1).cast(pl.Int64)
+    )
+
+    # Create separate dataframes for coverage and exemptions
+    # MMR coverage - filter to MMR rows
+    state_mmr_cov = state_data.filter(
+        pl.col("Vaccine/Exemption") == "MMR"
+    ).select(
+        [
+            pl.col("Geography").alias("state"),
+            "year",
+            pl.col("estimate_pct").alias("mmr_cov_state"),
+        ]
+    )
+
+    # Medical exemptions - these are NOT vaccine-specific, so don't filter to MMR
+    state_med_exempt = state_data.filter(
+        pl.col("Dose").str.starts_with("Medical")
+    ).select(
+        [
+            pl.col("Geography").alias("state"),
+            "year",
+            pl.col("estimate_pct").alias("med_exempt_pct_state"),
+        ]
+    )
+
+    # Nonmedical exemptions - these are NOT vaccine-specific, so don't filter to MMR
+    # Prefer explicit nonmedical, fall back to "any"
+    state_nonmed_exempt = state_data.filter(
+        pl.col("Dose").str.contains("Nonmedical|Any")
+    ).select(
+        [
+            pl.col("Geography").alias("state"),
+            "year",
+            pl.col("estimate_pct").alias("nonmed_exempt_pct_state"),
+            pl.col("Vaccine/Exemption").alias("exemption_type"),
+        ]
+    )
+
+    # For each state-year, prefer nonmedical over any
+    state_nonmed_exempt = state_nonmed_exempt.sort(
+        "exemption_type", descending=True
+    )
+    state_nonmed_exempt = state_nonmed_exempt.group_by(
+        ["state", "year"]
+    ).first()
+    state_nonmed_exempt = state_nonmed_exempt.drop("exemption_type")
+
+    # Merge all state-level data using full outer joins
+    state_level_data = state_mmr_cov
+
+    if state_med_exempt.height > 0:
+        state_level_data = state_level_data.join(
+            state_med_exempt, on=["state", "year"], how="full", coalesce=True
+        )
+
+    if state_nonmed_exempt.height > 0:
+        state_level_data = state_level_data.join(
+            state_nonmed_exempt,
+            on=["state", "year"],
+            how="full",
+            coalesce=True,
+        )
+
+    # Filter out special regions
+    special_places = list(higher_level_regions().keys())
+    missing_regular = missing_df.filter(
+        ~pl.col("county").is_in(special_places)
+    )
+
+    imputed_rows = []
+
+    for row in missing_regular.iter_rows(named=True):
+        outbreak_year = row["year"]  # The year the outbreak occurred
+        year_relevant_vaccination = row[
+            "year_relevant_vaccination"
+        ]  # outbreak_year - 1
+        state = row["state"]
+        county = row["county"]
+
+        # Track what we imputed and from where
+        imputation_source_mmr = None
+        imputation_source_nonmed = None
+        imputation_source_med = None
+
+        # Determine which fields need imputation
+        needs_mmr = row["estimated_mmr_cov"] is None
+        needs_nonmed = row["nonmed_exempt_pct"] is None
+        needs_med = row["med_exempt_pct"] is None
+
+        if not (needs_mmr or needs_nonmed or needs_med):
+            continue  # Nothing to impute
+
+        # Try outbreak year (year+0), then outbreak year-2
+        # outbreak_year = vaccination year we're looking for
+        # outbreak_year - 2 = go back 2 years from outbreak
+        for offset, label in [(0, "year+0"), (-2, "year-2")]:
+            if not (needs_mmr or needs_nonmed or needs_med):
+                break  # All fields filled
+
+            lookup_year = outbreak_year + offset
+
+            bordering_data = vaccinations_df.filter(
+                (pl.col("year") == lookup_year)
+                & (pl.col("state") == state)
+                & (pl.col("county") == county)
+            )
+
+            if bordering_data.height > 0:
+                bordering_row = bordering_data.row(0, named=True)
+
+                if (
+                    needs_mmr
+                    and bordering_row["estimated_mmr_cov"] is not None
+                ):
+                    row["estimated_mmr_cov"] = bordering_row[
+                        "estimated_mmr_cov"
+                    ]
+                    imputation_source_mmr = label
+                    needs_mmr = False
+
+                if (
+                    needs_nonmed
+                    and bordering_row["nonmed_exempt_pct"] is not None
+                ):
+                    row["nonmed_exempt_pct"] = bordering_row[
+                        "nonmed_exempt_pct"
+                    ]
+                    imputation_source_nonmed = label
+                    needs_nonmed = False
+
+                if needs_med and bordering_row["med_exempt_pct"] is not None:
+                    row["med_exempt_pct"] = bordering_row["med_exempt_pct"]
+                    imputation_source_med = label
+                    needs_med = False
+
+        # If still missing data, try state-level data for outbreak_year - 1
+        if needs_mmr or needs_nonmed or needs_med:
+            state_year_data = state_level_data.filter(
+                (pl.col("state") == state)
+                & (pl.col("year") == year_relevant_vaccination)
+            )
+
+            if state_year_data.height > 0:
+                state_row = state_year_data.row(0, named=True)
+
+                if needs_mmr and state_row.get("mmr_cov_state") is not None:
+                    row["estimated_mmr_cov"] = state_row["mmr_cov_state"]
+                    imputation_source_mmr = "state_cdc"
+                    needs_mmr = False
+
+                if (
+                    needs_nonmed
+                    and state_row.get("nonmed_exempt_pct_state") is not None
+                ):
+                    row["nonmed_exempt_pct"] = state_row[
+                        "nonmed_exempt_pct_state"
+                    ]
+                    imputation_source_nonmed = "state_cdc"
+                    needs_nonmed = False
+
+                    # If we used "Any" exemption for nonmedical and don't have medical
+                    # exemption data from state, impute medical as 0
+                    if (
+                        needs_med
+                        and state_row.get("med_exempt_pct_state") is None
+                    ):
+                        row["med_exempt_pct"] = 0.0
+                        imputation_source_med = "state_cdc_zero"
+                        needs_med = False
+
+                if (
+                    needs_med
+                    and state_row.get("med_exempt_pct_state") is not None
+                ):
+                    row["med_exempt_pct"] = state_row["med_exempt_pct_state"]
+                    imputation_source_med = "state_cdc"
+                    needs_med = False
+
+        # Only add row if we successfully imputed at least one field
+        if (
+            imputation_source_mmr
+            or imputation_source_nonmed
+            or imputation_source_med
+        ):
+            row_df = pl.DataFrame([row])
+
+            # Create imputation source column
+            imputation_sources = []
+            if imputation_source_mmr:
+                imputation_sources.append(f"mmr:{imputation_source_mmr}")
+            if imputation_source_nonmed:
+                imputation_sources.append(f"nonmed:{imputation_source_nonmed}")
+            if imputation_source_med:
+                imputation_sources.append(f"med:{imputation_source_med}")
+
+            row_df = row_df.with_columns(
+                imputation_source=pl.lit("; ".join(imputation_sources))
+            )
+
+            imputed_rows.append(row_df)
+
+    if len(imputed_rows) > 0:
+        imputed_df = pl.concat(imputed_rows, how="diagonal_relaxed")
+
+        # Print statistics
+        total_imputed = imputed_df.shape[0]
+        from_year_0 = imputed_df.filter(
+            pl.col("imputation_source").str.contains("year\\+0")
+        ).shape[0]
+        from_year_minus_2 = imputed_df.filter(
+            pl.col("imputation_source").str.contains("year-2")
+        ).shape[0]
+        from_state = imputed_df.filter(
+            pl.col("imputation_source").str.contains("state_cdc")
+        ).shape[0]
+
+        print(f"Successfully imputed {total_imputed} county-years:")
+        print(f"  - From outbreak year (year+0): {from_year_0}")
+        print(f"  - From outbreak year-2: {from_year_minus_2}")
+        print(f"  - From state-level CDC data: {from_state}")
+
+        return imputed_df
+    else:
+        print("No rows could be imputed")
+        return pl.DataFrame()
 
 
 if __name__ == "__main__":
@@ -917,27 +1135,113 @@ if __name__ == "__main__":
     raw_merged_df.write_csv(
         os.path.join(data_dir, "raw_merged_outbreaks_vaccinations.csv")
     )
-    merged_df = require_vaccine_data(raw_merged_df)
+    merged_df, merged_df_no_vaccine_data = require_vaccine_data(raw_merged_df)
     merged_df = assemble_analysis_dataset(merged_df, params)
-
-    # %% HOW DO THE EXCLUSION CRITERIA LIMIT THE DATA
-    fig, ax = compare_distributions(
-        raw_merged_df["cases"],
-        merged_df["cases"],
-        xlabel="Cases",
-        label1="Without vaccination data",
-        label2="With vaccination data",
-        log_scale=True,
-        bins=[1, 2, 3, 4, 5, 10, 20, 50, 750],
+    merged_df_no_vaccine_data = assemble_analysis_dataset(
+        merged_df_no_vaccine_data, params
     )
 
-    fig, ax = compare_distributions(
-        raw_merged_df["year"],
-        merged_df["year"],
-        xlabel="Year",
-        label1="Without vaccination data",
-        label2="With vaccination data",
-        log_scale=False,
+    # save the merged df no vaccine data
+    merged_df_no_vaccine_data.write_csv(
+        os.path.join(data_dir, "missing_counties.csv")
+    )
+
+    # %% IMPUTE MISSING VACCINATION DATA FROM BORDERING YEARS
+    print("\n" + "=" * 80)
+    print("IMPUTING MISSING VACCINATION DATA FROM BORDERING YEARS")
+    print("=" * 80)
+
+    # Perform imputation
+    imputed_from_bordering = impute_from_bordering_years(
+        merged_df_no_vaccine_data,
+        vaccinations_df,
+        os.path.join(
+            data_dir,
+            "Vaccination_Coverage_and_Exemptions_among_Kindergartners_20260526.csv",
+        ),
+    )
+
+    # Combine original data with imputed data
+    if imputed_from_bordering.height > 0:
+        # Filter to only rows that now have complete vaccine data
+        imputed_complete = imputed_from_bordering.filter(
+            pl.col("estimated_mmr_cov").is_not_null()
+            & pl.col("nonmed_exempt_pct").is_not_null()
+            & pl.col("med_exempt_pct").is_not_null()
+        )
+
+        if imputed_complete.height > 0:
+            # Add imputation_source column to original data (all None)
+            merged_df = merged_df.with_columns(
+                imputation_source=pl.lit(None, dtype=pl.Utf8)
+            )
+
+            # Combine for processing through pipeline
+            merged_df = pl.concat(
+                [merged_df, imputed_complete], how="diagonal_relaxed"
+            )
+            print(f"Combined dataset size: {merged_df.shape[0]} rows")
+            print(
+                f"  - Original (non-imputed): {merged_df.filter(pl.col('imputation_source').is_null()).shape[0]}"
+            )
+            print(
+                f"  - Imputed: {merged_df.filter(pl.col('imputation_source').is_not_null()).shape[0]}"
+            )
+        else:
+            merged_df = merged_df.with_columns(
+                imputation_source=pl.lit(None, dtype=pl.Utf8)
+            )
+            print("No imputed rows had complete data after imputation")
+    else:
+        merged_df = merged_df.with_columns(
+            imputation_source=pl.lit(None, dtype=pl.Utf8)
+        )
+        print("No rows could be imputed from bordering years")
+
+    # remove "District 1" as well
+    merged_df = merged_df.filter(
+        ~(
+            (pl.col("county") == "District 1")
+            & (pl.col("state") == "Louisiana")
+        )
+    )
+    # we have to remove special places that ar eimputed
+    # remove fulton, gwinett
+    merged_df = merged_df.filter(
+        ~(
+            (pl.col("county") == "Fulton, Gwinett")
+            & (pl.col("state") == "Georgia")
+        )
+    )
+    # remove forsyth, fulton, paulding
+    merged_df = merged_df.filter(
+        ~(
+            (pl.col("county") == "Forsyth, Fulton, Paulding")
+            & (pl.col("state") == "Georgia")
+        )
+    )
+    # remove blue ridge
+    merged_df = merged_df.filter(
+        ~((pl.col("county") == "Blue Ridge") & (pl.col("state") == "Virginia"))
+    )
+
+    # we need to fill in the fips codes for places that we used state-level data for
+    # imputation
+    addfips = AddFIPS()
+    merged_df = merged_df.with_columns(
+        fips=pl.when(
+            pl.col("fips").is_null()
+            & pl.col("imputation_source").is_not_null()
+        )
+        .then(
+            pl.struct(["county", "state"]).map_elements(
+                lambda row: addfips.get_county_fips(
+                    row["county"], row["state"]
+                ),
+                return_dtype=pl.String,
+            )
+        )
+        .otherwise(pl.col("fips"))
     )
 
     # %% VACCINATION COVERAGE AND OUTBREAK SIZE
@@ -1026,14 +1330,30 @@ if __name__ == "__main__":
     # 5 year MMR vaccination coverage
     # add new columns
     if five_year:
-        merged_df = merged_df.with_columns(
+        # Split into imputed and non-imputed
+        imputed_rows = merged_df.filter(
+            pl.col("imputation_source").is_not_null()
+        )
+        non_imputed_rows = merged_df.filter(
+            pl.col("imputation_source").is_null()
+        )
+
+        # Add 5yr columns to imputed rows (will stay None)
+        imputed_rows = imputed_rows.with_columns(
             estimated_mmr_cov_5yr=pl.lit(None),
             nonmed_exempt_pct_5yr=pl.lit(None),
             med_exempt_pct_5yr=pl.lit(None),
         )
-        # iterate through the df
+
+        # Process non-imputed rows
+        non_imputed_rows = non_imputed_rows.with_columns(
+            estimated_mmr_cov_5yr=pl.lit(None),
+            nonmed_exempt_pct_5yr=pl.lit(None),
+            med_exempt_pct_5yr=pl.lit(None),
+        )
+
         new_df = []
-        for row in merged_df.iter_rows(named=True):
+        for row in non_imputed_rows.iter_rows(named=True):
             if row["fips"] is None:
                 # this is one of our special places
                 assert row["county"] in special_places_dict.keys()
@@ -1057,11 +1377,13 @@ if __name__ == "__main__":
                     vaccinations_5_yrs["med_exempt_pct"]
                 ),
             )
-
-            # append to new df
             new_df.append(row)
 
-        merged_df = pl.concat(new_df, how="diagonal_relaxed")
+        # Combine back together
+        non_imputed_rows = pl.concat(new_df, how="diagonal_relaxed")
+        merged_df = pl.concat(
+            [non_imputed_rows, imputed_rows], how="diagonal_relaxed"
+        )
         # make total exemption columns
         merged_df = merged_df.with_columns(
             total_exempt_pct_5yr=pl.col("nonmed_exempt_pct_5yr")
@@ -1072,8 +1394,74 @@ if __name__ == "__main__":
             / pl.col("total_exempt_pct_5yr").fill_nan(0.0),
         )
 
-    # (all remaining comparison/pairplot/synthetic-population code unchanged)
+    # %% SYNTHETIC POPULATION CLUSTERS
+    # let's make a geoid for easy merging later
+    merged_df = merged_df.with_columns(
+        geoid=pl.when(pl.col("fips").is_null())
+        .then(pl.col("county"))
+        .otherwise(pl.col("county") + pl.col("fips"))
+    )
+    # grab the counties and fips codes
+    population_pockets = merged_df[["geoid", "county", "fips"]].unique()
+    population_pockets = population_pockets.with_columns(
+        population_pockets_proxy=pl.lit(None),
+        avg_house_size=pl.lit(None),
+        std_house_size=pl.lit(None),
+        # make the fips code a list for the special places
+        fips=pl.struct("county", "fips").map_elements(
+            lambda cols: [cols["fips"]]
+            if cols["fips"] is not None
+            else special_places_dict[cols["county"]],
+            return_dtype=pl.List(pl.Utf8),
+        ),
+    )
+
+    population_pockets_proxy = []
+    avg_house_size = []
+    std_house_size = []
+    for fips in tqdm(population_pockets["fips"]):
+        population_pockets_proxy.append(
+            synth_pop_clusters.cluster_fips(fips)[0]
+        )
+        avg_house_size_fips, std_house_size_fips = (
+            synth_pop_clusters.summarize_household_size(fips)
+        )
+        avg_house_size.append(avg_house_size_fips)
+        std_house_size.append(std_house_size_fips)
+    # merge back to main df
+    population_pockets = population_pockets.with_columns(
+        population_pockets_proxy=pl.Series(population_pockets_proxy),
+        avg_house_size=pl.Series(avg_house_size),
+        std_house_size=pl.Series(std_house_size),
+    )
+    merged_df = merged_df.join(
+        population_pockets[
+            [
+                "geoid",
+                "population_pockets_proxy",
+                "avg_house_size",
+                "std_house_size",
+            ]
+        ],
+        on="geoid",
+        how="left",
+    )
+
     # %% EXPORT DATA FOR DOWNSTREAM ANALYSIS
-    merged_df.write_csv(
+    # Save original data only (non-imputed)
+    merged_df.filter(pl.col("imputation_source").is_null()).write_csv(
         os.path.join(data_dir, "outbreaks_vaccinations_cleaned.csv")
+    )
+
+    # Save full dataset (original + imputed)
+    merged_df.write_csv(
+        os.path.join(data_dir, "outbreaks_vaccinations_cleaned_imputed.csv")
+    )
+
+    print(f"\nFinal datasets saved:")
+    print(
+        f"  - outbreaks_vaccinations_cleaned.csv: {merged_df.filter(pl.col('imputation_source').is_null()).shape[0]} rows (original only)"
+    )
+    print(
+        f"  - outbreaks_vaccinations_cleaned_imputed.csv: {merged_df.shape[0]} rows (original + imputed)"
     )

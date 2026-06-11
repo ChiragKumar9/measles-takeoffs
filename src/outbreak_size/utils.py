@@ -1,11 +1,75 @@
 import os
 import zipfile
+
+# The bit of logic below this is to fix an error caused by the Census changing its API
+# requirement on 12 May 2026. The Census package did not properly pass the API key to all
+# requests, so we have to patch the elements that handle that logic.
+from functools import lru_cache
 from io import BytesIO
 
 import polars as pl
 import requests
 from census import Census
+from census.core import Client, supported_years
 from tqdm.auto import tqdm
+
+
+def _patched_field_type(self, field, year):
+    url = self.definition_url % (year, self.dataset, field)
+    resp = self.session.get(url, params={"key": self._key})
+
+    type_map = {
+        "fips-for": str,
+        "fips-in": str,
+        "int": float,
+        "long": float,
+        "float": float,
+        "string": str,
+    }
+    if resp.status_code == 200:
+        try:
+            predicate_type = resp.json().get("predicateType", "string")
+            return type_map.get(predicate_type, str)
+        except Exception:
+            return str
+    return str
+
+
+def _patched_tables(self, year=None):
+    if year is None:
+        year = self.default_year
+    tables_url = self.groups_url % (year, self.dataset)
+    resp = self.session.get(tables_url, params={"key": self._key})
+    return resp.json()["groups"]
+
+
+@supported_years()
+def _patched_fields(self, year=None, flat=False):
+    if year is None:
+        year = self.default_year
+
+    data = {}
+    fields_url = self.definitions_url % (year, self.dataset)
+    resp = self.session.get(fields_url, params={"key": self._key})
+    obj = resp.json()
+
+    if flat:
+        for key, elem in obj["variables"].items():
+            if key in ["for", "in"]:
+                continue
+            data[key] = "{}: {}".format(
+                elem.get("concept", ""), elem.get("label", "")
+            )
+    else:
+        data = obj["variables"]
+        data.pop("for", None)
+        data.pop("in", None)
+    return data
+
+
+Client._field_type = lru_cache(maxsize=1024)(_patched_field_type)
+Client.tables = _patched_tables
+Client.fields = _patched_fields
 
 
 def browse_df(df, page_size=10, auto_exit=False):
@@ -257,11 +321,11 @@ class CensusQuery:
 
 
 def query(census, fip, y):
-    if y > 2023:
-        # census data is not available beyond 2023 yet
-        y = 2023
-    elif y < 2010:
-        # census data is not available before 2010
+    if y > 2024:
+        # census data is not available beyond 2024 yet
+        y = 2024
+    elif y <= 2009:
+        # the vars we want aren't available pre 2009
         y = 2010
     if fip[:2] == "09":
         # for some reason Connecticut data is not available after 2021
@@ -274,39 +338,45 @@ def query(census, fip, y):
         args = {"state_fips": fip[:2], "county_fips": fip[2:], "year": y}
     # education data were not gathered pre 2012
     if y >= 2012:
-        return fcn(
-            fields=[
-                "B01001_001E",
-                "B01001_003E",
-                "B01001_004E",
-                "B01001_005E",
-                "B01001_006E",
-                "B01001_007E",
-                "B01001_008E",
-                "B01001_009E",
-                "B01001_010E",
-                "B01001_027E",
-                "B01001_028E",
-                "B01001_029E",
-                "B01001_030E",
-                "B01001_031E",
-                "B01001_032E",
-                "B01001_033E",
-                "B01001_034E",
-                "B14003_005E",
-                "B14003_014E",
-                "B14003_033E",
-                "B14003_042E",
-                "B19019_001E",
-                "B15003_023E",
-                "B15003_024E",
-                "B15003_025E",
-                "B15003_001E",
-                "B02001_001E",
-                "B02001_002E",
-            ],
-            **args,
-        )[0]  # census queries return a list of one dict
+        try:
+            return fcn(
+                fields=[
+                    "B01001_001E",
+                    "B01001_003E",
+                    "B01001_004E",
+                    "B01001_005E",
+                    "B01001_006E",
+                    "B01001_007E",
+                    "B01001_008E",
+                    "B01001_009E",
+                    "B01001_010E",
+                    "B01001_027E",
+                    "B01001_028E",
+                    "B01001_029E",
+                    "B01001_030E",
+                    "B01001_031E",
+                    "B01001_032E",
+                    "B01001_033E",
+                    "B01001_034E",
+                    "B14003_005E",
+                    "B14003_014E",
+                    "B14003_033E",
+                    "B14003_042E",
+                    "B19019_001E",
+                    "B15003_023E",
+                    "B15003_024E",
+                    "B15003_025E",
+                    "B15003_001E",
+                    "B02001_001E",
+                    "B02001_002E",
+                ],
+                **args,
+            )[0]  # census queries return a list of one dict
+        except Exception:
+            print(
+                f"Error querying census for FIPS {fip} and year {y}. Returning empty dict."
+            )
+            assert False
     else:
         # gather variables normally except education for 2012
         income_schooling = fcn(

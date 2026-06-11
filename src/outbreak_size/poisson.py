@@ -16,13 +16,15 @@ class PartialPooledPoisson:
         groups: pl.Series,
         spatial_units: pl.Series,
         adjacency_matrix: np.ndarray,
-        baseline=dist.Normal(0, 1.0),
-        priors=dist.Normal(0, 1.0),
+        years: pl.Series = None,  # type: ignore
+        baseline=dist.Normal(0, 10.0),
+        beta_priors=dist.Normal(0, 1.0),
+        global_priors=dist.Normal(0, 10.0),
         group_fixed_effect=True,
         spatial=True,
         spatial_correlation=dist.Beta(2, 2),
-        spatial_sigma=dist.HalfNormal(1.0),
-        car_sigma=dist.HalfNormal(1.0),
+        spatial_sigma=dist.HalfNormal(0.25),
+        car_sigma=dist.HalfNormal(0.25),
     ):
         self.iv = iv
         self.num_observations = iv.shape[0]
@@ -50,7 +52,8 @@ class PartialPooledPoisson:
                     group_fixed_effect[self.groups],
                 ]
             )
-        self.betas = priors
+        self.betas = beta_priors
+        self.global_priors = global_priors
         self.baseline = baseline
         self.spatial_correlation = spatial_correlation
         self.spatial_sigma = spatial_sigma
@@ -68,6 +71,19 @@ class PartialPooledPoisson:
         self.adjacency_matrix = sp.sparse.csr_matrix(self.adjacency_matrix)
         self.spatial = spatial
         self.car_sigma = car_sigma
+        if years is not None:
+            self.years = (
+                years.replace(
+                    years.unique(maintain_order=True),
+                    pl.arange(0, years.n_unique()),
+                )
+                .cast(pl.Int64)
+                .to_jax()
+            )
+            self.num_years = int(self.years.max()) + 1
+        else:
+            self.years = None
+            self.num_years = None
 
     def fit(self, is_observed, cases=None):
         baseline_rate = numpyro.sample("baseline_rate", self.baseline)
@@ -90,7 +106,7 @@ class PartialPooledPoisson:
 
         if self.pool:
             with numpyro.plate("iv", self.num_ivs):
-                iv_global = numpyro.sample("iv_global", self.baseline)
+                iv_global = numpyro.sample("iv_global", self.global_priors)  # type: ignore
                 iv_group_variabilities = numpyro.sample(
                     "iv_group_variabilities", dist.HalfNormal(0.25)
                 )
@@ -108,7 +124,7 @@ class PartialPooledPoisson:
         else:
             # pull coefficients for each iv just like they are normal covariates
             with numpyro.plate("iv_no_pooling", self.num_ivs):
-                iv_global = numpyro.sample("iv_global", self.betas)  # type: ignore
+                iv_global = numpyro.sample("iv_global", self.global_priors)  # type: ignore
             iv_effect = jnp.dot(self.iv, iv_global)
 
         mu = (
@@ -122,38 +138,104 @@ class PartialPooledPoisson:
             spatial_random_sigma = numpyro.sample(
                 "spatial_random_sigma", self.spatial_sigma
             )
-            with numpyro.plate(
-                "spatial_random_effects_plate", self.has_a_neighbor.shape[0]
-            ):
-                spatial_random_effects = numpyro.sample(
-                    "spatial_random_effects", dist.Normal(0, 1)
+            if self.years is not None:
+                # sample a non-neighbor random effect per (year, spatial_unit)
+                with numpyro.plate("years_non_neighbor", self.num_years):  # type: ignore
+                    with numpyro.plate(
+                        "spatial_random_effects_plate",
+                        self.has_a_neighbor.shape[0],
+                    ):
+                        spatial_random_effects = numpyro.sample(
+                            "spatial_random_effects", dist.Normal(0, 1)
+                        )
+                # spatial_random_effects is (num_spatial_units, num_years); transpose to (num_years, num_spatial_units)
+                full_spatial_effect = (
+                    spatial_random_effects.T * spatial_random_sigma
+                )  # type: ignore
+            else:
+                with numpyro.plate(
+                    "spatial_random_effects_plate",
+                    self.has_a_neighbor.shape[0],
+                ):
+                    spatial_random_effects = numpyro.sample(
+                        "spatial_random_effects", dist.Normal(0, 1)
+                    )
+                full_spatial_effect = (
+                    spatial_random_effects * spatial_random_sigma
                 )
-            full_spatial_effect = spatial_random_effects * spatial_random_sigma
 
             if not self.is_adjacency_empty:
                 # add spatial correlation
-                correlation = numpyro.sample(
-                    "spatial_correlation", self.spatial_correlation
-                )
-                spatial_sigma = numpyro.sample("spatial_sigma", self.car_sigma)
-                car_distribution = dist.CAR(
-                    loc=0,
-                    correlation=(2 * correlation - 1),  # type: ignore
-                    conditional_precision=1.0,  # type: ignore
-                    adj_matrix=self.adjacency_matrix,  # type: ignore
-                    is_sparse=True,
-                )
-                raw_spatial_effect = numpyro.sample(
-                    "raw_spatial_effect", car_distribution
-                )
-                spatial_effect = spatial_sigma * raw_spatial_effect
-                full_spatial_effect = full_spatial_effect.at[  # type: ignore
-                    self.has_a_neighbor
-                ].set(spatial_effect)
+                if self.years is not None:
+                    # Sample correlation and sigma once per year
+                    with numpyro.plate("years_car_params", self.num_years):  # type: ignore
+                        correlation = numpyro.sample(
+                            "spatial_correlation", self.spatial_correlation
+                        )
+                        spatial_sigma = numpyro.sample(
+                            "spatial_sigma", self.car_sigma
+                        )
 
-            # spatial_effect is a vector of length of number of counties
-            # need to expand spatial effects also to include counties without neighbors
-            full_spatial_effect = full_spatial_effect[self.spatial_units]  # type: ignore
+                    # Sample CAR effect per year with year-specific parameters
+                    raw_spatial_effects = []
+                    for year_idx in range(self.num_years):  # type: ignore
+                        car_distribution = dist.CAR(
+                            loc=0,
+                            correlation=(2 * correlation[year_idx] - 1),  # type: ignore
+                            conditional_precision=1.0,  # type: ignore
+                            adj_matrix=self.adjacency_matrix,  # type: ignore
+                            is_sparse=True,
+                        )
+                        with numpyro.handlers.scope(prefix=f"year_{year_idx}"):
+                            raw_spatial_effect_year = numpyro.sample(
+                                "raw_spatial_effect", car_distribution
+                            )
+                        raw_spatial_effects.append(raw_spatial_effect_year)
+
+                    # Stack into (num_years, num_neighbors) array
+                    raw_spatial_effect = jnp.stack(raw_spatial_effects, axis=0)
+
+                    # Scale by year-specific sigma: broadcasting (num_years, 1) * (num_years, num_neighbors)
+                    spatial_effect = (
+                        spatial_sigma[:, None] * raw_spatial_effect
+                    )  # type: ignore
+
+                    full_spatial_effect = full_spatial_effect.at[  # type: ignore
+                        :, self.has_a_neighbor
+                    ].set(spatial_effect)
+                else:
+                    # Non-time-varying case (original code)
+                    correlation = numpyro.sample(
+                        "spatial_correlation", self.spatial_correlation
+                    )
+                    spatial_sigma = numpyro.sample(
+                        "spatial_sigma", self.car_sigma
+                    )
+                    car_distribution = dist.CAR(
+                        loc=0,
+                        correlation=(2 * correlation - 1),  # type: ignore
+                        conditional_precision=1.0,  # type: ignore
+                        adj_matrix=self.adjacency_matrix,  # type: ignore
+                        is_sparse=True,
+                    )
+                    raw_spatial_effect = numpyro.sample(
+                        "raw_spatial_effect", car_distribution
+                    )
+                    spatial_effect = spatial_sigma * raw_spatial_effect
+                    full_spatial_effect = full_spatial_effect.at[  # type: ignore
+                        self.has_a_neighbor
+                    ].set(spatial_effect)
+
+            if self.years is not None:
+                # spatial_effect is a (num_years, num_spatial_units) matrix
+                # index by (year, spatial_unit) to get a per-observation effect
+                full_spatial_effect = full_spatial_effect[
+                    self.years, self.spatial_units
+                ]  # type: ignore
+            else:
+                # spatial_effect is a vector of length of number of counties
+                # need to expand spatial effects also to include counties without neighbors
+                full_spatial_effect = full_spatial_effect[self.spatial_units]  # type: ignore
             mu = mu + full_spatial_effect
         mu = jnp.exp(mu)
         mu = mu + jnp.finfo(jnp.float64).eps

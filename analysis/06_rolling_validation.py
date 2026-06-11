@@ -24,6 +24,8 @@ output_dir = os.path.join(
     os.path.dirname(os.path.dirname(__file__)), "outputs"
 )
 
+GLOBALS_PRIOR_SD = 1
+
 # read analysis params yaml
 with open("params.yml", "r") as f:
     params = yaml.safe_load(f)
@@ -47,11 +49,11 @@ if __name__ == "__main__":
     )
     models = {
         "MMR coverage": ["estimated_mmr_cov"],
-        "MMR coverage + exemptions": [
-            "estimated_mmr_cov",
-            "nonmed_exempt_pct",
-            "med_exempt_pct",
-        ],
+        # "MMR coverage + exemptions": [
+        #     "estimated_mmr_cov",
+        #     "nonmed_exempt_pct",
+        #     "med_exempt_pct",
+        # ],
         "All covariates": [
             "estimated_mmr_cov",
             "nonmed_exempt_pct",
@@ -162,6 +164,17 @@ if __name__ == "__main__":
                 ]
 
                 for years in train_years:
+                    # Check if results already exist for this configuration
+                    output_file = os.path.join(
+                        output_dir,
+                        f"samples_partial_pooled_poisson_validation_testing_{years}_pool={pool}_CAR={car}_{model_name}_globals_prior_sd={GLOBALS_PRIOR_SD}.pkl",
+                    )
+                    if os.path.exists(output_file):
+                        print(
+                            f"Skipping: Results already exist for years={years}, pool={pool}, CAR={car}, model={model_name}"
+                        )
+                        continue
+
                     first_through_years = False
                     print(f"Running rolling validation for years: {years}")
                     # filter dataset to only include the training years
@@ -235,7 +248,10 @@ if __name__ == "__main__":
                     )
                     # set up model
                     if model_name != "All covariates":
-                        ivs = 1
+                        if model_name == "MMR coverage":
+                            ivs = 1
+                        else:
+                            ivs = 3
                         # no regression covariates
                         # use zeros for the regression covariates since the model will ignore them
                         regression_covariates = jnp.zeros(
@@ -258,13 +274,31 @@ if __name__ == "__main__":
                         adjacency_matrix=adjacency_matrix,
                         spatial_sigma=dist.HalfNormal(0.25),
                         car_sigma=dist.HalfNormal(0.25),
+                        global_priors=dist.Normal(0, GLOBALS_PRIOR_SD),
+                        baseline=dist.Normal(0, GLOBALS_PRIOR_SD),
                     )
 
                     # fit model
+                    # print everything about this model run
+
+                    if GLOBALS_PRIOR_SD == 10:
+                        if len(years) >= 3:
+                            target_accept_prob = 0.9
+                        else:
+                            target_accept_prob = 0.9
+                    else:
+                        if len(years) >= 5 and years[0] == 2019:
+                            target_accept_prob = 0.8
+                        else:
+                            target_accept_prob = 0.85
+
+                    print(
+                        f"Fitting model for years: {years}, CAR: {car}, Pooling: {pool}, Model: {model_name}"
+                    )
                     nuts_kernel = NUTS(
                         model.fit,
-                        init_strategy=init_to_median(),
-                        target_accept_prob=0.95,
+                        init_strategy=init_to_median(num_samples=100),
+                        target_accept_prob=target_accept_prob,
                     )
                     mcmc = MCMC(
                         nuts_kernel,
@@ -280,17 +314,8 @@ if __name__ == "__main__":
 
                     mcmc.print_summary()
 
-                    # save posterior samples
+                    # get posterior samples
                     posterior_samples = mcmc.get_samples()
-
-                    with open(
-                        os.path.join(
-                            output_dir,
-                            f"samples_partial_pooled_poisson_validation_training_{years}_pool={pool}_CAR={car}_{model_name}.pkl",
-                        ),
-                        "wb",
-                    ) as file:
-                        pickle.dump(posterior_samples, file)
 
                     # pass the posterior samples to the model to generate predictions
                     predictive = Predictive(model.fit, posterior_samples)
@@ -307,10 +332,7 @@ if __name__ == "__main__":
                     ]
 
                     with open(
-                        os.path.join(
-                            output_dir,
-                            f"samples_partial_pooled_poisson_validation_testing_{years}_pool={pool}_CAR={car}_{model_name}.pkl",
-                        ),
+                        output_file,
                         "wb",
                     ) as file:
                         pickle.dump(all_predictions, file)  # type: ignore
@@ -319,80 +341,95 @@ if __name__ == "__main__":
                     # we only need to do this for our first time through the years
                     if not first_through_years:
                         first_through_years = True
-                        # compute final outbreak size for each row
-                        population = train_df.filter(
-                            pl.col("cases_train") == 1
-                        )["pop"].to_numpy()
-                        # calculate immune fraction based on coverage and effectiveness
+
+                        R0 = 12.0  # measles basic reproduction number
                         mmr_effectiveness = 0.97
+
+                        # --- training rows ---
+                        train_only = train_df.filter(
+                            pl.col("cases_train") == 1
+                        )
+                        population = train_only["pop"].to_numpy()
                         immune = (
-                            train_df.filter(pl.col("cases_train") == 1)[
-                                "estimated_mmr_cov"
-                            ].to_numpy()
+                            train_only["estimated_mmr_cov"].to_numpy()
                             * mmr_effectiveness
                             / 100
-                        )  # type: ignore
-                        susceptible_fraction = 1 - immune
-                        # calculate final outbreak size
-                        R0 = 12.0  # measles basic reproduction number
-                        # final outbreak size calculation
-                        final_sizes = np.array(
-                            [
-                                final_outbreak_size.final_outbreak_size(R0, s0)
-                                * N
-                                for s0, N in zip(
-                                    susceptible_fraction, population
-                                )
-                            ]
                         )
+                        susceptible_fraction = 1 - immune
+                        Re_train = R0 * susceptible_fraction
 
-                        # now scale these values to match the scale of the observed outbreaks
-                        observed_outbreaks = train_df.filter(
-                            pl.col("cases_train") == 1
-                        )["cases_outbreak"].to_numpy()
-                        # fit a poisson regression
-                        X = final_sizes.reshape(-1, 1)
-                        model = sm.GLM(
-                            observed_outbreaks,
-                            sm.add_constant(X),
+                        train_results = [
+                            final_outbreak_size.final_outbreak_size(R0, s0, N)
+                            for s0, N in zip(susceptible_fraction, population)
+                        ]
+                        final_sizes = np.array([r[0] for r in train_results])
+
+                        observed_outbreaks = train_only[
+                            "cases_outbreak"
+                        ].to_numpy()
+
+                        # fit GLM only on supercritical training rows
+                        super_mask_train = Re_train >= 1
+                        X_super = sm.add_constant(
+                            final_sizes[super_mask_train].reshape(-1, 1),
+                            has_constant="add",
+                        )
+                        glm_model = sm.GLM(
+                            observed_outbreaks[super_mask_train],
+                            X_super,
                             family=sm.families.Poisson(),
+                            # offset=np.log(population[super_mask_train]),
                         ).fit()
 
-                        # get the predictions
-                        # now apply this model to the test data
-                        population_test = train_df.filter(
-                            pl.col("cases_train") == 0
-                        )["pop"].to_numpy()
+                        print(glm_model.summary())
+
+                        # --- test rows ---
+                        test_only = train_df.filter(pl.col("cases_train") == 0)
+                        population_test = test_only["pop"].to_numpy()
                         susceptible_fraction_test = (
                             1.0
-                            - train_df.filter(pl.col("cases_train") == 0)[
-                                "estimated_mmr_cov"
-                            ].to_numpy()
+                            - test_only["estimated_mmr_cov"].to_numpy()
                             * mmr_effectiveness
                             / 100
                         )
+                        Re_test = R0 * susceptible_fraction_test
+
+                        test_results = [
+                            final_outbreak_size.final_outbreak_size(R0, s0, N)
+                            for s0, N in zip(
+                                susceptible_fraction_test, population_test
+                            )
+                        ]
                         final_sizes_test = np.array(
-                            [
-                                final_outbreak_size.final_outbreak_size(R0, s0)
-                                * N
-                                for s0, N in zip(
-                                    susceptible_fraction_test, population_test
-                                )
-                            ]
+                            [r[0] for r in test_results]
                         )
-                        X_test = sm.add_constant(
-                            final_sizes_test.reshape(-1, 1)
+
+                        # build mu: subcritical rows use stuttering chains
+                        # directly; supercritical rows use the fitted GLM
+                        super_mask_test = Re_test >= 1
+                        mu = np.empty(len(population_test))
+
+                        mu[~super_mask_test] = final_sizes_test[
+                            ~super_mask_test
+                        ]
+
+                        X_test_super = sm.add_constant(
+                            final_sizes_test[super_mask_test].reshape(-1, 1),
+                            has_constant="add",
                         )
-                        mu = model.predict(X_test)
+                        mu[super_mask_test] = glm_model.predict(
+                            X_test_super,
+                            # offset=np.log(population_test[super_mask_test]),
+                        )
+
                         # truncate mus at the population size
                         mu = np.minimum(mu, population_test)
 
-                        # extract median and 95th percentile interval
+                        # draw posterior predictive samples
                         samples = stats.poisson.rvs(
                             mu=mu, size=(8000, mu.shape[0])
                         )
 
-                        # pickle these three
                         with open(
                             os.path.join(
                                 output_dir,

@@ -23,7 +23,7 @@ with open("params.yml", "r") as f:
 
 
 def setup_plot(nrows, ncols):
-    fig, ax = plt.subplots(nrows, ncols, figsize=(20, 15))
+    fig, ax = plt.subplots(nrows, ncols, figsize=(30, 7.5))
     if nrows * ncols == 1:
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
@@ -155,7 +155,7 @@ def plot_immunity_effects_on_vaccine_coverage(df, fig, ax):
         ]
     )
     ax.set_ylabel(
-        "% change in outbreak size per\n1%  increase in MMR coverage"
+        "% change in outbreak size per\n1pp increase in MMR coverage"
     )
 
 
@@ -214,9 +214,10 @@ def plot_previous_outbreak_size_effects(df, fig, ax):
     ax.axvline(x=0, color="blue", linestyle="--")
 
     ax.set_xlabel(
-        "% change in outbreak size per\n1%  increase in previous outbreak size"
+        "% change in outbreak size per\n1pp increase in previous outbreak size"
     )
     ax.set_ylabel("Density")
+    ax.set_xticks([-5, 0, 5])
 
 
 def plot_medical_exemption_coefficients(df, fig, ax):
@@ -278,7 +279,7 @@ def plot_medical_exemption_coefficients(df, fig, ax):
 
     x = np.arange(3)
     ax.errorbar(
-        x - 0.1,
+        x - 0.1,  # type: ignore
         medians_old,
         yerr=[
             np.array(medians_old) - np.array(lowers_old),
@@ -305,7 +306,7 @@ def plot_medical_exemption_coefficients(df, fig, ax):
     ax.set_xticks(x)
     ax.set_xticklabels(["All data", "ME ≤10%", "ME ≤5%"])
     ax.set_ylabel(
-        "% change in outbreak size per\n1%  increase in medical exemptions"
+        "% change in outbreak size per\n1pp increase in medical exemptions"
     )
     ax.legend(loc=(0.03, 0.78), edgecolor="black")
 
@@ -351,7 +352,7 @@ def plot_neighbors_significance(df, fig, ax):
     ax.axvline(x=0, color="blue", linestyle="--")
 
     ax.set_xlabel(
-        "% change in outbreak size per 1% increase\nin neighboring counties' MMR coverage"
+        "% change in outbreak size per 1pp increase\nin neighboring counties' MMR coverage"
     )
     ax.set_ylabel("Density")
 
@@ -363,14 +364,14 @@ if __name__ == "__main__":
         schema_overrides={"fips": pl.String},
     )
 
-    fig, ax = setup_plot(2, 2)  # type: ignore
+    fig, ax = setup_plot(1, 3)  # type: ignore
 
     # performance
-    ax[0, 0].text(  # type: ignore
+    ax[0].text(  # type: ignore
         -0.25,
         1.08,
         "a",
-        transform=ax[0, 0].transAxes,  # type: ignore
+        transform=ax[0].transAxes,  # type: ignore
         fontsize=24,
         fontweight="bold",
         va="top",
@@ -379,30 +380,30 @@ if __name__ == "__main__":
     plot_immunity_effects_on_vaccine_coverage(
         df,
         fig,
-        ax[0, 0],  # type: ignore
+        ax[0],  # type: ignore
     )
 
-    ax[0, 1].text(  # type: ignore
+    # ax[0, 1].text(  # type: ignore
+    #     -0.25,
+    #     1.08,
+    #     "b",
+    #     transform=ax[0, 1].transAxes,  # type: ignore
+    #     fontsize=24,
+    #     fontweight="bold",
+    #     va="top",
+    #     ha="right",
+    # )
+    # plot_previous_outbreak_size_effects(
+    #     df,
+    #     fig,
+    #     ax[0, 1],  # type: ignore
+    # )
+
+    ax[1].text(  # type: ignore
         -0.25,
         1.08,
         "b",
-        transform=ax[0, 1].transAxes,  # type: ignore
-        fontsize=24,
-        fontweight="bold",
-        va="top",
-        ha="right",
-    )
-    plot_previous_outbreak_size_effects(
-        df,
-        fig,
-        ax[0, 1],  # type: ignore
-    )
-
-    ax[1, 0].text(  # type: ignore
-        -0.25,
-        1.08,
-        "c",
-        transform=ax[1, 0].transAxes,  # type: ignore
+        transform=ax[1].transAxes,  # type: ignore
         fontsize=24,
         fontweight="bold",
         va="top",
@@ -411,14 +412,14 @@ if __name__ == "__main__":
     plot_medical_exemption_coefficients(
         df,
         fig,
-        ax[1, 0],  # type: ignore
+        ax[1],  # type: ignore
     )
 
-    ax[1, 1].text(  # type: ignore
+    ax[2].text(  # type: ignore
         -0.25,
         1.08,
-        "d",
-        transform=ax[1, 1].transAxes,  # type: ignore
+        "c",
+        transform=ax[2].transAxes,  # type: ignore
         fontsize=24,
         fontweight="bold",
         va="top",
@@ -427,7 +428,7 @@ if __name__ == "__main__":
     plot_neighbors_significance(
         df,
         fig,
-        ax[1, 1],  # type: ignore
+        ax[2],  # type: ignore
     )
     fig.tight_layout()
 
