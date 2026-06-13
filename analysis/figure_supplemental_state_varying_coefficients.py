@@ -110,9 +110,9 @@ def plot_vaccine_effect_coverage(df, fig, ax1, ax2, ax3):
 
     ax1.axhline(y=0, color="k", linestyle="--")
 
-    ax1.set_xlabel("Average MMR coverage (%)")
+    ax1.set_xlabel("State-level average MMR coverage (%)")
     ax1.set_ylabel(
-        "% change in incidence rate per 1%\nincrease in MMR vaccine coverage"
+        "% change in outbreak size per 1pp\nincrease in MMR vaccine coverage"
     )
     ax1.set_xlim(75, 101)
 
@@ -140,7 +140,7 @@ def plot_vaccine_effect_coverage(df, fig, ax1, ax2, ax3):
     )
     ax2.set_xlabel("Number of county-years in the state")
     ax2.set_ylabel(
-        "95% credible interval width of\n% change in incidence rate per 1%\nincrease in MMR vaccine coverage"
+        "95% credible interval width of\n% change in outbreak size per 1pp\nincrease in MMR vaccine coverage"
     )
 
     ax3.scatter(
@@ -179,9 +179,9 @@ def plot_vaccine_effect_coverage(df, fig, ax1, ax2, ax3):
         fontsize=32,
         verticalalignment="top",
     )
-    ax3.set_xlabel("Average MMR coverage (%)")
+    ax3.set_xlabel("State-level average MMR coverage (%)")
     ax3.set_ylabel(
-        "95% credible interval width of\n% change in incidence rate per 1%\nincrease in MMR vaccine coverage"
+        "95% credible interval width of\n% change in outbreak size per 1pp\nincrease in MMR vaccine coverage"
     )
     ax3.set_xlim(75, 101)
 
@@ -197,18 +197,18 @@ def plot_num_points_average_coverage(df, fig, ax):
 
     ax.scatter(df["num_points"], df["mean_mmr_cov"], c="k", alpha=0.7)
 
-    # put a line of best fit through the data to highlight the trend
-    z = np.polyfit(
-        df["num_points"].to_numpy(), df["mean_mmr_cov"].to_numpy(), 1
-    )
-    ax.plot(
-        df["num_points"].to_numpy(),
-        np.polyval(
-            z,  # type: ignore
-            df["num_points"].to_numpy(),
-        ),
-        color="red",
-    )
+    # # put a line of best fit through the data to highlight the trend
+    # z = np.polyfit(
+    #     df["num_points"].to_numpy(), df["mean_mmr_cov"].to_numpy(), 1
+    # )
+    # ax.plot(
+    #     df["num_points"].to_numpy(),
+    #     np.polyval(
+    #         z,  # type: ignore
+    #         df["num_points"].to_numpy(),
+    #     ),
+    #     color="red",
+    # )
     # get R2 and print out
     r2 = (
         np.corrcoef(
@@ -225,7 +225,7 @@ def plot_num_points_average_coverage(df, fig, ax):
         verticalalignment="top",
     )
     ax.set_xlabel("Number of county-years in the state")
-    ax.set_ylabel("Average MMR coverage (%)")
+    ax.set_ylabel("State-level average MMR coverage (%)")
 
     return fig, ax
 

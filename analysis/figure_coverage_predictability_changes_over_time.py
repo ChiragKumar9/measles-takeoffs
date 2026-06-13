@@ -1,13 +1,18 @@
 import os
 import pickle
+from re import L
 
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
 import numpy as np
 import polars as pl
 import scipy.stats as stats
 import yaml
 from matplotlib import rc
+from tqdm.auto import tqdm
+
+from outbreak_size import adjacency
 
 data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 output_dir = os.path.join(
@@ -22,9 +27,38 @@ rc("font", **font)
 with open("params.yml", "r") as f:
     params = yaml.safe_load(f)
 
+# make adjacency matrix
+df = pl.read_csv(
+    os.path.join(data_dir, "analysis_dataset.csv"),
+    # make sure we read fips codes as strings
+    schema_overrides={"fips": pl.String},
+)
+df = df  # .filter(pl.col("cases_outbreak") >= 1)
+# read adjacency data
+adjacency_matrix = pl.read_csv(
+    os.path.join(data_dir, "county_adjacencies.txt"),
+    separator="|",
+    schema_overrides={
+        "County GEOID": pl.String,
+        "Neighbor GEOID": pl.String,
+    },
+)
+adjacency_matrix_observed_post = adjacency.assemble_adjacency_matrix(
+    adjacency_matrix,
+    df.filter(pl.col("year") >= 2021)["fips"]
+    .unique(maintain_order=True)
+    .to_list(),
+)
+adjacency_matrix_observed_pre = adjacency.assemble_adjacency_matrix(
+    adjacency_matrix,
+    df.filter(pl.col("year") < 2021)["fips"]
+    .unique(maintain_order=True)
+    .to_list(),
+)
+
 
 def setup_plot(nrows, ncols):
-    fig, ax = plt.subplots(nrows, ncols, figsize=(20, 15))
+    fig, ax = plt.subplots(nrows, ncols, figsize=(ncols * 10, nrows * 8.5))
     if nrows * ncols == 1:
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
@@ -37,7 +71,7 @@ def setup_plot(nrows, ncols):
             spine.set_position(("outward", 5))
         # put the grid behind
         ax.set_axisbelow(True)
-        return ax
+        return fig, ax
     for temp in ax.flatten():  # type: ignore
         temp.spines["top"].set_visible(False)
         temp.spines["right"].set_visible(False)
@@ -53,10 +87,193 @@ def setup_plot(nrows, ncols):
     return fig, ax
 
 
-# plot for the vaccination coverage in county-years with >= 10 cases
+def calculate_moran_eigenvectors_adjacency(
+    adjacency_matrix, n_vectors="positive"
+):
+    """
+    Calculate Moran's eigenvector maps from adjacency matrix
+
+    Parameters:
+    -----------
+    adjacency_matrix : array-like, shape (n, n)
+        Binary adjacency matrix (1 = neighbors, 0 = not neighbors)
+    n_vectors : int or 'positive'
+        Number of eigenvectors to retain
+
+    Returns:
+    --------
+    eigenvectors : array, shape (n, n_vectors)
+    eigenvalues : array, shape (n_vectors,)
+    """
+    W = np.asarray(adjacency_matrix, dtype=float)
+    n = W.shape[0]
+
+    # Row-standardize
+    row_sums = W.sum(axis=1)
+    row_sums[row_sums == 0] = 1  # Avoid division by zero
+    W = W / row_sums[:, np.newaxis]
+
+    # Center the matrix
+    I = np.eye(n)
+    ones = np.ones((n, 1))
+    H = I - (ones @ ones.T) / n
+
+    # Double-centered spatial weights
+    M = H @ W @ H
+
+    # Eigendecomposition
+    eigenvalues, eigenvectors = np.linalg.eigh(M)
+
+    # Sort descending
+    idx = eigenvalues.argsort()[::-1]
+    eigenvalues = eigenvalues[idx]
+    eigenvectors = eigenvectors[:, idx]
+
+    # Keep positive eigenvalues
+    if n_vectors == "positive":
+        n_vectors = np.sum(eigenvalues > 1e-10)
+
+    return eigenvectors[:, :n_vectors], eigenvalues[:n_vectors]
+
+
+def spearman_msr_blocked(
+    x, y, adjacency_matrix, county_indices, n_permutations=99999, seed=108
+):
+    """
+    MSR with block permutation for repeated measures (time series per county)
+
+    Permutes entire counties together, preserving within-county temporal structure.
+    Handles unbalanced panels (different # of observations per county).
+
+    Parameters:
+    -----------
+    x, y : array-like
+        Data vectors (length = total observations across all counties/times)
+    adjacency_matrix : array, shape (n_counties, n_counties)
+        County-level adjacency matrix
+    county_indices : array-like
+        County identifier for each observation (0-indexed)
+        Example: [0, 0, 0, 1, 1, 2, 2, 2, ...] means first 3 obs are county 0, etc.
+    n_permutations : int
+        Number of permutations
+    seed : int, optional
+        Random seed
+
+    Returns:
+    --------
+    rho_obs : float
+        Observed correlation
+    p_value : float
+        MSR p-value
+    rho_null : array
+        Null distribution
+    """
+    if seed is not None:
+        np.random.seed(seed)
+
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    county_indices = np.asarray(county_indices)
+
+    # Validation
+    if len(x) != len(y) or len(x) != len(county_indices):
+        raise ValueError(
+            f"x ({len(x)}), y ({len(y)}), and county_indices ({len(county_indices)}) "
+            f"must have same length"
+        )
+
+    # Get unique counties and validate
+    unique_counties = np.unique(county_indices)
+    n_counties = len(unique_counties)
+
+    if n_counties != adjacency_matrix.shape[0]:
+        raise ValueError(
+            f"Number of unique counties ({n_counties}) doesn't match "
+            f"adjacency matrix size ({adjacency_matrix.shape[0]})"
+        )
+
+    # Check that county_indices are 0-indexed and contiguous
+    if not np.array_equal(unique_counties, np.arange(n_counties)):
+        raise ValueError(
+            f"county_indices must be 0-indexed integers from 0 to {n_counties - 1}. "
+            f"Got: {unique_counties}"
+        )
+
+    # Observed correlation
+    rho_obs, _ = stats.spearmanr(x, y)
+
+    # Get eigenvectors at county level
+    eigenvectors, eigenvalues = calculate_moran_eigenvectors_adjacency(
+        adjacency_matrix
+    )
+
+    # Pre-compute masks for each county (for efficiency)
+    county_masks = [county_indices == i for i in range(n_counties)]
+    county_obs_counts = [np.sum(mask) for mask in county_masks]
+
+    # Check for issues
+    if any(count == 0 for count in county_obs_counts):
+        raise ValueError(
+            "Some counties in adjacency matrix have no observations in data"
+        )
+
+    # Permutations
+    rho_null = np.zeros(n_permutations)
+
+    for perm_i in tqdm(range(n_permutations)):
+        # Generate county-level spatial permutation
+        coeffs = np.random.randn(eigenvectors.shape[1])
+        scores = eigenvectors @ coeffs
+        county_perm = np.argsort(
+            scores
+        )  # New county assignment for each original county
+
+        # Build permuted y by swapping county blocks
+        y_perm = np.zeros_like(y)
+
+        for original_county_idx in range(n_counties):
+            # This original county's observations should get values from new_county
+            new_county_idx = county_perm[original_county_idx]
+
+            # Get observations from both counties
+            original_mask = county_masks[original_county_idx]
+            new_mask = county_masks[new_county_idx]
+
+            original_obs = y[original_mask]
+            new_obs = y[new_mask]
+
+            # Handle different lengths
+            n_original = len(original_obs)
+            n_new = len(new_obs)
+
+            if n_original == n_new:
+                # Same length: direct assignment
+                y_perm[original_mask] = new_obs
+            elif n_original < n_new:
+                # Fewer observations in original: sample from new
+                sampled_indices = np.random.choice(
+                    n_new, size=n_original, replace=False
+                )
+                y_perm[original_mask] = new_obs[sampled_indices]
+            else:
+                # More observations in original: sample with replacement from new
+                sampled_indices = np.random.choice(
+                    n_new, size=n_original, replace=True
+                )
+                y_perm[original_mask] = new_obs[sampled_indices]
+
+        # Calculate correlation for this permutation
+        rho_null[perm_i], _ = stats.spearmanr(x, y_perm)  # type: ignore
+
+    # P-value
+    n_extreme = np.sum(np.abs(rho_null) >= np.abs(rho_obs))  # type: ignore
+    p_value = (n_extreme + 1) / (n_permutations + 1)
+
+    return rho_obs, p_value, rho_null
+
+
 def plot_coverage_distribution(
     df,
-    cases_threshold,
     vaccination_threshold,
     fig,
     ax,
@@ -65,14 +282,76 @@ def plot_coverage_distribution(
     # want to make violin plots by outbreak size category and then subfaceted by year
     df = df.with_columns(
         outbreak_size_buckets=pl.col("cases_outbreak").cut(
-            [0, 1, 4, cases_threshold, 1000000000],
-            labels=["-1", "0", "1", "2", "3", "4"],
-            left_closed=True,
+            [0, 9],
+            labels=["-1", "0", "1"],
+            left_closed=False,
         ),
         year_of_interest=pl.col("year").is_in([2021, 2022, 2023, 2024, 2025]),
     )
+    df_correlation = df  # .filter(pl.col("cases_outbreak") >= 1)
+    print(
+        stats.spearmanr(
+            df_correlation.filter(pl.col("year_of_interest") == False)[
+                vaccination_metric
+            ],
+            df_correlation.filter(pl.col("year_of_interest") == False)[
+                "cases_outbreak"
+            ],
+        )
+    )
+
+    print(
+        stats.spearmanr(
+            df_correlation.filter(pl.col("year_of_interest") == True)[
+                vaccination_metric
+            ],
+            df_correlation.filter(pl.col("year_of_interest") == True)[
+                "cases_outbreak"
+            ],
+        )
+    )
+
+    county_ids = df_correlation.filter(pl.col("year_of_interest") == False)[
+        "fips"
+    ].to_numpy()
+    unique_ids = np.unique(county_ids)
+    county_id_to_index = {cid: i for i, cid in enumerate(unique_ids)}
+    county_indices = np.array([county_id_to_index[cid] for cid in county_ids])
+
+    print(
+        spearman_msr_blocked(
+            df_correlation.filter(pl.col("year_of_interest") == False)[
+                vaccination_metric
+            ],
+            df_correlation.filter(pl.col("year_of_interest") == False)[
+                "cases_outbreak"
+            ],
+            adjacency_matrix_observed_pre,
+            county_indices=county_indices,
+        )
+    )
+
+    county_ids = df_correlation.filter(pl.col("year_of_interest") == True)[
+        "fips"
+    ].to_numpy()
+    unique_ids = np.unique(county_ids)
+    county_id_to_index = {cid: i for i, cid in enumerate(unique_ids)}
+    county_indices = np.array([county_id_to_index[cid] for cid in county_ids])
+
+    print(
+        spearman_msr_blocked(
+            df_correlation.filter(pl.col("year_of_interest") == True)[
+                vaccination_metric
+            ],
+            df_correlation.filter(pl.col("year_of_interest") == True)[
+                "cases_outbreak"
+            ],
+            adjacency_matrix_observed_post,
+            county_indices=county_indices,
+        )
+    )
     df = df.group_by(["outbreak_size_buckets", "year_of_interest"]).agg(
-        pl.col(vaccination_metric)
+        pl.col(vaccination_metric), pl.col("cases_outbreak")
     )
     df = df.sort(by=["outbreak_size_buckets", "year_of_interest"])
     df = df.with_columns(
@@ -143,7 +422,7 @@ def plot_coverage_distribution(
     )
     ks_stat, p_value = stats.ks_2samp(
         df.filter(pl.col("year_of_interest") == False).filter(
-            pl.col("outbreak_size_buckets") == "3"
+            pl.col("outbreak_size_buckets") == "1"
         )[vaccination_metric][0],
         df.filter(pl.col("year_of_interest") == False).filter(
             pl.col("outbreak_size_buckets") == "0"
@@ -158,10 +437,10 @@ def plot_coverage_distribution(
     )
     ks_stat, p_value = stats.ks_2samp(
         df.filter(pl.col("year_of_interest") == False).filter(
-            pl.col("outbreak_size_buckets") == "3"
+            pl.col("outbreak_size_buckets") == "0"
         )[vaccination_metric][0],
         df.filter(pl.col("year_of_interest") == True).filter(
-            pl.col("outbreak_size_buckets") == "3"
+            pl.col("outbreak_size_buckets") == "1"
         )[vaccination_metric][0],
         method="exact",
         alternative="less",
@@ -173,7 +452,7 @@ def plot_coverage_distribution(
     )
     ks_stat, p_value = stats.ks_2samp(
         df.filter(pl.col("year_of_interest") == True).filter(
-            pl.col("outbreak_size_buckets") == "3"
+            pl.col("outbreak_size_buckets") == "1"
         )[vaccination_metric][0],
         df.filter(pl.col("year_of_interest") == True).filter(
             pl.col("outbreak_size_buckets") == "0"
@@ -184,21 +463,49 @@ def plot_coverage_distribution(
     print(f"KS statistic: {ks_stat}, p-value: {p_value}")
 
     # boxplot and swarmplot of coverage distributions
+    # SWAPPED: Now plotting horizontally with bigger outbreaks higher up
     offset = 0.2
+
+    # Reverse the order so bigger outbreaks are higher up (at higher y values)
+    # Original order: 0, 1-4, 5-9, 10-19, ≥20 (indices 0-4)
+    # We want: ≥20, 10-19, 5-9, 1-4, 0 (so index 0 is at top)
+    data_pre_reversed = data_pre[::-1]
+    data_post_reversed = data_post[::-1]
+    medians_pre_reversed = medians_pre[::-1]
+    medians_post_reversed = medians_post[::-1]
+    lowers_pre_reversed = lowers_pre[::-1]
+    lowers_post_reversed = lowers_post[::-1]
+    uppers_pre_reversed = uppers_pre[::-1]
+    uppers_post_reversed = uppers_post[::-1]
+    means_pre_reversed = list(reversed(means_pre))
+    means_post_reversed = list(reversed(means_post))
+
+    n_categories = len(data_pre_reversed)
+    # Map positions: we want position 4 at the top of the plot
+    # So we use (n_categories - 1 - i) for positioning
+    positions_reversed = [n_categories - 1 - i for i in range(n_categories)]
+
+    # 2011-2020 (blue) goes ABOVE (+offset), 2021-2025 (green) goes BELOW (-offset)
     violinparts1 = ax.violinplot(
-        data_pre,
-        positions=[i - offset for i in range(len(data_pre))],
-        widths=0.3,
+        data_pre_reversed,
+        positions=[p + offset for p in positions_reversed],
+        widths=0.35,
         showextrema=False,
+        vert=False,
     )
 
     for pc in violinparts1["bodies"]:
         pc.set(facecolor="blue")
 
+    ax.axvline(x=vaccination_threshold, color="k", linestyle="--")
+
     ax.errorbar(
-        x=[i - offset for i in range(len(medians_pre))],
-        y=medians_pre,
-        yerr=[medians_pre - lowers_pre, uppers_pre - medians_pre],
+        y=[p + offset for p in positions_reversed],
+        x=medians_pre_reversed,
+        xerr=[
+            medians_pre_reversed - lowers_pre_reversed,
+            uppers_pre_reversed - medians_pre_reversed,
+        ],
         fmt="o",
         capsize=10,
         capthick=2,
@@ -207,27 +514,31 @@ def plot_coverage_distribution(
 
     # add means as stars
     ax.scatter(
-        [i - offset for i in range(len(means_pre))],
-        means_pre,
+        means_pre_reversed,
+        [p + offset for p in positions_reversed],
         marker="*",
         s=90,
         color="blue",
     )
 
     violinparts2 = ax.violinplot(
-        data_post,
-        positions=[i + offset for i in range(len(data_post))],
-        widths=0.3,
+        data_post_reversed,
+        positions=[p - offset for p in positions_reversed],
+        widths=0.35,
         showextrema=False,
+        vert=False,
     )
 
     for pc in violinparts2["bodies"]:
         pc.set(facecolor="green")
 
     ax.errorbar(
-        x=[i + offset for i in range(len(medians_post))],
-        y=medians_post,
-        yerr=[medians_post - lowers_post, uppers_post - medians_post],
+        y=[p - offset for p in positions_reversed],
+        x=medians_post_reversed,
+        xerr=[
+            medians_post_reversed - lowers_post_reversed,
+            uppers_post_reversed - medians_post_reversed,
+        ],
         fmt="o",
         capsize=10,
         capthick=2,
@@ -236,138 +547,238 @@ def plot_coverage_distribution(
 
     # add means as stars
     ax.scatter(
-        [i + offset for i in range(len(means_post))],
-        means_post,
+        means_post_reversed,
+        [p - offset for p in positions_reversed],
         marker="*",
         s=90,
         color="green",
     )
 
-    ax.set_xticks(range(len(data_pre)))
-    ax.set_xticklabels(
+    # Add significance bar between post-COVID 0 cases and ≥20 cases
+    # ≥20 is at index 0 of reversed arrays, which maps to position 3
+    # 0 cases is at index 2 of reversed arrays, which maps to position 0
+    y1 = (
+        positions_reversed[0] - offset
+    )  # Position for "≥20" cases (green/post) - at top
+    y2 = (
+        positions_reversed[2] - offset
+    )  # Position for "0" cases (green/post) - at bottom
+
+    # Get the max x-value from both distributions to place the bar to the right
+    x_max = max(
+        max(data_post_reversed[0])
+        if len(data_post_reversed[0]) > 0
+        else 0,  # ≥20 cases
+        max(data_post_reversed[2])
+        if len(data_post_reversed[2]) > 0
+        else 0,  # 0 cases (changed from [4])
+    )
+    bar_position = x_max + 2
+
+    # Draw the significance bar (now vertical)
+    ax.plot(
+        [bar_position - 0.5, bar_position, bar_position, bar_position - 0.5],
+        [y1, y1, y2, y2],
+        "k-",
+        linewidth=1.5,
+    )
+
+    y_middle = (
+        positions_reversed[1] - offset
+    )  # Position for "1-9" cases (green/post)
+    ax.plot(
+        [bar_position - 0.5, bar_position],
+        [y_middle, y_middle],
+        "k-",
+        linewidth=1.5,
+    )
+
+    # Add the asterisk in the middle
+    ax.text(
+        bar_position + 0.5,
+        (y1 + y2) / 2,
+        "**",
+        ha="left",
+        va="center",
+        fontsize=16,
+        fontweight="bold",
+        # rotate the text to be vertical
+        rotation=90,
+    )
+
+    ax.set_yticks(positions_reversed)
+    ax.set_yticklabels(
         [
+            "≥10",
+            "1-9",
             "0",
-            "1-3",
-            "4-9",
-            f"≥{cases_threshold}",
         ]
     )
 
     ax.legend(
         [violinparts1["bodies"][0], violinparts2["bodies"][0]],
         ["2011-2020", "2021-2025"],
-        loc=(0.45, 0.02),
+        loc=(0.01, 0.75),
+        edgecolor="black",
     )
-    ax.axhline(y=vaccination_threshold, color="k", linestyle="--")
-    ax.set_ylabel("MMR vaccine coverage (%)")
-    ax.set_xlabel("Outbreak size (cases)")
+    ax.set_xlabel("MMR vaccine coverage (%)")
+    ax.set_ylabel("Outbreak size (N)")
+    # ax.set_xlim(right=100)
 
     return fig, ax
 
 
-def plot_outbreak_identification_rate(df, fig, ax):
-    # calculate what percentage of outbreaks we would have captured had we said
-    # all counties with coverage less than threshold% were at risk
+def plot_cases_vs_coverage_scatter(
+    df,
+    fig,
+    ax,
+    vaccination_metric="estimated_mmr_cov",
+):
+    """
+    Scatter plot of outbreak cases vs coverage with symlog y-axis
+    Points colored by time period (pre/post COVID)
+    """
     df = df.with_columns(
-        recent=pl.col("year").is_in([2021, 2022, 2023, 2024, 2025]),
-        below_90=pl.col("estimated_mmr_cov") <= 90,
-        below_91=pl.col("estimated_mmr_cov") <= 91,
-        below_92=pl.col("estimated_mmr_cov") <= 92,
-        below_93=pl.col("estimated_mmr_cov") <= 93,
-        below_94=pl.col("estimated_mmr_cov") <= 94,
-        below_95=pl.col("estimated_mmr_cov") <= 95,
-        below_96=pl.col("estimated_mmr_cov") <= 96,
-        below_97=pl.col("estimated_mmr_cov") <= 97,
-        below_98=pl.col("estimated_mmr_cov") <= 98,
-        cases_10=pl.col("cases_outbreak") >= 10,
-        cases_5=pl.col("cases_outbreak") >= 5,
-        cases_3=pl.col("cases_outbreak") >= 3,
+        year_of_interest=pl.col("year").is_in([2021, 2022, 2023, 2024, 2025]),
     )
 
-    df = df.with_columns(
-        total_10=pl.col("cases_10").sum().over("recent"),
-        total_5=pl.col("cases_5").sum().over("recent"),
-        total_3=pl.col("cases_3").sum().over("recent"),
-    )
+    df_plot = df  # .filter(pl.col("cases_outbreak") >= 1)
 
-    df_identification = pl.DataFrame()
-    for coverage in range(90, 99):
-        df_temp = (
-            df.group_by(["recent", f"below_{coverage}"])
-            .agg(
-                identified_10=pl.sum("cases_10") / pl.col("total_10").first(),
-                identified_5=pl.sum("cases_5") / pl.col("total_5").first(),
-                identified_3=pl.sum("cases_3") / pl.col("total_3").first(),
-            )
-            .filter(pl.col(f"below_{coverage}") == True)
-            .with_columns(coverage=pl.lit(coverage))
-        )
-        df_identification = pl.concat(
-            [df_identification, df_temp], how="diagonal_relaxed"
-        )
+    # Separate data by time period
+    df_pre = df_plot.filter(pl.col("year_of_interest") == False)
+    df_post = df_plot.filter(pl.col("year_of_interest") == True)
 
-    ax.plot(
-        df_identification.filter(pl.col("recent") == False)[
-            "coverage"
-        ].to_list(),
-        100
-        * df_identification.filter(pl.col("recent") == False)[
-            "identified_10"
-        ].to_numpy(),
-        marker="P",
-        label="≥10 cases, 2011-2020",
+    # Create scatter plots
+    ax.scatter(
+        df_pre[vaccination_metric].to_numpy(),
+        df_pre["cases_outbreak"].to_numpy(),
+        alpha=0.5,
+        s=50,
         color="blue",
-        linestyle="--",
+        label="2011-2020",
+        edgecolors="none",
     )
 
-    ax.plot(
-        df_identification.filter(pl.col("recent") == True)[
-            "coverage"
-        ].to_list(),
-        100
-        * df_identification.filter(pl.col("recent") == True)[
-            "identified_10"
-        ].to_numpy(),
-        marker="P",
-        label="≥10 cases, 2021-2025",
+    ax.scatter(
+        df_post[vaccination_metric].to_numpy(),
+        df_post["cases_outbreak"].to_numpy(),
+        alpha=0.5,
+        s=50,
         color="green",
-        linestyle="--",
+        label="2021-2025",
+        edgecolors="none",
     )
 
-    ax.plot(
-        df_identification.filter(pl.col("recent") == False)[
-            "coverage"
-        ].to_list(),
-        100
-        * df_identification.filter(pl.col("recent") == False)[
-            "identified_5"
-        ].to_numpy(),
-        marker="s",
-        label="≥5 cases, 2011-2020",
-        color="blue",
-        linestyle="--",
-    )
+    # Set symlog scale for y-axis
+    ax.set_yscale("symlog", linthresh=1)
 
-    ax.plot(
-        df_identification.filter(pl.col("recent") == True)[
-            "coverage"
-        ].to_list(),
-        100
-        * df_identification.filter(pl.col("recent") == True)[
-            "identified_5"
-        ].to_numpy(),
-        marker="s",
-        label="≥5 cases, 2021-2025",
-        color="green",
-        linestyle="--",
-    )
+    # Add reference line at 95% coverage
+    ax.axvline(x=95, color="k", linestyle="--", linewidth=1.5, alpha=0.7)
 
-    ax.legend(loc=(0.40, 0.0))
     ax.set_xlabel("MMR vaccine coverage (%)")
-    ax.set_ylabel("Identification rate (sensitivity) (%)")
-    ax.set_ylim(0)
+    ax.set_ylabel("Outbreak size (N)")
+    ax.legend(loc="upper right", edgecolor="black")
+    ax.set_xlim(left=85, right=100)
 
-    return df_identification, fig, ax
+    # Set y-axis to show meaningful ticks
+    ax.set_yticks([0, 1, 5, 10, 50, 100, 500, 1000])
+    ax.get_yaxis().set_major_formatter(ticker.ScalarFormatter())
+
+    return fig, ax
+
+
+# plot for the vaccination coverage in county-years with >= 10 cases
+def plot_coverage_distribution_all_years(
+    df,
+    vaccination_threshold,
+    fig,
+    ax,
+    vaccination_metric="estimated_mmr_cov",
+):
+    # want to make violin plots by outbreak size category
+    df = df.with_columns(
+        outbreak_size_buckets=pl.col("cases_outbreak").cut(
+            [0, 4, 9, 19],
+            labels=["-1", "0", "1", "2", "3"],
+            left_closed=False,
+        ),
+    )
+    df_correlation = df.filter(pl.col("cases_outbreak") >= 1)
+    print(
+        stats.spearmanr(
+            df_correlation[vaccination_metric],
+            df_correlation["cases_outbreak"],
+        )
+    )
+
+    df = df.group_by(["outbreak_size_buckets"]).agg(
+        pl.col(vaccination_metric), pl.col("cases_outbreak")
+    )
+    df = df.sort(by=["outbreak_size_buckets"])
+    df = df.with_columns(
+        avg_cov=pl.col(vaccination_metric).list.mean(),
+        median_cov=pl.col(vaccination_metric).list.median(),
+        lower_cov=pl.col(vaccination_metric).map_elements(
+            lambda x: np.percentile(x, 25)
+        ),
+        upper_cov=pl.col(vaccination_metric).map_elements(
+            lambda x: np.percentile(x, 75)
+        ),
+    )
+
+    data = df.to_dict()[vaccination_metric].to_list()
+    medians = df.to_dict()["median_cov"].to_numpy()
+    lowers = df.to_dict()["lower_cov"].to_numpy()
+    uppers = df.to_dict()["upper_cov"].to_numpy()
+    means = df.to_dict()["avg_cov"].to_list()
+
+    # boxplot and swarmplot of coverage distributions
+    violinparts = ax.violinplot(
+        data,
+        positions=range(len(data)),
+        widths=0.3,
+        showextrema=False,
+    )
+
+    for pc in violinparts["bodies"]:
+        pc.set(facecolor="grey")
+
+    ax.errorbar(
+        x=range(len(medians)),
+        y=medians,
+        yerr=[medians - lowers, uppers - medians],
+        fmt="o",
+        capsize=10,
+        capthick=2,
+        color="grey",
+    )
+
+    # add means as stars
+    ax.scatter(
+        range(len(means)),
+        means,
+        marker="*",
+        s=90,
+        color="grey",
+    )
+
+    ax.set_xticks(range(len(data)))
+    ax.set_xticklabels(
+        [
+            "0",
+            "1-4",
+            "5-9",
+            "10-19",
+            "≥20",
+        ]
+    )
+
+    ax.axhline(y=vaccination_threshold, color="k", linestyle="--")
+    ax.set_ylabel("MMR vaccine coverage (%)")
+    ax.set_xlabel("Outbreak size (N)")
+    ax.set_ylim(top=100)
+
+    return fig, ax
 
 
 def plot_coverage_various_models(df, fig, ax):
@@ -451,160 +862,180 @@ def plot_coverage_various_models(df, fig, ax):
         "All covariates": "orange",
     }
 
+    # dashed line at 0
+    ax.axhline(y=0, color="k", linestyle="--")
+
     for model_name, offset in zip(models, [-0.07, 0, 0.07]):
         model_effects = assembled_effects.filter(
             pl.col("model") == model_name
         ).sort("year_index")
         if model_name == "All covariates":
-            ax.errorbar(
-                [0 + offset, 1 + offset],
-                model_effects["median_coverage_effect"].to_list(),
-                yerr=[
-                    model_effects["median_coverage_effect"].to_numpy()
-                    - model_effects["lower_coverage_effect"].to_numpy(),
-                    model_effects["upper_coverage_effect"].to_numpy()
-                    - model_effects["median_coverage_effect"].to_numpy(),
-                ],
-                fmt="o",
-                label=model_name,
-                color=colors[model_name],
-                zorder=10,
+            print(
+                f"{model_name} median effects: {model_effects['median_coverage_effect'].to_list()}"
             )
-        else:
-            ax.errorbar(
-                [0 + offset, 1 + offset],
-                model_effects["median_coverage_effect"].to_list(),
-                yerr=[
-                    model_effects["median_coverage_effect"].to_numpy()
-                    - model_effects["lower_coverage_effect"].to_numpy(),
-                    model_effects["upper_coverage_effect"].to_numpy()
-                    - model_effects["median_coverage_effect"].to_numpy(),
-                ],
-                fmt="o",
-                label=model_name,
-                color=colors[model_name],
+            print(
+                f"{model_name} 95% CI: {list(zip(model_effects['lower_coverage_effect'].to_list(), model_effects['upper_coverage_effect'].to_list()))}"
             )
+        ax.errorbar(
+            [0 + offset, 1 + offset],
+            model_effects["median_coverage_effect"].to_list(),
+            yerr=[
+                model_effects["median_coverage_effect"].to_numpy()
+                - model_effects["lower_coverage_effect"].to_numpy(),
+                model_effects["upper_coverage_effect"].to_numpy()
+                - model_effects["median_coverage_effect"].to_numpy(),
+            ],
+            fmt="o",
+            label=model_name,
+            color=colors[model_name],
+            linewidth=3,
+            markersize=10,
+        )
 
-        # scatter plot the mean with a "*" as its marker
-        # ax.scatter(
-        #     [0 + offset, 1 + offset],
-        #     model_effects["mean_coverage_effect"].to_list(),
-        #     marker="*",
-        #     s=12,
-        #     color=colors[model_name],
-        # )
-
-    # dashed line at 1
-    ax.axhline(y=0, color="k", linestyle="--")
     ax.set_xticks([0, 1])
     ax.set_xticklabels(["2011-2020", "2021-2025"])
     ax.set_xlim([-0.18, 1.18])
 
     ax.set_xlabel("Year")
     ax.set_ylabel(
-        "% change in incidence rate per 1%\nincrease in MMR vaccine coverage"
+        "% change in outbreak size per 1pp\nincrease in MMR vaccine coverage"
     )
-    ax.legend(loc=(0.2, 0.65))
+    ax.legend(
+        loc=(0.2, 0.65),
+        edgecolor="black",
+        title="Model's covariate set:                         ",
+    )
 
     return fig, ax
 
 
-def plot_effect_over_time(samples, df, years_in_order, fig, ax):
-    # scale by standard deviation to make it interpretable
-    mu = samples["mu"]
-    samples = samples["effects_over_time_and_group"][:, :, 0]
-    std_wh = df["estimated_mmr_cov"].to_numpy().std()
-    samples_wh = samples / std_wh
-    # exponentiate and multiply by 100
-    samples_wh = jnp.exp(samples_wh) * 100
-    # to express as percent change
-    samples_wh = samples_wh - 100
+def plot_nationwide_effect_over_time(
+    samples_16_17,
+    samples_2025,
+    df_16_17,
+    df_2025,
+    years_in_order,
+    fig,
+    ax,
+    weight_by_mu=False,
+):
+    """
+    Plot the nationwide (population-level) effect of MMR coverage over time.
 
-    # collect the values by years
-    median_effect = np.array([])
-    lower_effect = np.array([])
-    upper_effect = np.array([])
+    If weight_by_mu=False: Extracts the upper-level hierarchical parameter (effects_over_time)
+    If weight_by_mu=True: Uses observation-level effects weighted by expected cases (mu)
+    """
+
+    def compute_nationwide_effects(samples, df, weight_by_mu):
+        std_wh = df["estimated_mmr_cov"].to_numpy().std()
+
+        if not weight_by_mu:
+            # Use upper-level parameter
+            effects = samples["effects_over_time"][:, :, 0]
+            effects = effects[:, ::-1]  # Reverse to chronological order
+            effects_scaled = effects / std_wh
+            effects_pct = jnp.exp(effects_scaled) * 100 - 100
+            median_effect = jnp.median(effects_pct, axis=0)
+            lower_effect = jnp.quantile(effects_pct, 0.025, axis=0)
+            upper_effect = jnp.quantile(effects_pct, 0.975, axis=0)
+            return median_effect, lower_effect, upper_effect
+
+        else:
+            # Use observation-level effects weighted by mu
+            mu = samples["mu"]
+            effects_obs = samples["effects_over_time_and_group"][
+                :, :, 0
+            ]  # [n_samples, n_observations]
+            effects_scaled = effects_obs / std_wh
+            effects_pct = jnp.exp(effects_scaled) * 100 - 100
+
+            years_calendar = df["year"].to_numpy()
+            min_year = int(years_calendar.min())
+            max_year = int(years_calendar.max())
+
+            median_effects = []
+            lower_effects = []
+            upper_effects = []
+
+            for year in range(min_year, max_year + 1):
+                mask = df["year"].is_in([year]).to_jax()
+
+                # Get effects and mu for this year
+                year_effects = effects_pct[
+                    :, mask
+                ]  # [n_samples, n_obs_in_year]
+                year_mu = mu[:, mask]  # [n_samples, n_obs_in_year]
+
+                # Weighted average
+                weighted_effects = (
+                    year_effects * year_mu / year_mu.sum(axis=1, keepdims=True)
+                ).sum(axis=1)  # [n_samples]
+
+                median_effects.append(float(jnp.median(weighted_effects)))
+                lower_effects.append(
+                    float(jnp.quantile(weighted_effects, 0.025))
+                )
+                upper_effects.append(
+                    float(jnp.quantile(weighted_effects, 0.975))
+                )
+
+            return (
+                np.array(median_effects),
+                np.array(lower_effects),
+                np.array(upper_effects),
+            )
+
+    # Get effects from both model variants
+    median_16_17, lower_16_17, upper_16_17 = compute_nationwide_effects(
+        samples_16_17, df_16_17, weight_by_mu
+    )
+    median_2025, lower_2025, upper_2025 = compute_nationwide_effects(
+        samples_2025, df_2025, weight_by_mu
+    )
+
+    # Average across the two variants
+    median_effect = (median_16_17 + median_2025) / 2
+    lower_effect = (lower_16_17 + lower_2025) / 2
+    upper_effect = (upper_16_17 + upper_2025) / 2
+
+    # Create year range for plotting
     years_all_out = range(
         int(min(years_in_order)), int(max(years_in_order)) + 1
     )
-    for year in years_all_out:
-        mask = df["year"].is_in(year).to_jax()
-        samples = samples_wh[:, mask]
-        # average weighted by cases
-        samples = (
-            samples * mu[:, mask] / mu[:, mask].sum(axis=1, keepdims=True)
-        )
-        samples = samples.sum(axis=1)
-        median_effect = np.append(
-            median_effect, float(jnp.median(samples, axis=0))
-        )
-        lower_effect = np.append(
-            lower_effect, float(jnp.quantile(samples, 0.025, axis=0))
-        )
-        upper_effect = np.append(
-            upper_effect, float(jnp.quantile(samples, 0.975, axis=0))
-        )
 
-    median_effect_expanded_cumsum = jnp.cumsum(median_effect)
-
-    median_effect_expanded = jnp.concatenate(
-        [
-            median_effect[:1],
-            median_effect_expanded_cumsum[1:2] / 2,
-            median_effect_expanded_cumsum[2:3] / 3,
-            (
-                median_effect_expanded_cumsum[3:]
-                - median_effect_expanded_cumsum[:-3]
-            )
-            / 3,
-        ]
+    # Verify alignment
+    assert len(median_effect) == len(list(years_all_out)), (
+        f"Mismatch: {len(median_effect)} effects vs {len(list(years_all_out))} years"
     )
 
-    lower_effect_expanded_cumsum = jnp.cumsum(lower_effect)
-
-    lower_effect_expanded = jnp.concatenate(
-        [
-            lower_effect[:1],
-            lower_effect_expanded_cumsum[1:2] / 2,
-            lower_effect_expanded_cumsum[2:3] / 3,
-            (
-                lower_effect_expanded_cumsum[3:]
-                - lower_effect_expanded_cumsum[:-3]
-            )
-            / 3,
-        ]
+    # Smooth the estimates
+    n = 3
+    median_effect_smoothed = jnp.convolve(
+        jnp.pad(median_effect, (n - 1, 0)), jnp.ones(n) / n, mode="valid"
+    )
+    lower_effect_smoothed = jnp.convolve(
+        jnp.pad(lower_effect, (n - 1, 0)), jnp.ones(n) / n, mode="valid"
+    )
+    upper_effect_smoothed = jnp.convolve(
+        jnp.pad(upper_effect, (n - 1, 0)), jnp.ones(n) / n, mode="valid"
     )
 
-    upper_effect_expanded_cumsum = jnp.cumsum(upper_effect)
-
-    upper_effect_expanded = jnp.concatenate(
-        [
-            upper_effect[:1],
-            upper_effect_expanded_cumsum[1:2] / 2,
-            upper_effect_expanded_cumsum[2:3] / 3,
-            (
-                upper_effect_expanded_cumsum[3:]
-                - upper_effect_expanded_cumsum[:-3]
-            )
-            / 3,
-        ]
-    )
-
+    # Plot
     ax.fill_between(
         years_all_out,
-        lower_effect_expanded,
-        upper_effect_expanded,
+        lower_effect_smoothed,
+        upper_effect_smoothed,
         color="grey",
         alpha=0.3,
     )
-    ax.plot(years_all_out, median_effect_expanded, color="grey")
-    # horizontal line at y=100
+    ax.plot(years_all_out, median_effect_smoothed, color="grey")
     ax.axhline(0, ls="--", color="black")
 
     ax.set_xlabel("Year")
     ax.set_ylabel(
-        "% change in incidence rate per 1%\nincrease in MMR vaccine coverage"
+        "% change in outbreak size per 1pp\nincrease in MMR vaccine coverage"
     )
+    ax.set_xticks([2011, 2015, 2020, 2025])
 
     return fig, ax
 
@@ -616,14 +1047,15 @@ if __name__ == "__main__":
         schema_overrides={"fips": pl.String},
     )
 
-    fig, ax = setup_plot(2, 2)  # type: ignore
+    fig, ax = setup_plot(1, 3)  # type: ignore
+    fig_cov, ax_cov = setup_plot(1, 1)  # type: ignore
 
     # coverages and outbreak size relationship changes over time
-    ax[0, 0].text(  # type: ignore
+    ax[0].text(  # type: ignore
         -0.25,
         1.08,
         "a",
-        transform=ax[0, 0].transAxes,  # type: ignore
+        transform=ax[0].transAxes,  # type: ignore
         fontsize=24,
         fontweight="bold",
         va="top",
@@ -631,36 +1063,32 @@ if __name__ == "__main__":
     )
     plot_coverage_distribution(
         df,
-        10,
         95,
         fig,
-        ax[0, 0],  # type: ignore
+        ax[0],  # type: ignore
         vaccination_metric="estimated_mmr_cov",
     )
-
-    # threshold analysis -- outbreak identification rate for thresholds
-    ax[0, 1].text(  # type: ignore
-        -0.25,
-        1.08,
-        "b",
-        transform=ax[0, 1].transAxes,  # type: ignore
-        fontsize=24,
-        fontweight="bold",
-        va="top",
-        ha="right",
-    )
-    plot_outbreak_identification_rate(
+    plot_coverage_distribution_all_years(
         df,
-        fig,
-        ax[0, 1],  # type: ignore
+        95,
+        fig_cov,
+        ax_cov,  # type: ignore
+        vaccination_metric="estimated_mmr_cov",
+    )
+    fig_cov.savefig(
+        os.path.join(
+            fig_dir, "figure_coverage_distribution_outbreak_size.png"
+        ),
+        dpi=300,
+        bbox_inches="tight",
     )
 
     # significance of coverage across various models
-    ax[1, 0].text(  # type: ignore
+    ax[1].text(  # type: ignore
         -0.25,
         1.08,
-        "c",
-        transform=ax[1, 0].transAxes,  # type: ignore
+        "b",
+        transform=ax[1].transAxes,  # type: ignore
         fontsize=24,
         fontweight="bold",
         va="top",
@@ -669,37 +1097,61 @@ if __name__ == "__main__":
     plot_coverage_various_models(
         df,
         fig,
-        ax[1, 0],  # type: ignore
+        ax[1],  # type: ignore
     )
 
     # read predictive samples
     with open(
         os.path.join(
             output_dir,
-            "predictive_random_walk_poisson_CAR_time_and_group_varying_2025_mega_regions=True.pkl",
+            "predictive_random_walk_poisson_CAR_time_and_group_varying_2025_oddities=True_exclude_16_17.pkl",
         ),
         "rb",
     ) as file:
-        predictive_samples = pickle.load(file)
+        predictive_samples_1617 = pickle.load(file)
+
+    with open(
+        os.path.join(
+            output_dir,
+            "predictive_random_walk_poisson_CAR_time_and_group_varying_2025_oddities=True.pkl",
+        ),
+        "rb",
+    ) as file:
+        predictive_samples_2025 = pickle.load(file)
+
+    exclude_16_17 = pl.read_csv(
+        os.path.join(output_dir, "exclude_16_17.csv"),
+    )
+    df = df.with_columns(
+        year_county_state=pl.col("year").cast(pl.String)
+        + pl.col("county")
+        + pl.col("state")
+    )
 
     # plot effect over time
-    ax[1, 1].text(  # type: ignore
+    ax[2].text(  # type: ignore
         -0.25,
         1.08,
-        "d",
-        transform=ax[1, 1].transAxes,  # type: ignore
+        "c",
+        transform=ax[2].transAxes,  # type: ignore
         fontsize=24,
         fontweight="bold",
         va="top",
         ha="right",
     )
 
-    plot_effect_over_time(
-        predictive_samples,
+    plot_nationwide_effect_over_time(
+        predictive_samples_1617,
+        predictive_samples_2025,
+        df.filter(
+            ~pl.col("year_county_state").is_in(
+                exclude_16_17["year_county_state"].to_list()
+            )
+        ),
         df,
         list([2011, 2012.5, 2014.5, 2016.5, 2018.5, 2020.5, 2022.5, 2025]),
         fig,
-        ax[1, 1],  # type: ignore
+        ax[2],  # type: ignore
     )
 
     fig.tight_layout()
@@ -712,6 +1164,24 @@ if __name__ == "__main__":
     )
     fig.savefig(
         os.path.join(fig_dir, "figure_changing_county_level_predictors.pdf"),
+        dpi=300,
+        bbox_inches="tight",
+    )
+
+    fig_scatter, ax_scatter = setup_plot(1, 1)  # type: ignore
+    plot_cases_vs_coverage_scatter(
+        df,
+        fig_scatter,
+        ax_scatter,
+        vaccination_metric="estimated_mmr_cov",
+    )
+    fig_scatter.savefig(
+        os.path.join(fig_dir, "figure_supplemental_cases_coverage.png"),
+        dpi=300,
+        bbox_inches="tight",
+    )
+    fig_scatter.savefig(
+        os.path.join(fig_dir, "figure_supplemental_cases_coverage.pdf"),
         dpi=300,
         bbox_inches="tight",
     )

@@ -328,11 +328,15 @@ def map_fips_code_data(
 
     if cbar_type is None:
         # add a legend with point sizes
-        size_values = [10, 50, 100, 500]  # Example sizes to show
-        size_labels = ["10", "50", "100", "500"]
+        size_values = [5, 100, 10, 50, 500]  # Example sizes to show
+        size_labels = ["1-5", "100", "10", "50", "500"]
 
         legend_elements = []
-        for size, label in zip(size_values, size_labels):
+        for i, (size, label) in enumerate(zip(size_values, size_labels)):
+            if i == 3:
+                legend_elements.append(
+                    plt.scatter([], [], s=0, c="none", label=" ")
+                )
             legend_elements.append(
                 plt.scatter([], [], s=size, c="red", alpha=0.8, label=label)
             )
@@ -344,7 +348,7 @@ def map_fips_code_data(
             loc="upper right",
             frameon=False,
             scatterpoints=1,
-            ncol=len(size_values),
+            ncol=3,
             bbox_to_anchor=(1.15, 0.035),
         )
 
@@ -355,8 +359,20 @@ def map_fips_code_data(
 
 
 def plot_cases_over_time(df, fig, ax):
+    # remove south carolina "2025" since we have that data elsewhere
+    df = df.filter(
+        ~((pl.col("state") == "South Carolina") & (pl.col("year") == 2025))
+    )
     df_overall = df.group_by("year").agg(pl.sum("cases"))
     df_overall = df_overall.sort("year")
+    # South Carolina had 333 cases in 2025 according to CDC
+    # add South Carolina 333 to 2025 value
+    df_overall = df_overall.with_columns(
+        pl.when(pl.col("year") == 2025)
+        .then(pl.col("cases") + 333)
+        .otherwise(pl.col("cases"))
+        .alias("cases")
+    )
     ax.plot(
         df_overall["year"],
         df_overall["cases"],
@@ -364,6 +380,7 @@ def plot_cases_over_time(df, fig, ax):
         markersize=10,
         color="black",
         linestyle="--",
+        label="Annual cases",
     )
     ax.set_xlabel("Year")
     ax.set_ylabel("Measles cases (N)")
@@ -379,8 +396,11 @@ def plot_cases_over_time(df, fig, ax):
         alpha=0.2,
         align="edge",
         edgecolor="grey",
+        label="Number of counties",
     )
-    ax2.set_ylabel("County-year outbreaks (N)", rotation=-90, labelpad=30)
+    ax2.set_ylabel(
+        "Counties with measles cases (N)", rotation=-90, labelpad=30
+    )
     ax2.spines["top"].set_visible(False)
     ax2.spines["left"].set_visible(False)
     ax2.get_xaxis().tick_bottom()
@@ -392,23 +412,532 @@ def plot_cases_over_time(df, fig, ax):
         spine.set_position(("outward", 5))
     # put the grid behind
     ax2.set_axisbelow(True)
+    ax2.set_ylim(0, 250)
+
+    l1, h1 = ax.get_legend_handles_labels()
+    l2, h2 = ax2.get_legend_handles_labels()
+    ax.legend([*l1, *l2], [*h1, *h2], edgecolor="black")
 
     return fig, ax
+
+
+def exclude_county_state_year(df, county, state, year):
+    return df.filter(
+        ~(
+            (pl.col("county") == county)
+            & (pl.col("state") == state)
+            & (pl.col("year") == year)
+        )
+    )
+
+
+def project_coverage_scenarios(
+    vaccination_data, vaccination_data_roc, latest_year=2025, end_year=2030
+):
+    """
+    Project vaccine coverage, nonmedical exemption, and medical exemption rates
+    under 5 scenarios.
+
+    Parameters:
+    -----------
+    vaccination_data : pl.DataFrame
+        Full vaccination dataset with year, fips, estimated_mmr_cov,
+        nonmed_exempt_pct, med_exempt_pct, etc.
+    vaccination_data_roc : pl.DataFrame
+        DataFrame with fips and slope (from linear regression on coverage)
+    latest_year : int
+        Most recent year to use as baseline (default 2025)
+    end_year : int
+        Final year to project to (default 2030)
+
+    Returns:
+    --------
+    pl.DataFrame with projections in long format
+    """
+
+    # 1. Get baseline data (most recent per county up to latest_year)
+    baseline = (
+        vaccination_data.filter(pl.col("year") <= latest_year)
+        .filter(pl.col("fips").is_not_null())
+        .filter(pl.col("fips").str.len_chars() > 2)  # County-level only
+        .sort(["fips", "year"], descending=True)
+        .group_by("fips", maintain_order=True)
+        .agg(
+            pl.first("year").alias("baseline_year"),
+            pl.first("estimated_mmr_cov").alias("baseline_coverage"),
+            pl.first("nonmed_exempt_pct").alias("baseline_nonmed_exempt"),
+            pl.first("med_exempt_pct").alias("baseline_med_exempt"),
+            pl.first("state"),
+            pl.first("county"),
+        )
+    )
+
+    # 2. Determine which counties have sufficient data (>=2 years since 2020)
+    county_data_counts = (
+        vaccination_data.filter(pl.col("year") >= 2020)
+        .group_by("fips")
+        .agg(pl.count("year").alias("n_years"))
+    )
+
+    # 3. Calculate slopes for nonmed and med exemptions via linear regression
+    def calc_slopes(df, outcome_col, alias):
+        return (
+            df.filter(pl.col("year") >= 2020)
+            .filter(pl.col(outcome_col).is_not_null())
+            .group_by("fips")
+            .map_groups(
+                lambda g: pl.DataFrame(
+                    {
+                        "fips": [g["fips"][0]],
+                        alias: [
+                            linregress(
+                                g["year"].cast(pl.Float64).to_numpy(),
+                                g[outcome_col].cast(pl.Float64).to_numpy(),
+                            ).slope  # type: ignore
+                            if g.height >= 2
+                            else float("nan")
+                        ],
+                    }
+                )
+            )
+            .filter(~pl.col(alias).is_nan())
+        )
+
+    nonmed_roc = calc_slopes(
+        vaccination_data, "nonmed_exempt_pct", "slope_nonmed"
+    )
+    med_roc = calc_slopes(vaccination_data, "med_exempt_pct", "slope_med")
+
+    # 4. Calculate national average slopes
+    valid_slopes = vaccination_data_roc.filter(
+        ~pl.col("slope").is_nan() & ~pl.col("slope").is_null()
+    )
+    national_avg_slope = valid_slopes["slope"].mean()
+
+    valid_nonmed = nonmed_roc.filter(
+        ~pl.col("slope_nonmed").is_nan() & ~pl.col("slope_nonmed").is_null()
+    )
+    national_avg_slope_nonmed = valid_nonmed["slope_nonmed"].mean()
+
+    valid_med = med_roc.filter(
+        ~pl.col("slope_med").is_nan() & ~pl.col("slope_med").is_null()
+    )
+    national_avg_slope_med = valid_med["slope_med"].mean()
+
+    print(f"National average slope (coverage):     {national_avg_slope:.4f}")
+    print(
+        f"National average slope (nonmed exempt): {national_avg_slope_nonmed:.4f}"
+    )
+    print(
+        f"National average slope (med exempt):    {national_avg_slope_med:.4f}"
+    )
+    print(
+        f"Number of counties with coverage slope data: {valid_slopes.height}"
+    )
+    print(
+        f"Number of counties with nonmed slope data:   {valid_nonmed.height}"
+    )
+    print(f"Number of counties with med slope data:      {valid_med.height}")
+
+    # 5. Join all slopes onto baseline
+    projection_base = (
+        baseline.join(county_data_counts, on="fips", how="left")
+        .join(
+            vaccination_data_roc.select(["fips", "slope"]),
+            on="fips",
+            how="left",
+        )
+        .join(nonmed_roc, on="fips", how="left")
+        .join(med_roc, on="fips", how="left")
+        .with_columns(
+            [
+                pl.when(pl.col("n_years") >= 2)
+                .then(pl.col("slope"))
+                .otherwise(national_avg_slope)
+                .alias("slope_baseline"),
+                pl.when(pl.col("n_years") >= 2)
+                .then(pl.col("slope_nonmed"))
+                .otherwise(national_avg_slope_nonmed)
+                .alias("slope_nonmed_baseline"),
+                pl.when(pl.col("n_years") >= 2)
+                .then(pl.col("slope_med"))
+                .otherwise(national_avg_slope_med)
+                .alias("slope_med_baseline"),
+            ]
+        )
+    )
+
+    # 6. Identify bottom 20% of declining counties by coverage slope
+    declining = projection_base.filter(pl.col("slope_baseline") < 0)
+    n_bottom_30 = int(np.ceil(declining.height * 0.3))
+
+    bottom_30_fips = (
+        declining.sort("slope_baseline").head(n_bottom_30).select("fips")
+    )
+
+    print(f"\nNumber of declining counties: {declining.height}")
+    print(f"Number in bottom 30%: {n_bottom_30}")
+    print(
+        f"Worst slope in bottom 30%: {declining.sort('slope_baseline').head(1)['slope_baseline'][0]:.4f}"
+    )
+    print(
+        f"Best slope in bottom 30%: {declining.sort('slope_baseline').head(n_bottom_30).tail(1)['slope_baseline'][0]:.4f}"
+    )
+
+    # 7. Define scenario modifications
+    def apply_scenario_a(df):
+        """(a) Baseline - current trends"""
+        return df.with_columns(
+            [
+                pl.col("slope_baseline").alias("slope_scenario"),
+                pl.col("slope_nonmed_baseline").alias("slope_nonmed_scenario"),
+                pl.col("slope_med_baseline").alias("slope_med_scenario"),
+            ]
+        )
+
+    def apply_scenario_b(df):
+        """(b) Targeted worsening"""
+        return df.with_columns(
+            [
+                pl.when(pl.col("slope_baseline") < 0)
+                .then(pl.col("slope_baseline") * 2.0)
+                .otherwise(national_avg_slope)
+                .alias("slope_scenario"),
+                pl.when(pl.col("slope_baseline") < 0)
+                .then(
+                    pl.col("slope_nonmed_baseline")
+                    + pl.col("slope_baseline").abs()
+                )
+                .otherwise(national_avg_slope_nonmed)
+                .alias("slope_nonmed_scenario"),
+                pl.col("slope_med_baseline").alias("slope_med_scenario"),
+            ]
+        )
+
+    def apply_scenario_c(df):
+        """(c) Universal worsening"""
+        return df.with_columns(
+            [
+                pl.when(pl.col("slope_baseline") < 0)
+                .then(pl.col("slope_baseline") * 1.5)
+                .otherwise(pl.col("slope_baseline"))
+                .alias("slope_scenario"),
+                pl.when(pl.col("slope_baseline") < 0)
+                .then(
+                    pl.col("slope_nonmed_baseline")
+                    + (pl.col("slope_baseline") * 0.5).abs()
+                )
+                .otherwise(pl.col("slope_nonmed_baseline"))
+                .alias("slope_nonmed_scenario"),
+                pl.col("slope_med_baseline").alias("slope_med_scenario"),
+            ]
+        )
+
+    def apply_scenario_d(df):
+        years_to_end = end_year - df["baseline_year"]
+        years_to_start = latest_year + 1 - df["baseline_year"]
+
+        projected_coverage_at_start = (
+            df["baseline_coverage"] + df["slope_baseline"] * years_to_start
+        ).clip(0.0, 100.0)
+
+        required_coverage_slope = (
+            95.0 - df["baseline_coverage"]
+        ) / years_to_end
+
+        df = df.with_columns(
+            [
+                pl.Series("required_coverage_slope", required_coverage_slope),
+                pl.Series(
+                    "projected_coverage_at_start", projected_coverage_at_start
+                ),
+            ]
+        )
+
+        return df.with_columns(
+            [
+                pl.when(pl.col("projected_coverage_at_start") < 95.0)
+                .then(pl.col("required_coverage_slope"))
+                .otherwise(
+                    pl.when(
+                        pl.col("baseline_coverage")
+                        + pl.col("slope_baseline")
+                        * (end_year - pl.col("baseline_year"))
+                        >= 95.0
+                    )
+                    .then(pl.col("slope_baseline"))
+                    .otherwise(pl.lit(0.0))
+                )
+                .alias("slope_scenario"),
+                pl.when(pl.col("projected_coverage_at_start") < 95.0)
+                .then(-pl.col("required_coverage_slope"))
+                .otherwise(
+                    pl.when(
+                        pl.col("baseline_coverage")
+                        + pl.col("slope_baseline")
+                        * (end_year - pl.col("baseline_year"))
+                        >= 95.0
+                    )
+                    .then(pl.col("slope_nonmed_baseline"))
+                    .otherwise(pl.lit(0.0))
+                )
+                .alias("slope_nonmed_scenario"),
+                pl.col("slope_med_baseline").alias("slope_med_scenario"),
+            ]
+        )
+
+    def apply_scenario_e(df):
+        """(e) Universal improvement"""
+        return df.with_columns(
+            [
+                pl.lit(1.0).alias("slope_scenario"),
+                pl.lit(-1.0).alias("slope_nonmed_scenario"),
+                pl.col("slope_med_baseline").alias("slope_med_scenario"),
+            ]
+        )
+
+    def apply_scenario_f(df):
+        """(f) No change - coverage frozen at baseline"""
+        return df.with_columns(
+            [
+                pl.lit(0.0).alias("slope_scenario"),
+                pl.lit(0.0).alias("slope_nonmed_scenario"),
+                pl.lit(0.0).alias("slope_med_scenario"),
+            ]
+        )
+
+    scenarios = [
+        ("baseline", apply_scenario_a),
+        ("targeted_worsening", apply_scenario_b),
+        ("universal_worsening", apply_scenario_c),
+        ("targeted_improvement", apply_scenario_d),
+        ("universal_improvement", apply_scenario_e),
+        ("no_change", apply_scenario_f),  # Add this line
+    ]
+
+    # 8. Create projections for each scenario
+    all_scenarios = []
+
+    for scenario_name, modifier_func in scenarios:
+        print(f"\nProcessing scenario: {scenario_name}")
+
+        scenario_df = modifier_func(projection_base.clone())
+
+        projection_years = list(range(latest_year + 1, end_year + 1))
+
+        for proj_year in projection_years:
+            years_ahead = proj_year - scenario_df["baseline_year"].cast(
+                pl.Int32
+            )
+
+            scenario_df = scenario_df.with_columns(
+                [
+                    (
+                        pl.col("baseline_coverage").cast(pl.Float64)
+                        + pl.col("slope_scenario").cast(pl.Float64)
+                        * years_ahead
+                    )
+                    .clip(0.0, 100.0)
+                    .alias(f"cov_{proj_year}"),
+                    (
+                        pl.col("baseline_nonmed_exempt").cast(pl.Float64)
+                        + pl.col("slope_nonmed_scenario").cast(pl.Float64)
+                        * years_ahead
+                    )
+                    .clip(0.0, 100.0)
+                    .alias(f"nonmed_{proj_year}"),
+                    (
+                        pl.col("baseline_med_exempt").cast(pl.Float64)
+                        + pl.col("slope_med_scenario").cast(pl.Float64)
+                        * years_ahead
+                    )
+                    .clip(0.0, 100.0)
+                    .alias(f"med_{proj_year}"),
+                ]
+            )
+
+        # Reshape coverage to long
+        cov_long = (
+            scenario_df.select(
+                [
+                    "fips",
+                    "county",
+                    "state",
+                    "baseline_year",
+                    "baseline_coverage",
+                    "slope_baseline",
+                    "slope_scenario",
+                    *[f"cov_{y}" for y in projection_years],
+                ]
+            )
+            .unpivot(
+                index=[
+                    "fips",
+                    "county",
+                    "state",
+                    "baseline_year",
+                    "baseline_coverage",
+                    "slope_baseline",
+                    "slope_scenario",
+                ],
+                on=[f"cov_{y}" for y in projection_years],
+                variable_name="year_col",
+                value_name="projected_coverage",
+            )
+            .with_columns(
+                pl.col("year_col")
+                .str.replace("cov_", "")
+                .cast(pl.Int32)
+                .alias("year")
+            )
+            .drop("year_col")
+        )
+
+        # Reshape nonmed exemptions to long
+        nonmed_long = (
+            scenario_df.select(
+                [
+                    "fips",
+                    "baseline_nonmed_exempt",
+                    "slope_nonmed_baseline",
+                    "slope_nonmed_scenario",
+                    *[f"nonmed_{y}" for y in projection_years],
+                ]
+            )
+            .unpivot(
+                index=[
+                    "fips",
+                    "baseline_nonmed_exempt",
+                    "slope_nonmed_baseline",
+                    "slope_nonmed_scenario",
+                ],
+                on=[f"nonmed_{y}" for y in projection_years],
+                variable_name="year_col",
+                value_name="projected_nonmed_exempt",
+            )
+            .with_columns(
+                pl.col("year_col")
+                .str.replace("nonmed_", "")
+                .cast(pl.Int32)
+                .alias("year")
+            )
+            .drop("year_col")
+        )
+
+        # Reshape med exemptions to long
+        med_long = (
+            scenario_df.select(
+                [
+                    "fips",
+                    "baseline_med_exempt",
+                    "slope_med_baseline",
+                    "slope_med_scenario",
+                    *[f"med_{y}" for y in projection_years],
+                ]
+            )
+            .unpivot(
+                index=[
+                    "fips",
+                    "baseline_med_exempt",
+                    "slope_med_baseline",
+                    "slope_med_scenario",
+                ],
+                on=[f"med_{y}" for y in projection_years],
+                variable_name="year_col",
+                value_name="projected_med_exempt",
+            )
+            .with_columns(
+                pl.col("year_col")
+                .str.replace("med_", "")
+                .cast(pl.Int32)
+                .alias("year")
+            )
+            .drop("year_col")
+        )
+
+        # Join all three into one long frame
+        scenario_long = (
+            cov_long.join(nonmed_long, on=["fips", "year"], how="left")
+            .join(med_long, on=["fips", "year"], how="left")
+            .with_columns(pl.lit(scenario_name).alias("scenario"))
+        )
+
+        all_scenarios.append(scenario_long)
+
+        # Print summary statistics
+        for col, label in [
+            ("projected_coverage", "coverage"),
+            ("projected_nonmed_exempt", "nonmed exempt"),
+            ("projected_med_exempt", "med exempt"),
+        ]:
+            avg = scenario_long.filter(pl.col("year") == end_year)[col].mean()
+            mn = scenario_long.filter(pl.col("year") == end_year)[col].min()
+            print(f"  Avg {label} in {end_year}: {avg:.2f}%   Min: {mn:.2f}%")
+
+    combined = pl.concat(all_scenarios)
+    return combined
 
 
 if __name__ == "__main__":
     df = pl.read_csv(
         os.path.join(data_dir, "analysis_dataset.csv"),
-        # make sure we read fips codes as strings
         schema_overrides={"fips": pl.String},
     )
+    df = df.with_columns(
+        state_county_year=pl.concat_str(
+            [
+                pl.col("state"),
+                pl.lit("_"),
+                pl.col("county"),
+                pl.lit("_"),
+                pl.col("year").cast(pl.String),
+            ]
+        )
+    )
+    # plus add anything that may be missing from 2021-2025
+    missing = pl.read_csv(os.path.join(data_dir, "missing_counties.csv"))
+    missing = missing.with_columns(
+        state_county_year=pl.concat_str(
+            [
+                pl.col("state"),
+                pl.lit("_"),
+                pl.col("county"),
+                pl.lit("_"),
+                pl.col("year").cast(pl.String),
+            ]
+        )
+    )
+    missing = missing.filter(
+        ~pl.col("state_county_year").is_in(df["state_county_year"])
+    )
+    df = pl.concat([df, missing], how="diagonal_relaxed")
+
     # let's just plot Fulton and Gwinnett counties over Fulton county only
     df = (
         df.with_columns(
             fips=pl.when(pl.col("county") == "Fulton and Gwynett")
             .then(pl.lit("13121"))
             .otherwise(pl.col("fips")),
-            # east tennessee over knox county
+        )
+        .with_columns(
+            fips=pl.when(pl.col("county") == "Fulton, Gwinett")
+            .then(pl.lit("13121"))
+            .otherwise(pl.col("fips")),
+        )
+        .with_columns(
+            fips=pl.when(pl.col("county") == "District 1")
+            .then(pl.lit("22071"))
+            .otherwise(pl.col("fips"))
+        )
+        .with_columns(
+            fips=pl.when(pl.col("county") == "Forsyth, Fulton, Paulding")
+            .then(pl.lit("13117"))
+            .otherwise(pl.col("fips")),
+        )
+        .with_columns(
+            fips=pl.when(pl.col("county") == "Blue Ridge")
+            .then(pl.lit("51023"))
+            .otherwise(pl.col("fips")),
         )
         .with_columns(
             fips=pl.when(pl.col("county") == "East tennessee?")
@@ -504,6 +1033,21 @@ if __name__ == "__main__":
             .then(pl.lit("45045"))
             .otherwise(pl.col("fips"))
         )
+        .with_columns(
+            fips=pl.when(pl.col("county") == "Piedmont, Virginia")
+            .then(pl.lit("51007"))
+            .otherwise(pl.col("fips"))
+        )
+        .with_columns(
+            fips=pl.when(pl.col("county") == "Central Region, Virginia")
+            .then(pl.lit("51025"))
+            .otherwise(pl.col("fips"))
+        )
+        .with_columns(
+            fips=pl.when(pl.col("county") == "Region 1, Louisiana")
+            .then(pl.lit("22051"))
+            .otherwise(pl.col("fips"))
+        )
     )
 
     df_by_fips = df.group_by("fips")
@@ -528,7 +1072,11 @@ if __name__ == "__main__":
         ax[0, 0],  # type: ignore
         cbar_label=None,
         cbar_type=None,
-        point_data=overall_cases[["fips", "cases"]],
+        point_data=overall_cases[["fips", "cases"]].with_columns(
+            cases=pl.when(pl.col("cases") < 5)
+            .then(pl.lit(5))
+            .otherwise(pl.col("cases"))
+        ),
     )
 
     ax[0, 1].text(  # type: ignore
@@ -546,75 +1094,84 @@ if __name__ == "__main__":
 
     vaccination_data = pl.read_excel(
         os.path.join(
-            data_dir, "Compiled_Vaccine_Exemption_Data_Final_v1_092425.xlsx"
+            data_dir,
+            "Compiled_Vaccine_Exemption_Data_R1_110225_Hawaiied_AK_CA_Updated.xlsx",
         ),
         schema_overrides={"FIPS": pl.String},
     )
 
-    # Ad hoc adjustment to some odd fips codes
-    # There is an instance of a six-digit fips code
-    # it looks to me like this just fairfax county, VA (fips 51059), so truncate
-    # just for now while playing around
+    # remove the funky places lauren found in her QC
+    vaccination_data = exclude_county_state_year(
+        vaccination_data, "Butts", "Georgia", 2024
+    )
+    vaccination_data = exclude_county_state_year(
+        vaccination_data, "Jasper", "Georgia", 2024
+    )
+    vaccination_data = exclude_county_state_year(
+        vaccination_data, "Lumpkin", "Georgia", 2024
+    )
+    vaccination_data = exclude_county_state_year(
+        vaccination_data, "Richmond", "Georgia", 2024
+    )
+    vaccination_data = exclude_county_state_year(
+        vaccination_data, "Schley", "Georgia", 2024
+    )
+    vaccination_data = exclude_county_state_year(
+        vaccination_data, "Baltimore City", "Maryland", 2019
+    )
+    vaccination_data = exclude_county_state_year(
+        vaccination_data, "Slope", "North Dakota", 2021
+    )
+    vaccination_data = vaccination_data.with_columns(
+        MMR_cov=pl.when(
+            (pl.col("county") == "Cocke")
+            & (pl.col("state") == "Tennessee")
+            & (pl.col("year") == 2024)
+        )
+        .then(pl.lit(94.5))
+        .otherwise(pl.col("MMR_cov"))
+    )
+    vaccination_data = vaccination_data.with_columns(
+        med_exempt_pct=pl.when(
+            (
+                pl.col("state").is_in(
+                    ["Wyoming", "Louisiana", "Vermont", "Mississippi"]
+                )
+            )
+            & pl.col("med_exempt_pct").is_null()
+        )
+        .then(pl.lit(0))
+        .otherwise(pl.col("med_exempt_pct"))
+    )
+
     vaccination_data = vaccination_data.with_columns(
         FIPS=pl.when(pl.col("FIPS") == "510591")
         .then(pl.lit("51059"))
         .otherwise(pl.col("FIPS")),
-        # combine vaccination coverages to make a single estimate
         estimated_mmr_cov=pl.when(pl.col("MMR_cov").is_not_null())
         .then(pl.col("MMR_cov"))
         .otherwise(pl.col("all_vacc_cov")),
-    ).filter(pl.col("FIPS").is_not_null())
+    )
 
-    # Make vaccination coverage a number and drop anything that doesn't exist
     vaccination_data = vaccination_data.with_columns(
         estimated_mmr_cov=pl.col("estimated_mmr_cov").cast(
             pl.Float64, strict=False
         )
-    ).filter(pl.col("estimated_mmr_cov").is_not_null())
-
-    # correct the baltimore oddity
-    vaccination_data = vaccination_data.with_columns(
-        estimated_mmr_cov=pl.when(
-            (pl.col("state") == "Maryland")
-            & (pl.col("county") == "Baltimore City")
-            & (pl.col("year") == 2019)
-        )
-        .then(
-            pl.lit(
-                vaccination_data.filter(
-                    (pl.col("state") == "Maryland")
-                    & (pl.col("county") == "Baltimore City")
-                    & ((pl.col("year") == 2018) | (pl.col("year") == 2020))
-                )["estimated_mmr_cov"].mean()
-            )
-        )
-        .otherwise(pl.col("estimated_mmr_cov"))
     )
 
-    # rename "FIPS" for "fips"
     vaccination_data = vaccination_data.rename({"FIPS": "fips"})
 
-    # Some fips code editing
-    # edit the washington dc fips code to be 11001 because DC has one county
     vaccination_data = vaccination_data.with_columns(
         fips=pl.when(pl.col("fips") == "11")
         .then(pl.lit("11001"))
         .otherwise(pl.col("fips"))
     )
 
-    # There are some cases where we have a higher spatial unit than the county
-    # We want to expand that state/region level data to all available counties
-    # This happens for places where we only have state-level data
-
-    # West Virginia, Rhode Island, and Delaware only report state-level data
-    # Expand the data to include all fips codes in these states
-    # Alaska is funky where the data are provided by economic zone but those
-    # encompass multiple census fips code level units
     state_fips_to_expand = {
         "higher_level_fips": [
-            *["10"] * 3,  # Delaware has 3 counties
-            *["44"] * 5,  # Rhode Island has 5
-            *["54"] * 55,  # WV has 55
+            *["10"] * 3,
+            *["44"] * 5,
+            *["54"] * 55,
         ],
         "county_fips": [
             *["10001", "10003", "10005"],
@@ -630,23 +1187,12 @@ if __name__ == "__main__":
         right_on="higher_level_fips",
         how="left",
     )
-    # for cases where there are county fips available, use those as the state fips
     vaccination_data = vaccination_data.with_columns(
         fips=pl.when(pl.col("county_fips").is_not_null())
         .then(pl.col("county_fips"))
         .otherwise(pl.col("fips"))
     )
 
-    # The Alaska fips codes are largely just wrong
-    # Anchorage is 02020 not 20200
-    # Gulf Coast (21220) comprises Kodiak Island, Kenai Peninsular, Chugach, and Copper
-    # Interior (22900) comprises Yukon-Koyukuk, Denali, Fairbanks North Star, Southeast Fairbanks
-    # Matanuska-Susitana is not 21700 but 02170
-    # Northern (21850) comprises Nome, North Slope, and Northwest Arctic
-    # Southeast (22820) comprises Haines, Yakutat, Hoonah-Angoon, Sitka,
-    # Prince of Wales-Hyder, Ketchikan, Wrangell, Petersburg, Juneau, Skagway
-    # Southwest (21640) consists of Aleutians East, Aleutians West, Lake and Peninsula,
-    # Bristol Bay, Dilingham, Bethel, Kusilvak
     alaska_fips = {
         "old_alaska": [
             "20200",
@@ -701,49 +1247,47 @@ if __name__ == "__main__":
         .otherwise(pl.col("fips"))
     )
 
-    # Nebraska is similar
-
     nebraska_fips = {
         "old_nebraska": [
-            *["310012"] * 3,  # Central
-            "310021",  # Dakota
-            "310002",  # Douglas
-            *["310005"] * 4,  # East Central
-            *["310008"] * 4,  # Elkhorn Logan Valley
-            *["310007"] * 4,  # Four Corners
-            "310003",  # Lincoln-Lancaster
-            *["310015"] * 9,  # Loup Basin
-            *["310020"] * 9,  # North Central
-            *["310010"] * 4,  # Northeast
-            *["310018"] * 12,  # Panhandle
-            *["310011"] * 5,  # Public Health Solutions
-            *["310006"] * 2,  # Sarpy/Cas
-            *["310013"] * 4,  # South Heartland
-            *["310009"] * 5,  # Southeast
-            *["310017"] * 9,  # Southwest
-            *["310004"] * 3,  # Three Rivers
-            *["310014"] * 7,  # Two Rivers
-            *["310016"] * 6,  # West Central
+            *["310012"] * 3,
+            "310021",
+            "310002",
+            *["310005"] * 4,
+            *["310008"] * 4,
+            *["310007"] * 4,
+            "310003",
+            *["310015"] * 9,
+            *["310020"] * 9,
+            *["310010"] * 4,
+            *["310018"] * 12,
+            *["310011"] * 5,
+            *["310006"] * 2,
+            *["310013"] * 4,
+            *["310009"] * 5,
+            *["310017"] * 9,
+            *["310004"] * 3,
+            *["310014"] * 7,
+            *["310016"] * 6,
         ],
         "new_nebraska": [
             "31079",
             "31081",
-            "31121",  # Hall, Hamilton, and Merrick
-            "31043",  # Dakota
-            "31055",  # Douglas
+            "31121",
+            "31043",
+            "31055",
             "31011",
             "31037",
             "31125",
-            "31141",  # Boone, Colfax, Nance, and Platte
+            "31141",
             "31021",
             "31039",
             "31119",
-            "31167",  # Burt, Cuming, Madison, Stanton
+            "31167",
             "31023",
             "31143",
             "31159",
-            "31185",  # Bulter, Polk, Seward, York
-            "31109",  # Lancaster
+            "31185",
+            "31109",
             "31009",
             "31041",
             "31071",
@@ -752,7 +1296,7 @@ if __name__ == "__main__":
             "31115",
             "31163",
             "31175",
-            "31183",  # Blaine, Custer, Garfield, Greeley, Howard, Loup, Sherman, Valley, Wheeler
+            "31183",
             "31003",
             "31015",
             "31017",
@@ -761,11 +1305,11 @@ if __name__ == "__main__":
             "31103",
             "31107",
             "31139",
-            "31149",  # Antelope, Boyd, Brown, Cherry, Holt, Keya Paha, Knox, Pierce, Rock
+            "31149",
             "31027",
             "31051",
             "31173",
-            "31179",  # Cedar, Dixon, Thurston, Wayne
+            "31179",
             "31007",
             "31013",
             "31033",
@@ -777,23 +1321,23 @@ if __name__ == "__main__":
             "31157",
             "31123",
             "31161",
-            "31105",  # Banner, Box Butte, Cheyenne, Dawes, Deuel, Garden, Grant, Kimball, Sioux, Scotts Bluff, Morrill, Sheridan
+            "31105",
             "31059",
             "31067",
             "31095",
             "31151",
-            "31169",  # Fillmore, Gage, Jefferson, Saline, Thayer
+            "31169",
             "31153",
-            "31025",  # Sarpy, Cass
+            "31025",
             "31001",
             "31035",
             "31129",
-            "31181",  # Adams, Clay, Nuckolls, Webster
+            "31181",
             "31097",
             "31127",
             "31131",
             "31133",
-            "31147",  # Johnson, Nemaha, Otoe, Pawnee, Richardson
+            "31147",
             "31029",
             "31057",
             "31063",
@@ -802,23 +1346,23 @@ if __name__ == "__main__":
             "31087",
             "31101",
             "31135",
-            "31145",  # Chase, Dundy, Frontier, Furnas, Hayes, Hitchcock, Keith, Perkins, Red Willow
+            "31145",
             "31053",
             "31177",
-            "31155",  # Dodge, Washington, Saunders
+            "31155",
             "31019",
             "31047",
             "31061",
             "31073",
             "31083",
             "31099",
-            "31137",  # Buffalo, Dawson, Franklin, Gosper, Harlan, kearney, Phelps
+            "31137",
             "31005",
             "31091",
             "31111",
             "31113",
             "31117",
-            "31171",  # Arthur, Hooker, Lincoln, Logan, McPherson, Thomas
+            "31171",
         ],
     }
 
@@ -832,23 +1376,13 @@ if __name__ == "__main__":
         .otherwise(pl.col("fips"))
     )
 
-    # Hawaii also only reports state level data mainly, but that too for only one year
-    # so we can't even use it in this analysis
-    # Indiana largely also only reports state-level data, but that too only for
-    # exemptions, so we don't want to assume something stringently about coverage
-    # in those cases, so we just don't touch those data
-
-    # The four digit fips codes need to be expanded to five digit codes
-    # but don't pad blindly because otherwise we also pad the states
     vaccination_data = vaccination_data.with_columns(
         fips=pl.when(pl.col("fips").str.len_chars() == 4)
         .then(pl.col("fips").str.zfill(5))
         .otherwise(pl.col("fips"))
     )
 
-    # in some cases, we have longer than we need fips details
     vaccination_data = vaccination_data.with_columns(
-        # Kansas fips codes are weird because NBC team created their own effectively
         fips=pl.when(
             (pl.col("fips").str.len_chars() > 5)
             & (pl.col("state") != "Kansas")
@@ -857,38 +1391,202 @@ if __name__ == "__main__":
         .otherwise(pl.col("fips"))
     )
 
-    # add in the kansas data
     kansas = vaccination_wrangling.read_kansas_data(data_dir)
     kansas = kansas.rename({"mmr_cov": "estimated_mmr_cov"})
     vaccination_data = pl.concat(
         [vaccination_data, kansas], how="diagonal_relaxed"
     )
 
-    # filter
+    montana_vacc = vaccination_wrangling.read_montana_data(data_dir=data_dir)
+    vaccination_data = vaccination_data.join(
+        montana_vacc,
+        on=["state", "county", "year"],
+        how="left",
+        suffix="_montana",
+    )
+    vaccination_data = vaccination_data.with_columns(
+        all_vacc_cov=pl.when(
+            (pl.col("state") == "Montana") & pl.col("all_vacc_cov").is_null()
+        )
+        .then(pl.col("all_vacc_cov_montana"))
+        .otherwise(pl.col("all_vacc_cov")),
+        MMR_cov=pl.when(
+            (pl.col("state") == "Montana") & pl.col("MMR_cov").is_null()
+        )
+        .then(pl.col("MMR_cov_montana"))
+        .otherwise(pl.col("MMR_cov")),
+        nonmed_exempt_pct=pl.when(
+            (pl.col("state") == "Montana")
+            & pl.col("nonmed_exempt_pct").is_null()
+        )
+        .then(pl.col("nonmed_exempt_pct_montana"))
+        .otherwise(pl.col("nonmed_exempt_pct")),
+        med_exempt_pct=pl.when(
+            (pl.col("state") == "Montana") & pl.col("med_exempt_pct").is_null()
+        )
+        .then(pl.col("med_exempt_pct_montana"))
+        .otherwise(pl.col("med_exempt_pct")),
+        estimated_mmr_cov=pl.when(
+            (pl.col("state") == "Montana")
+            & pl.col("estimated_mmr_cov").is_null()
+        )
+        .then(pl.col("estimated_mmr_cov_montana"))
+        .otherwise(pl.col("estimated_mmr_cov")),
+    ).drop(
+        [
+            "MMR_cov_montana",
+            "all_vacc_cov_montana",
+            "nonmed_exempt_pct_montana",
+            "med_exempt_pct_montana",
+            "estimated_mmr_cov_montana",
+        ]
+    )
+
+    vaccination_data = vaccination_data.with_columns(
+        fips=pl.when((pl.col("state") == "Montana") & pl.col("fips").is_null())
+        .then(pl.col("fips").forward_fill().over("county"))
+        .otherwise(pl.col("fips"))
+    )
+
+    vaccination_data = vaccination_data.sort(
+        "state", "county", "year"
+    ).with_columns(
+        [
+            pl.col(col).interpolate().over("state", "county")
+            for col in [
+                "estimated_mmr_cov",
+                "nonmed_exempt_pct",
+                "med_exempt_pct",
+            ]
+        ]
+    )
+
+    vaccination_data = (
+        vaccination_data.with_columns(
+            estimated_mmr_cov_state=pl.col("estimated_mmr_cov")
+            .filter(pl.col("county") == "State")
+            .first()
+            .over(["state", "year"]),
+            nonmed_exempt_pct_state=pl.col("nonmed_exempt_pct")
+            .filter(pl.col("county") == "State")
+            .first()
+            .over(["state", "year"]),
+            med_exempt_pct_state=pl.col("med_exempt_pct")
+            .filter(pl.col("county") == "State")
+            .first()
+            .over(["state", "year"]),
+        )
+        .with_columns(
+            estimated_mmr_cov=pl.col("estimated_mmr_cov").fill_null(
+                pl.col("estimated_mmr_cov_state")
+            ),
+            nonmed_exempt_pct=pl.col("nonmed_exempt_pct").fill_null(
+                pl.col("nonmed_exempt_pct_state")
+            ),
+            med_exempt_pct=pl.col("med_exempt_pct").fill_null(
+                pl.col("med_exempt_pct_state")
+            ),
+        )
+        .drop(
+            [
+                "estimated_mmr_cov_state",
+                "nonmed_exempt_pct_state",
+                "med_exempt_pct_state",
+            ]
+        )
+    )
+
+    print(vaccination_data.filter(pl.col("estimated_mmr_cov") == 0.0))
+    vaccination_data = vaccination_data.filter(
+        pl.col("estimated_mmr_cov") != 0.0
+    )
+    print(vaccination_data.filter(pl.col("estimated_mmr_cov").is_null()))
+    print(vaccination_data.filter(pl.col("estimated_mmr_cov").is_nan()))
+    vaccination_data = vaccination_data.filter(
+        pl.col("estimated_mmr_cov").is_not_null()
+        & ~pl.col("estimated_mmr_cov").is_nan()
+    )
+
     vaccination_data_latest = vaccination_data.filter(pl.col("year") == 2023)
 
-    # grab the latest available vaccination data
-    vaccination_data_export = (
-        vaccination_data.filter(
-            (pl.col("estimated_mmr_cov").is_not_null())
-            & (pl.col("nonmed_exempt_pct").is_not_null())
-            & (pl.col("med_exempt_pct").is_not_null())
-        )
-        .sort(["fips", "year"], descending=True)
-        .group_by("fips", maintain_order=True)
-        .agg(
-            pl.first("year"),
-            pl.first("estimated_mmr_cov"),
-            pl.first("nonmed_exempt_pct"),
-            pl.first("med_exempt_pct"),
-            pl.first("state"),
-            pl.first("county"),
-        )
+    print("\n" + "=" * 80)
+    print("IMPUTING MISSING COUNTY FIPS FOR TARGET STATES")
+    print("=" * 80)
+    vaccination_data = vaccination_wrangling.impute_from_state_level_coverages(
+        vaccination_data, data_dir
     )
 
-    vaccination_data_export.write_csv(
-        os.path.join(data_dir, "latest_vaccination_data.csv")
+    print("\n" + "=" * 80)
+    print("POST-IMPUTATION DIAGNOSTICS")
+    print("=" * 80)
+
+    nebraska_all = vaccination_data.filter(pl.col("state") == "Nebraska")
+    print(f"Total Nebraska rows after imputation: {nebraska_all.height}")
+
+    nebraska_counties = nebraska_all.filter(
+        pl.col("fips").str.len_chars() == 5
     )
+    print(f"Nebraska county-level rows: {nebraska_counties.height}")
+    print(f"Unique Nebraska counties: {nebraska_counties['fips'].n_unique()}")
+
+    brown_county = vaccination_data.filter(pl.col("fips") == "31017")
+    print(f"\nBrown County (31017) rows: {brown_county.height}")
+    if brown_county.height > 0:
+        print(f"Brown County years: {sorted(brown_county['year'].to_list())}")
+        print(
+            f"Brown County coverage values: {brown_county[['year', 'estimated_mmr_cov']].to_pandas()}"
+        )
+    else:
+        print("Brown County NOT FOUND after imputation!")
+
+    # Check if it's in the shapefile
+    counties_gdf = gpd.read_file(
+        os.path.join(data_dir, "cb_2020_us_county_20m.shp")
+    )
+    brown_in_shapefile = counties_gdf[counties_gdf["GEOID"] == "31017"]
+    print(f"\nBrown County in shapefile: {len(brown_in_shapefile) > 0}")
+    if len(brown_in_shapefile) > 0:
+        print(
+            f"Shapefile info: {brown_in_shapefile[['STATEFP', 'GEOID', 'NAME']].to_dict('records')}"
+        )
+
+    print("=" * 80 + "\n")
+
+    validation_years = [2021, 2022, 2023, 2024, 2025, 2026]
+    for year in validation_years:
+        vaccination_data_export = (
+            vaccination_data.filter(pl.col("estimated_mmr_cov") != 0.0)
+            .filter(pl.col("fips").is_not_null())
+            .filter(
+                (pl.col("estimated_mmr_cov").is_not_null())
+                & (pl.col("nonmed_exempt_pct").is_not_null())
+                & (pl.col("med_exempt_pct").is_not_null())
+            )
+            .filter(pl.col("year") < year)
+            .sort(["fips", "year"], descending=True)
+            .group_by("fips", maintain_order=True)
+            .agg(
+                pl.first("year"),
+                pl.first("estimated_mmr_cov"),
+                pl.first("nonmed_exempt_pct"),
+                pl.first("med_exempt_pct"),
+                pl.first("state"),
+                pl.first("county"),
+            )
+            .filter(pl.col("fips").str.len_chars() > 2)
+        )
+
+        brown_in_export = vaccination_data_export.filter(
+            pl.col("fips") == "31017"
+        )
+        print(
+            f"Year {year}: Brown County in export = {brown_in_export.height > 0}"
+        )
+        print(f"  Total counties exported: {vaccination_data_export.height}")
+
+        vaccination_data_export.write_csv(
+            os.path.join(data_dir, f"{year}_vaccination_data.csv")
+        )
 
     # map
     ax[1, 0].text(  # type: ignore
@@ -910,8 +1608,19 @@ if __name__ == "__main__":
         cbar_type="bucketed_coverage",
     )
 
-    # Calculate the average change in coverage
-    # subset to 2021 onwards
+    print("counties below 95%:")
+    print(
+        vaccination_data_latest.filter(
+            pl.col("estimated_mmr_cov") < 95
+        ).count()
+    )
+    print(
+        vaccination_data_latest.filter(
+            pl.col("estimated_mmr_cov") < 95
+        ).count()
+        / vaccination_data_latest.count()
+    )
+
     vaccination_data_roc = vaccination_data.filter(pl.col("year") >= 2020)
     vaccination_data_roc = vaccination_data_roc.group_by("fips").map_groups(
         lambda group_df: pl.DataFrame(
@@ -930,7 +1639,57 @@ if __name__ == "__main__":
         pl.col("slope").is_not_nan()
     )
 
-    # map of the change in vaccination coverage
+    # --- Summary statistics ---
+    avg_2011 = (
+        vaccination_data.filter(
+            (pl.col("year") == 2010)
+            & pl.col("estimated_mmr_cov").is_not_null()
+        )
+        .filter(pl.col("fips").str.len_chars() > 2)["estimated_mmr_cov"]
+        .mean()
+    )
+
+    avg_2011_15 = (
+        vaccination_data.filter(
+            (pl.col("year") <= 2015)
+            & pl.col("estimated_mmr_cov").is_not_null()
+        )
+        .filter(pl.col("fips").str.len_chars() > 2)["estimated_mmr_cov"]
+        .mean()
+    )
+
+    avg_2025 = (
+        vaccination_data.filter(
+            (pl.col("year") == 2024)
+            & pl.col("estimated_mmr_cov").is_not_null()
+        )
+        .filter(pl.col("fips").str.len_chars() > 2)["estimated_mmr_cov"]
+        .mean()
+    )
+
+    avg_2021_25 = (
+        vaccination_data.filter(
+            (pl.col("year") >= 2020)
+            & pl.col("estimated_mmr_cov").is_not_null()
+        )
+        .filter(pl.col("fips").str.len_chars() > 2)["estimated_mmr_cov"]
+        .mean()
+    )
+
+    avg_roc = vaccination_data_roc["slope"].mean()
+
+    print(f"Average MMR coverage in 2011 (counties reporting): {avg_2011}%")
+    print(f"Average MMR coverage in 2025 (counties reporting): {avg_2025}%")
+    print(
+        f"Average annual rate of change since 2020 (across counties): {avg_roc}%/year"
+    )
+    print(
+        f"Average MMR coverage in 2011-15 (counties reporting): {avg_2011_15}%"
+    )
+    print(
+        f"Average MMR coverage in 2021-25 (counties reporting): {avg_2021_25}%"
+    )
+
     ax[1, 1].text(  # type: ignore
         -0.05,
         1.08,
@@ -950,21 +1709,51 @@ if __name__ == "__main__":
         cbar_type="discrete",
     )
 
-    # While we're here, calculate how vaccination coverage has changed over
-    # year over year
     vaccination_data = vaccination_data.sort(["fips", "year"]).with_columns(
-        # by fips code, calculate year over year change
         year_over_year_change=pl.col("estimated_mmr_cov")
         - pl.col("estimated_mmr_cov").shift(1).over("fips")
     )
 
-    # export this
     vaccination_data.write_csv(
         os.path.join(data_dir, "year_over_year_change_vaccination_data.csv")
     )
 
+    # ------------------------------------------------------------------
+    # Projections: using already-imputed vaccination_data
+    # ------------------------------------------------------------------
+    print("\n" + "=" * 80)
+    print("GENERATING VACCINE COVERAGE PROJECTIONS")
+    print("=" * 80)
+
+    projections = project_coverage_scenarios(
+        vaccination_data, vaccination_data_roc, latest_year=2025, end_year=2030
+    )
+
+    # Save combined file
+    projections.write_csv(
+        os.path.join(
+            data_dir, "vaccine_coverage_projections_all_scenarios.csv"
+        )
+    )
+
+    # Save individual scenario files
+    for scenario in projections["scenario"].unique():
+        scenario_df = projections.filter(pl.col("scenario") == scenario)
+        brown_in_proj = scenario_df.filter(pl.col("fips") == "31017")
+        print(
+            f"Scenario {scenario}: Brown County rows = {brown_in_proj.height}"
+        )
+        scenario_df.write_csv(
+            os.path.join(
+                data_dir, f"vaccine_coverage_projections_{scenario}.csv"
+            )
+        )
+        print(f"Saved: vaccine_coverage_projections_{scenario}.csv")
+
+    print("\nProjection files saved successfully!")
+    print("=" * 80 + "\n")
+
     plt.tight_layout(rect=(0, 0, 1, 1))
-    # save
     fig.savefig(
         os.path.join(fig_dir, "figure_measles_burden_overview.png"),
         dpi=300,

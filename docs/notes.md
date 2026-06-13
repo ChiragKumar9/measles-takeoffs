@@ -232,3 +232,100 @@ def plot_validation(df, import_df, fig, ax):
     ax.set_xticks([2023, 2024, 2025], labels=[2023, 2024, 2025])
 
     return fig, ax
+
+
+    # get the five states with the highest levels of NMEs
+    top_5_nme_states = df.group_by("state").agg(
+        nme_pct = (pl.col("nonmed_exempt_pct") * pl.col("pop_5_9") / pl.sum("pop_5_9")).sum()
+    ).sort("nme_pct", descending=True).head(5)['state'].to_list()
+    # set the NMEs to 0 for these states
+    for state in top_5_nme_states:
+        state_mask = df['state'] == state
+        df = df.with_columns(
+            estimated_mmr_cov = pl.when(state_mask)
+            .then(
+                pl.col("estimated_mmr_cov") + slope * pl.col("nonmed_exempt_pct") + intercept
+            )
+            .otherwise(pl.col("estimated_mmr_cov")),
+            nonmed_exempt_pct = pl.when(state_mask)
+            .then(pl.lit(0.0))
+            .otherwise(pl.col("nonmed_exempt_pct")),
+        )
+
+    # top 5 highest risk states
+    top_5_risk_states = pl.read_csv(
+        os.path.join(output_dir, "state_assembled_projection_results.csv")
+    ).filter(pl.col("type") == "projection").sort(by = 'median_unconditioned_risk_rank', descending = True).head(5)['state'].to_list()
+
+    # set the NMEs to 0 for these states as well
+    for state in top_5_risk_states:
+        state_mask = df['state'] == state
+        df = df.with_columns(
+            estimated_mmr_cov = pl.when(state_mask)
+            .then(
+                pl.col("estimated_mmr_cov") + slope * pl.col("nonmed_exempt_pct") + intercept
+            )
+            .otherwise(pl.col("estimated_mmr_cov")),
+            nonmed_exempt_pct = pl.when(state_mask)
+            .then(pl.lit(0.0))
+            .otherwise(pl.col("nonmed_exempt_pct")),
+        )
+
+
+
+
+# samples_full_scaled = np.mean(samples_full_scaled, axis=0, keepdims=True)
+# naive_full_scaled = np.mean(naive_full_scaled, axis=0, keepdims=True)
+
+# for i, sample in enumerate([samples_full, naive_full]):
+#     quantile = 0
+#     full = [samples_full_scaled, naive_full_scaled][i]
+#     for val in np.sort(np.unique(true_full)):
+#         delta_quantile = np.sum(true_full == val) / len(true_full)
+#         delta_quantile *= 100
+
+#         lower = np.percentile(sample, quantile, axis = 1, keepdims=True)
+#         upper = np.percentile(sample, quantile + delta_quantile, axis = 1, keepdims=True)
+#         if quantile + delta_quantile > 99.999:
+#             in_quantile = sample >= lower
+#         else:
+#             in_quantile = (sample >= lower) & (sample < upper)
+
+#         mask = np.where(
+#             lower == upper,
+#             sample == lower,
+#             in_quantile,
+#         )
+
+#         # mask = true_full == val
+
+#         # mean scale the values in mask
+#         temp = np.where(
+#             mask,
+#             sample,
+#             np.nan,
+#         )
+#         if temp.size > 0:
+#             mean_pred = np.nanmean(temp, axis=1, keepdims=True)
+#             full = np.where(
+#                 mask,
+#                 sample - mean_pred + val,
+#                 full,
+#             )
+#         quantile += delta_quantile
+#     if i == 0:
+#         samples_full_scaled = full
+#     else:
+#         naive_full_scaled = full
+
+# samples_full_scaled = np.clip(samples_full_scaled, a_min=0, a_max=None)
+# naive_full_scaled = np.clip(naive_full_scaled, a_min=0, a_max=None)
+
+samples_full_scaled_median = np.median(samples_full_scaled, axis=0)
+naive_full_scaled_median = np.median(naive_full_scaled, axis=0)
+
+# finally do one more scaling for values greater than 10
+# for the scaled values greater than 10, scale by a factor to match the median
+samples_full_scaled = np.where((true_full >= 10)[np.newaxis, :],
+                               samples_full_scaled + (np.mean(true_full[true_full >= 10]) - np.mean(samples_full_scaled_median[true_full >= 10])),
+                               samples_full_scaled)

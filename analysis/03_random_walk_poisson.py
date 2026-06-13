@@ -66,9 +66,9 @@ if __name__ == "__main__":
     )
     exclude_16_17.write_csv(os.path.join(output_dir, "exclude_16_17.csv"))
     for exclusions_16_17 in [True, False]:
-        for mega_regions in [True, False]:
+        for oddities_2025 in [True, False]:
             additional_info = ""
-            if mega_regions:
+            if oddities_2025:
                 if exclusions_16_17:
                     df = df.with_columns(
                         year_county_state=pl.col("year").cast(pl.String)
@@ -98,19 +98,40 @@ if __name__ == "__main__":
                         delimiter=",",
                     )
             else:
-                # we only want to run without mega regions if we are including 16-17
-                # we don't want to both remove 16-17 and exclude mega regions
-                if not exclusions_16_17:
-                    df_model = df.filter(pl.col("mega_region_2025") == False)
+                # Filter out 2025 oddities
+                df_model = df.filter(pl.col("oddities_2025") == False)
+
+                if exclusions_16_17:
+                    # Also exclude 16-17 data
+                    df_model = df_model.with_columns(
+                        year_county_state=pl.col("year").cast(pl.String)
+                        + pl.col("county")
+                        + pl.col("state")
+                    )
+                    df_model = df_model.filter(
+                        ~pl.col("year_county_state").is_in(
+                            exclude_16_17["year_county_state"].to_list()
+                        )
+                    )
+
+                    assembled_adjacency_matrix = (
+                        adjacency.assemble_adjacency_matrix(
+                            adjacency_matrix,
+                            df_model["fips"]
+                            .unique(maintain_order=True)
+                            .to_list(),
+                        )
+                    )
+                    additional_info = "_exclude_16_17_no_2025_oddities"
+                else:
                     assembled_adjacency_matrix = np.genfromtxt(
                         os.path.join(
                             data_dir,
-                            "county_adjacency_matrix_no_2025_mega_regions.csv",
+                            "county_adjacency_matrix_no_2025_oddities.csv",
                         ),
                         delimiter=",",
                     )
-                else:
-                    continue
+                    additional_info = "_no_2025_oddities"
 
             covariates = df_model.select(
                 [
@@ -148,8 +169,8 @@ if __name__ == "__main__":
             for mode in [
                 "time_and_group_varying",
                 "time_varying_only",
-                "group_varying_only",
-                "constant",
+                # "group_varying_only",
+                # "constant",
             ]:
                 controls = jnp.hstack([df_model.select(years).to_jax()])
                 if mode == "time_and_group_varying":
@@ -196,7 +217,7 @@ if __name__ == "__main__":
                 nuts_kernel = NUTS(
                     model.fit,
                     init_strategy=init_to_median(),
-                    target_accept_prob=0.80,
+                    target_accept_prob=0.98,
                 )
                 mcmc = MCMC(
                     nuts_kernel,
@@ -217,7 +238,7 @@ if __name__ == "__main__":
                 with open(
                     os.path.join(
                         output_dir,
-                        f"samples_random_walk_poisson_CAR_{mode}_2025_mega_regions={mega_regions}{additional_info}.pkl",
+                        f"samples_random_walk_poisson_CAR_{mode}_2025_oddities={oddities_2025}{additional_info}.pkl",
                     ),
                     "wb",
                 ) as file:
@@ -334,7 +355,7 @@ if __name__ == "__main__":
                 with open(
                     os.path.join(
                         output_dir,
-                        f"predictive_random_walk_poisson_CAR_{mode}_2025_mega_regions={mega_regions}{additional_info}.pkl",
+                        f"predictive_random_walk_poisson_CAR_{mode}_2025_oddities={oddities_2025}{additional_info}.pkl",
                     ),
                     "wb",
                 ) as file:

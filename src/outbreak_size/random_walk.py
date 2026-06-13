@@ -19,10 +19,10 @@ class PartialPooledPoisson:
         years: pl.Series,
         spatial_units: pl.Series,
         adjacency_matrix: np.ndarray,
-        baseline=dist.Normal(0, 1),
-        priors=dist.Normal(0, 1),
+        baseline=dist.Normal(0, 10.0),
+        priors=dist.Normal(0, 10.0),
         spatial_correlation=dist.Beta(2, 2),
-        spatial_sigma=dist.HalfNormal(1.0),
+        spatial_sigma=dist.HalfNormal(0.25),
         drift_scale=0.25,
     ):
         if time_and_group_varying is not None:

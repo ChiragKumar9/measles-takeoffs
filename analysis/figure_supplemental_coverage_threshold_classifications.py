@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 import polars as pl
 import yaml
 from matplotlib import rc
+from sklearn.metrics import roc_curve
 
 data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 output_dir = os.path.join(
@@ -65,21 +66,13 @@ def plot_outbreak_identification_rate(
         below_96=pl.col(measure) <= 96,
         below_97=pl.col(measure) <= 97,
         below_98=pl.col(measure) <= 98,
-        cases_10=pl.col("cases_outbreak") >= 10,
         cases_5=pl.col("cases_outbreak") >= 5,
-        cases_3=pl.col("cases_outbreak") >= 3,
-        cases_not_10=pl.col("cases_outbreak") < 10,
         cases_not_5=pl.col("cases_outbreak") < 5,
-        cases_not_3=pl.col("cases_outbreak") < 3,
     )
 
     df = df.with_columns(
-        total_10=pl.col("cases_10").sum().over("recent"),
         total_5=pl.col("cases_5").sum().over("recent"),
-        total_3=pl.col("cases_3").sum().over("recent"),
-        total_not_10=pl.col("cases_not_10").sum().over("recent"),
         total_not_5=pl.col("cases_not_5").sum().over("recent"),
-        total_not_3=pl.col("cases_not_3").sum().over("recent"),
     )
 
     df_identification = pl.DataFrame()
@@ -87,15 +80,9 @@ def plot_outbreak_identification_rate(
         df_temp = (
             df.group_by(["recent", f"below_{coverage}"])
             .agg(
-                identified_10=pl.sum("cases_10") / pl.col("total_10").first(),
                 identified_5=pl.sum("cases_5") / pl.col("total_5").first(),
-                identified_3=pl.sum("cases_3") / pl.col("total_3").first(),
-                not_identified_10=pl.sum("cases_not_10")
-                / pl.col("total_not_10").first(),
                 not_identified_5=pl.sum("cases_not_5")
                 / pl.col("total_not_5").first(),
-                not_identified_3=pl.sum("cases_not_3")
-                / pl.col("total_not_3").first(),
             )
             .filter(pl.col(f"below_{coverage}") == True)
             .with_columns(coverage=pl.lit(coverage))
@@ -103,34 +90,6 @@ def plot_outbreak_identification_rate(
         df_identification = pl.concat(
             [df_identification, df_temp], how="diagonal_relaxed"
         )
-
-    ax_sensitivity.plot(
-        df_identification.filter(pl.col("recent") == False)[
-            "coverage"
-        ].to_list(),
-        100
-        * df_identification.filter(pl.col("recent") == False)[
-            "identified_10"
-        ].to_numpy(),
-        marker="P",
-        label="≥10 cases, 2011-2020",
-        color="blue",
-        linestyle="--",
-    )
-
-    ax_sensitivity.plot(
-        df_identification.filter(pl.col("recent") == True)[
-            "coverage"
-        ].to_list(),
-        100
-        * df_identification.filter(pl.col("recent") == True)[
-            "identified_10"
-        ].to_numpy(),
-        marker="P",
-        label="≥10 cases, 2021-2025",
-        color="green",
-        linestyle="--",
-    )
 
     ax_sensitivity.plot(
         df_identification.filter(pl.col("recent") == False)[
@@ -160,38 +119,10 @@ def plot_outbreak_identification_rate(
         linestyle="--",
     )
 
-    ax_sensitivity.legend(loc=(0.40, 0.0))
+    ax_sensitivity.legend(loc=(0.40, 0.0), edgecolor="black")
     ax_sensitivity.set_xlabel("MMR vaccine coverage (%)")
     ax_sensitivity.set_ylabel("True positive rate (%)")
-    ax_sensitivity.set_ylim(0)
-
-    ax_specificity.plot(
-        df_identification.filter(pl.col("recent") == False)[
-            "coverage"
-        ].to_list(),
-        100
-        * df_identification.filter(pl.col("recent") == False)[
-            "not_identified_10"
-        ].to_numpy(),
-        marker="P",
-        label="≥10 cases, 2011-2020",
-        color="blue",
-        linestyle="--",
-    )
-
-    ax_specificity.plot(
-        df_identification.filter(pl.col("recent") == True)[
-            "coverage"
-        ].to_list(),
-        100
-        * df_identification.filter(pl.col("recent") == True)[
-            "not_identified_10"
-        ].to_numpy(),
-        marker="P",
-        label="≥10 cases, 2021-2025",
-        color="green",
-        linestyle="--",
-    )
+    ax_sensitivity.set_ylim(0, 100)
 
     ax_specificity.plot(
         df_identification.filter(pl.col("recent") == False)[
@@ -223,71 +154,45 @@ def plot_outbreak_identification_rate(
 
     ax_specificity.set_xlabel("MMR vaccine coverage (%)")
     ax_specificity.set_ylabel("False positive rate (%)")
-    ax_specificity.set_ylim(0)
+    ax_specificity.set_ylim(0, 100)
+
+    # Calculate ROC curves using sklearn
+    # For older period (2011-2020)
+    df_old = df.filter(pl.col("recent") == False)
+    y_true_old = df_old["cases_5"].to_numpy().astype(int)
+    # Use negative coverage as scores (lower coverage = higher risk)
+    y_scores_old = -df_old[measure].to_numpy()
+
+    fpr_old, tpr_old, _ = roc_curve(y_true_old, y_scores_old)
+
+    # For recent period (2021-2025)
+    df_recent = df.filter(pl.col("recent") == True)
+    y_true_recent = df_recent["cases_5"].to_numpy().astype(int)
+    y_scores_recent = -df_recent[measure].to_numpy()
+
+    fpr_recent, tpr_recent, _ = roc_curve(y_true_recent, y_scores_recent)
 
     ax_roc.plot(
-        100
-        * df_identification.filter(pl.col("recent") == False)[
-            "not_identified_10"
-        ].to_numpy(),
-        100
-        * df_identification.filter(pl.col("recent") == False)[
-            "identified_10"
-        ].to_numpy(),
-        marker="P",
-        label="≥10 cases, 2011-2020",
-        color="blue",
-        linestyle="--",
-    )
-
-    ax_roc.plot(
-        100
-        * df_identification.filter(pl.col("recent") == True)[
-            "not_identified_10"
-        ].to_numpy(),
-        100
-        * df_identification.filter(pl.col("recent") == True)[
-            "identified_10"
-        ].to_numpy(),
-        marker="P",
-        label="≥10 cases, 2021-2025",
-        color="green",
-        linestyle="--",
-    )
-
-    ax_roc.plot(
-        100
-        * df_identification.filter(pl.col("recent") == False)[
-            "not_identified_5"
-        ].to_numpy(),
-        100
-        * df_identification.filter(pl.col("recent") == False)[
-            "identified_5"
-        ].to_numpy(),
-        marker="s",
+        100 * fpr_old,
+        100 * tpr_old,
         label="≥5 cases, 2011-2020",
         color="blue",
         linestyle="--",
+        linewidth=2,
     )
 
     ax_roc.plot(
-        100
-        * df_identification.filter(pl.col("recent") == True)[
-            "not_identified_5"
-        ].to_numpy(),
-        100
-        * df_identification.filter(pl.col("recent") == True)[
-            "identified_5"
-        ].to_numpy(),
-        marker="s",
+        100 * fpr_recent,
+        100 * tpr_recent,
         label="≥5 cases, 2021-2025",
         color="green",
         linestyle="--",
+        linewidth=2,
     )
 
-    ax_roc.plot([0, 100], [0, 100], linestyle="--", c="k")
-    ax_roc.set_xlabel("True positive rate (%)")
-    ax_roc.set_ylabel("False positive rate (%)")
+    ax_roc.plot([0, 100], [0, 100], linestyle="--", c="k", alpha=0.5)
+    ax_roc.set_xlabel("False positive rate (%)")
+    ax_roc.set_ylabel("True positive rate (%)")
     ax_roc.set_ylim(0, 100)
     ax_roc.set_xlim(0, 100)
 

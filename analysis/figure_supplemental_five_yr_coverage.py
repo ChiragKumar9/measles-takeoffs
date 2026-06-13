@@ -17,7 +17,7 @@ rc("font", **font)
 
 
 def setup_plot(nrows, ncols):
-    fig, ax = plt.subplots(nrows, ncols, figsize=(20, 10))
+    fig, ax = plt.subplots(nrows, ncols, figsize=(30, 10))
     if nrows * ncols == 1:
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
@@ -94,8 +94,8 @@ def plot_coverage_various_models(df, fig, ax):
             # to express as percent change
             coverage_effects = coverage_effects - 100
             median_effect = float(jnp.median(coverage_effects, axis=0))
-            lower_effect = float(jnp.quantile(coverage_effects, 0.05, axis=0))
-            upper_effect = float(jnp.quantile(coverage_effects, 0.95, axis=0))
+            lower_effect = float(jnp.quantile(coverage_effects, 0.025, axis=0))
+            upper_effect = float(jnp.quantile(coverage_effects, 0.975, axis=0))
             mean_effect = float(jnp.mean(coverage_effects, axis=0))
 
             assembled_effects = assembled_effects.with_columns(
@@ -178,9 +178,9 @@ def plot_coverage_various_models(df, fig, ax):
 
     ax.set_xlabel("Year")
     ax.set_ylabel(
-        "% change in incidence rate per 1% increase\nin 5 year MMR vaccine coverage"
+        "% change in incidence rate per 1pp increase\nin 5 year MMR vaccine coverage"
     )
-    ax.legend(loc=(0.2, 0.65))
+    ax.legend(loc=(0.2, 0.65), edgecolor="black")
 
     return fig, ax
 
@@ -360,6 +360,8 @@ def plot_5yr_performance_comparison(df, fig, ax):
     ax.legend(
         [violinparts1["bodies"][0], violinparts2["bodies"][0]],
         ["One year", "Five year"],
+        edgecolor="black",
+        loc="lower left",
     )
 
     ax.set_xlabel("Year-to-year change in MMR coverage (%)")
@@ -370,8 +372,167 @@ def plot_5yr_performance_comparison(df, fig, ax):
     return fig, ax
 
 
+def plot_5yr_performance_comparison_mechanistic(df, fig, ax):
+    with open(
+        os.path.join(
+            output_dir,
+            f"final_outbreak_size_predictions_[2021, 2022, 2023, 2024, 2025]_five_year=False.pkl",
+        ),
+        "rb",
+    ) as file:
+        one_year = pickle.load(file)
+
+    with open(
+        os.path.join(
+            output_dir,
+            f"final_outbreak_size_predictions_[2021, 2022, 2023, 2024, 2025]_five_year=True.pkl",
+        ),
+        "rb",
+    ) as file:
+        five_year = pickle.load(file)
+
+    df = df.filter(pl.col("year").is_in([2021, 2022, 2023, 2024, 2025]))
+    df = df.with_columns(
+        one_year=pl.Series(one_year["median"]),
+        five_year=pl.Series(five_year["median"]),
+    ).with_columns(
+        one_year_residuals=pl.col("cases_outbreak") - pl.col("one_year"),
+        five_year_residuals=pl.col("cases_outbreak") - pl.col("five_year"),
+    )
+
+    vaccination_roc = pl.read_csv(
+        os.path.join(data_dir, "year_over_year_change_vaccination_data.csv"),
+        schema_overrides={"fips": pl.String},
+    )
+    vaccination_roc = vaccination_roc.with_columns(year=pl.col("year") + 1)
+
+    df = df.join(vaccination_roc, on=["fips", "year"])
+    df = df.filter(pl.col("year_over_year_change").is_not_null())
+
+    df = df.with_columns(
+        roc_buckets=pl.when(pl.col("year_over_year_change") <= -1.5)
+        .then(pl.lit(0))
+        .when(
+            (pl.col("year_over_year_change") > -1.5)
+            & (pl.col("year_over_year_change") <= 1.5)
+        )
+        .then(pl.lit(1))
+        .when((pl.col("year_over_year_change") > 1.5))
+        .then(pl.lit(2))
+    )
+
+    df = (
+        df.group_by(["roc_buckets"])
+        .agg(
+            one_year_residuals=pl.col("one_year_residuals"),
+            five_year_residuals=pl.col("five_year_residuals"),
+            one_year_median=pl.col("one_year_residuals").median(),
+            five_year_median=pl.col("five_year_residuals").median(),
+            one_year_lower=pl.col("one_year_residuals").quantile(0.25),
+            five_year_lower=pl.col("five_year_residuals").quantile(0.25),
+            one_year_upper=pl.col("one_year_residuals").quantile(0.75),
+            five_year_upper=pl.col("five_year_residuals").quantile(0.75),
+            one_year_avg=pl.col("one_year_residuals").mean(),
+            five_year_avg=pl.col("five_year_residuals").mean(),
+        )
+        .sort("roc_buckets")
+    )
+
+    data_one_year = df.to_dict()["one_year_residuals"].to_list()
+    data_five_year = df.to_dict()["five_year_residuals"].to_list()
+
+    medians_one_year = df.to_dict()["one_year_median"].to_numpy()
+    medians_five_year = df.to_dict()["five_year_median"].to_numpy()
+    lowers_one_year = df.to_dict()["one_year_lower"].to_numpy()
+    lowers_five_year = df.to_dict()["five_year_lower"].to_numpy()
+    uppers_one_year = df.to_dict()["one_year_upper"].to_numpy()
+    uppers_five_year = df.to_dict()["five_year_upper"].to_numpy()
+    means_one_year = df.to_dict()["one_year_avg"].to_list()
+    means_five_year = df.to_dict()["five_year_avg"].to_list()
+
+    ax.axhline(0, ls="--", color="k")
+
+    offset = 0.2
+    violinparts1 = ax.violinplot(
+        data_one_year,
+        positions=[i - offset for i in range(len(data_one_year))],
+        widths=0.3,
+        showextrema=False,
+    )
+    for pc in violinparts1["bodies"]:
+        pc.set(facecolor="green")
+
+    ax.errorbar(
+        x=[i - offset for i in range(len(medians_one_year))],
+        y=medians_one_year,
+        yerr=[
+            medians_one_year - lowers_one_year,
+            uppers_one_year - medians_one_year,
+        ],
+        fmt="o",
+        capsize=10,
+        capthick=2,
+        color="green",
+    )
+    ax.scatter(
+        [i - offset for i in range(len(means_one_year))],
+        means_one_year,
+        marker="*",
+        s=90,
+        color="green",
+    )
+
+    violinparts2 = ax.violinplot(
+        data_five_year,
+        positions=[i + offset for i in range(len(data_five_year))],
+        widths=0.3,
+        showextrema=False,
+    )
+    for pc in violinparts2["bodies"]:
+        pc.set(facecolor="yellowgreen")
+
+    ax.errorbar(
+        x=[i + offset for i in range(len(medians_five_year))],
+        y=medians_five_year,
+        yerr=[
+            medians_five_year - lowers_five_year,
+            uppers_five_year - medians_five_year,
+        ],
+        fmt="o",
+        capsize=10,
+        capthick=2,
+        color="yellowgreen",
+    )
+    ax.scatter(
+        [i + offset for i in range(len(means_five_year))],
+        means_five_year,
+        marker="*",
+        s=90,
+        color="yellowgreen",
+    )
+
+    ax.set_xticks(range(len(data_one_year)))
+    ax.set_xticklabels(
+        ["≤-1.5%", "-1.5% to 1.5%", ">1.5%"],
+        rotation=-60,
+        ha="left",
+    )
+    ax.legend(
+        [violinparts1["bodies"][0], violinparts2["bodies"][0]],
+        ["One year", "Five year"],
+        edgecolor="black",
+        loc="lower left",
+    )
+    ax.set_xlabel("Year-to-year change in MMR coverage (%)")
+    ax.set_ylabel("Residuals (reported - predicted cases)")
+
+    ax.set_yscale("symlog")
+
+    return fig, ax
+
+
 if __name__ == "__main__":
-    fig, ax = setup_plot(1, 2)  # type: ignore
+    fig, ax = setup_plot(1, 3)  # type: ignore
 
     df = pl.read_csv(
         os.path.join(data_dir, "analysis_dataset.csv"),
@@ -388,8 +549,7 @@ if __name__ == "__main__":
         va="top",
         ha="right",
     )
-    # five yr performance compared to one yr performance
-    plot_5yr_performance_comparison(df, fig, ax[0])  # type: ignore
+    plot_5yr_performance_comparison_mechanistic(df, fig, ax[0])  # type: ignore
 
     ax[1].text(  # type: ignore
         -0.25,
@@ -401,11 +561,22 @@ if __name__ == "__main__":
         va="top",
         ha="right",
     )
-    plot_coverage_various_models(df, fig, ax[1])  # type: ignore
+    plot_5yr_performance_comparison(df, fig, ax[1])  # type: ignore
 
-    plt.tight_layout()
+    ax[2].text(  # type: ignore
+        -0.25,
+        1.08,
+        "c",
+        transform=ax[2].transAxes,  # type: ignore
+        fontsize=24,
+        fontweight="bold",
+        va="top",
+        ha="right",
+    )
+    plot_coverage_various_models(df, fig, ax[2])  # type: ignore
 
-    # save
+    fig.tight_layout()
+
     fig.savefig(
         os.path.join(fig_dir, "figure_supplemental_five_yr_coverage.png"),
         dpi=300,

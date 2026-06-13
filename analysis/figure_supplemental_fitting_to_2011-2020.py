@@ -4,12 +4,9 @@ import pickle
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import matplotlib.ticker as tck
-import numpy as np
 import polars as pl
 import yaml
 from matplotlib import rc
-
-from outbreak_size import adjacency
 
 data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 output_dir = os.path.join(
@@ -104,7 +101,7 @@ def plot_predictions(df, samples, naive_model, fig, ax):
     ax.set_yticks([0, 1, 10, 100], labels=["0", "1", "10", "100"])
     ax.set_xticks([0, 1, 10, 100], labels=["0", "1", "10", "100"])
 
-    ax.legend(loc=(0.0, 0.83))
+    ax.legend(loc=(0.0, 0.83), edgecolor="black")
 
     # Manually set minor tick locations on the x-axis
     minor_x_ticks = [
@@ -313,6 +310,8 @@ def plot_performance_comparison(df, fig, ax):
     ax.legend(
         [violinparts1["bodies"][0], violinparts2["bodies"][0]],
         ["2011-2020", "2021-2025"],
+        loc="upper left",
+        edgecolor="black",
     )
 
     ax.set_xlabel("Outbreak size (cases)")
@@ -527,12 +526,15 @@ def plot_5yr_performance_comparison(df, fig, ax):
     ax.legend(
         [violinparts1["bodies"][0], violinparts2["bodies"][0]],
         ["One year", "Five year"],
+        edgecolor="black",
+        loc="upper left",
     )
 
     ax.set_xlabel("Year-to-year change in MMR coverage (%)")
     ax.set_ylabel("Residuals (reported - predicted cases)")
 
     # ax.set_yticks([-10, 0, 10, 20])
+    ax.set_yscale("symlog")
 
     return fig, ax
 
@@ -639,16 +641,23 @@ def plot_ecological_determinants(samples_pre, samples_post, df, fig, ax):
                 samples_of_interest = samples_of_interest / mean_income
                 # now convert from dollars to 10,000 USD
                 samples_of_interest = samples_of_interest * 10000
+            if "Population density" in covariate:
+                # convert from per km² to 1,000 per km²
+                samples_of_interest = samples_of_interest * 1000
             # exponentiate and multiply by 100
             samples_of_interest = jnp.exp(samples_of_interest) * 100
             # to express as percent change
             samples_of_interest = samples_of_interest - 100
             median_effects.append(jnp.median(samples_of_interest, axis=0))
             lower_effects.append(
-                jnp.quantile(samples_of_interest, 0.025, axis=0)
+                jnp.quantile(samples_of_interest, 0.05, axis=0)
             )
             upper_effects.append(
-                jnp.quantile(samples_of_interest, 0.975, axis=0)
+                jnp.quantile(samples_of_interest, 0.95, axis=0)
+            )
+            # print the covariate and its coefficient
+            print(
+                f"{covariate} ({years[0]}-{years[-1]}): {median_effects[-1]:.2f}% change in incidence rate per 1 unit increase in predictor (90% CI: {lower_effects[-1]:.2f}%, {upper_effects[-1]:.2f}%)"
             )
 
         ax.errorbar(
@@ -679,7 +688,7 @@ def plot_ecological_determinants(samples_pre, samples_post, df, fig, ax):
     # line at 0%
     ax.axhline(0, ls="--", color="k")
 
-    ax.legend(loc=(0.01, 0.78))
+    ax.legend(loc=(0.5, 0.78), edgecolor="black")
 
     ax.set_xticks(range(len(all_covariates)))  # type: ignore
     # at a 45 degree angle
@@ -693,7 +702,8 @@ def plot_ecological_determinants(samples_pre, samples_post, df, fig, ax):
         "% change in incidence rate per\n1 unit increase in predictor"
     )
     ax.set_yscale("symlog")
-    ax.set_yticks([-1e14, -1e10, -1e6, -1e2, 0, 1e2, 1e6, 1e10, 1e14])
+
+    ax.set_yticks([-1000, -100, -10, 0, 10, 100, 1000, 10000, 100000])
 
     return fig, ax
 
@@ -720,7 +730,7 @@ if __name__ == "__main__":
     with open(
         os.path.join(
             output_dir,
-            "final_outbreak_size_predictions_[2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020].pkl",
+            "final_outbreak_size_predictions_[2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020]_five_year=False.pkl",
         ),
         "rb",
     ) as f:

@@ -74,7 +74,7 @@ def plot_std_cases(df, fig, ax):
     ax.set_xlabel("Standard deviation of reported cases (N)")
     ax.set_ylabel("Number of\nrepeatedly-observed counties (N)")
     ax.set_xlim(0.9)
-    ax.set_xticks([0, 40, 80, 120, 160, 200])
+    # ax.set_xticks([0, 40, 80, 120, 160, 200])
 
 
 def plot_num_times_state_represented(df, fig, ax):
@@ -109,7 +109,7 @@ def plot_std_cases_state(df, fig, ax):
     ax.set_xlabel("Standard deviation of reported cases (N)")
     ax.set_ylabel("Number of\nrepeatedly-observed states (N)")
     ax.set_xlim(0.9)
-    ax.set_xticks([0, 40, 80, 120])
+    # ax.set_xticks([0, 40, 80, 120])
 
 
 def plot_std_vaccine_coverage(df, fig, ax):
@@ -147,7 +147,7 @@ def plot_std_vaccine_coverage(df, fig, ax):
         density=True,
         bins=np.arange(0, max(df_year["std_coverage"]) + 0.5, 0.5),
     )
-    ax.legend()
+    ax.legend(edgecolor="black")
     ax.set_xlabel("Standard deviation of vaccine coverage (%)")
     ax.set_ylabel("Density")
     ax.set_xlim(0)
@@ -241,7 +241,7 @@ if __name__ == "__main__":
 
     plot_std_vaccine_coverage(df, fig, ax[2, 1])  # type: ignore
 
-    plt.tight_layout()
+    fig.tight_layout()
 
     # save
     fig.savefig(
