@@ -1388,7 +1388,7 @@ def create_intervention_effects_table(
             with open(
                 os.path.join(
                     output_dir,
-                    f"risk_projections_{intervention}_{vac_scenario}_{first_year}_.pkl",
+                    f"risk_projections_{intervention}_{vac_scenario}_{first_year}.pkl",
                 ),
                 "rb",
             ) as f:
@@ -1475,11 +1475,15 @@ def create_intervention_effects_table(
                 pct_change_mean = jnp.mean(pct_change_samples, axis=0)  # type: ignore
                 pct_change_median = jnp.median(pct_change_samples, axis=0)  # type: ignore
                 pct_change_p025 = jnp.percentile(
-                    pct_change_samples, 2.5, axis=0
-                )  # type: ignore
+                    pct_change_samples,
+                    2.5,
+                    axis=0,  # type: ignore
+                )
                 pct_change_p975 = jnp.percentile(
-                    pct_change_samples, 97.5, axis=0
-                )  # type: ignore
+                    pct_change_samples,
+                    97.5,
+                    axis=0,  # type: ignore
+                )
 
                 del pct_change_samples
 
@@ -1493,8 +1497,8 @@ def create_intervention_effects_table(
                         cumulative_baseline_by_county + b_county
                     )
                     cumulative_intervention_by_county = (
-                        cumulative_intervention_by_county + i_county
-                    )  # type: ignore
+                        cumulative_intervention_by_county + i_county  # type: ignore
+                    )
 
                 # Calculate cumulative percent change for EACH SAMPLE
                 # Shape: (n_samples, n_common_counties)
@@ -1512,17 +1516,23 @@ def create_intervention_effects_table(
                 )
 
                 cumulative_pct_change_mean = jnp.mean(
-                    cumulative_pct_change_samples, axis=0
-                )  # type: ignore
+                    cumulative_pct_change_samples,
+                    axis=0,  # type: ignore
+                )
                 cumulative_pct_change_median = jnp.median(
-                    cumulative_pct_change_samples, axis=0
-                )  # type: ignore
+                    cumulative_pct_change_samples,
+                    axis=0,  # type: ignore
+                )
                 cumulative_pct_change_p025 = jnp.percentile(
-                    cumulative_pct_change_samples, 2.5, axis=0
-                )  # type: ignore
+                    cumulative_pct_change_samples,
+                    2.5,
+                    axis=0,  # type: ignore
+                )
                 cumulative_pct_change_p975 = jnp.percentile(
-                    cumulative_pct_change_samples, 97.5, axis=0
-                )  # type: ignore
+                    cumulative_pct_change_samples,
+                    97.5,
+                    axis=0,  # type: ignore
+                )
 
                 # Create rows for each county
                 for i, fips in enumerate(common_fips):
@@ -1837,14 +1847,14 @@ def create_state_intervention_effects_table(
 
                     pct_change_mean = float(jnp.mean(pct_change_samples_state))  # type: ignore
                     pct_change_median = float(
-                        jnp.median(pct_change_samples_state)
-                    )  # type: ignore
+                        jnp.median(pct_change_samples_state)  # type: ignore
+                    )
                     pct_change_p025 = float(
-                        jnp.percentile(pct_change_samples_state, 2.5)
-                    )  # type: ignore
+                        jnp.percentile(pct_change_samples_state, 2.5)  # type: ignore
+                    )
                     pct_change_p975 = float(
-                        jnp.percentile(pct_change_samples_state, 97.5)
-                    )  # type: ignore
+                        jnp.percentile(pct_change_samples_state, 97.5)  # type: ignore
+                    )
 
                     # --- CUMULATIVE percent change ---
                     cumulative_baseline_samples_state = (
@@ -1869,21 +1879,23 @@ def create_state_intervention_effects_table(
                     )
 
                     cumulative_pct_change_mean = float(
-                        jnp.mean(cumulative_pct_change_samples_state)
-                    )  # type: ignore
+                        jnp.mean(cumulative_pct_change_samples_state)  # type: ignore
+                    )
                     cumulative_pct_change_median = float(
-                        jnp.median(cumulative_pct_change_samples_state)
-                    )  # type: ignore
+                        jnp.median(cumulative_pct_change_samples_state)  # type: ignore
+                    )
                     cumulative_pct_change_p025 = float(
                         jnp.percentile(
-                            cumulative_pct_change_samples_state, 2.5
+                            cumulative_pct_change_samples_state,
+                            2.5,  # type: ignore
                         )
-                    )  # type: ignore
+                    )
                     cumulative_pct_change_p975 = float(
                         jnp.percentile(
-                            cumulative_pct_change_samples_state, 97.5
+                            cumulative_pct_change_samples_state,
+                            97.5,  # type: ignore
                         )
-                    )  # type: ignore
+                    )
 
                     all_rows.append(
                         {
@@ -2480,7 +2492,7 @@ if __name__ == "__main__":
 
     intervention_effects_table = create_intervention_effects_table(
         all_interventions=interventions_for_table,
-        vaccination_scenarios=vaccination_scenarios_to_plot,
+        vaccination_scenarios=[*vaccination_scenarios_to_plot, "baseline"],
         future_years=FUTURE_YEARS,
         output_dir=output_dir,  # Changed: pass output_dir instead of loaded data
         importation_samples=jnp.minimum(
@@ -2499,7 +2511,7 @@ if __name__ == "__main__":
 
     state_intervention_effects_table = create_state_intervention_effects_table(
         all_interventions=interventions_for_table,
-        vaccination_scenarios=vaccination_scenarios_to_plot,
+        vaccination_scenarios=[*vaccination_scenarios_to_plot, "baseline"],
         future_years=FUTURE_YEARS,
         output_dir=output_dir,
         importation_samples=jnp.minimum(
@@ -2519,7 +2531,7 @@ if __name__ == "__main__":
     # Create nationwide summary table
     nationwide_summary = create_nationwide_summary_table(
         all_interventions=interventions_for_table,
-        vaccination_scenarios=vaccination_scenarios_to_plot,
+        vaccination_scenarios=[*vaccination_scenarios_to_plot, "baseline"],
         future_years=FUTURE_YEARS,
         output_dir=output_dir,
         importation_samples=jnp.minimum(

@@ -16,6 +16,8 @@ data_dir = "data"
 output_dir = "outputs"
 fig_dir = "figures"
 
+GLOBALS_PRIOR_SD = 1
+
 
 def performance_table(
     samples,
@@ -229,8 +231,8 @@ def performance_table(
 
         # Calculate PPV and NPV using the optimal threshold
         optimal_threshold = (
-            thresholds_roc[idx] if not np.isnan(sensitivity) else np.nan
-        )  # type: ignore
+            thresholds_roc[idx] if not np.isnan(sensitivity) else np.nan  # type: ignore
+        )
 
         if np.isnan(sensitivity) or np.isnan(specificity):  # type: ignore
             ppv = np.nan
@@ -969,7 +971,7 @@ if __name__ == "__main__":
                     with open(
                         os.path.join(
                             output_dir,
-                            f"samples_partial_pooled_poisson_validation_testing_{years}_pool={pool}_CAR=True_{model_variant}.pkl",
+                            f"samples_partial_pooled_poisson_validation_testing_{years}_pool={pool}_CAR=True_{model_variant}_globals_prior_sd={GLOBALS_PRIOR_SD}.pkl",
                         ),
                         "rb",
                     ) as f:
@@ -1033,7 +1035,7 @@ if __name__ == "__main__":
                         with open(
                             os.path.join(
                                 output_dir,
-                                f"samples_partial_pooled_poisson_validation_testing_{years}_pool={pool}_CAR={car}_{model_variant}.pkl",
+                                f"samples_partial_pooled_poisson_validation_testing_{years}_pool={pool}_CAR={car}_{model_variant}_globals_prior_sd={GLOBALS_PRIOR_SD}.pkl",
                             ),
                             "rb",
                         ) as f:
@@ -1253,7 +1255,7 @@ if __name__ == "__main__":
                         with open(
                             os.path.join(
                                 output_dir,
-                                f"samples_partial_pooled_poisson_validation_testing_{years}_pool={pool}_CAR={car}_{model_variant}.pkl",
+                                f"samples_partial_pooled_poisson_validation_testing_{years}_pool={pool}_CAR={car}_{model_variant}_globals_prior_sd={GLOBALS_PRIOR_SD}.pkl",
                             ),
                             "rb",
                         ) as f:
@@ -1483,33 +1485,36 @@ if __name__ == "__main__":
 
     # --- model selection table ---
     model_selection_no_interval = [
-        "Absolute difference (cases)",
+        # "Absolute difference (cases)",
         "Coverage (%)",
     ]
 
     model_selection = model_performance.select(
         [
             "Model",
-            "Absolute difference (cases)",
+            # "Absolute difference (cases)",
             "Coverage (%)",
             *[
                 f"{col}{suffix}"
-                for col in ["AUROC, 10+ cases (%)", "MAE, 3+ cases (cases)"]
+                for col in [
+                    "RMSE, 0+ outbreak cases (cases)",
+                    "AUROC, 10+ cases (%)",
+                ]
                 for suffix in ["", "_lower", "_upper"]
             ],
         ]
     )
     model_selection = model_selection.sort(
-        by=["Coverage (%)", "Absolute difference (cases)"],
+        by=["Coverage (%)", "RMSE, 0+ outbreak cases (cases)"],
         descending=[True, False],
     )
     model_selection = beautify(
         model_selection,
         [
-            "AUROC, 10+ cases (%)",
-            "MAE, 3+ cases (cases)",
-            "Absolute difference (cases)",
             "Coverage (%)",
+            "RMSE, 0+ outbreak cases (cases)",
+            "AUROC, 10+ cases (%)",
+            # "Absolute difference (cases)",
         ],
         no_interval_columns=model_selection_no_interval,
     )
@@ -1523,10 +1528,10 @@ if __name__ == "__main__":
     main_models = [
         "Statistical: All covariates + spatial + state-specific vaccine coefficients, trained since 2019",
         find_best_model(model_performance, subset="Mechanistic: MMR"),
-        find_best_model(
-            model_performance, subset="Statistical", exclude="spatial"
-        ),
-        # "Statistical: MMR coverage, trained on last two years",
+        # find_best_model(
+        #     model_performance, subset="Statistical", exclude="spatial"
+        # ),
+        "Statistical: MMR coverage + exemptions + state-specific vaccine coefficients, trained since 2011",
     ]
 
     # shared column names used for both with- and without-imports rows

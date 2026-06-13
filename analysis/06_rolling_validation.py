@@ -49,11 +49,11 @@ if __name__ == "__main__":
     )
     models = {
         "MMR coverage": ["estimated_mmr_cov"],
-        # "MMR coverage + exemptions": [
-        #     "estimated_mmr_cov",
-        #     "nonmed_exempt_pct",
-        #     "med_exempt_pct",
-        # ],
+        "MMR coverage + exemptions": [
+            "estimated_mmr_cov",
+            "nonmed_exempt_pct",
+            "med_exempt_pct",
+        ],
         "All covariates": [
             "estimated_mmr_cov",
             "nonmed_exempt_pct",
@@ -211,7 +211,7 @@ if __name__ == "__main__":
                     # assemble the adjacency matrix
                     adjacency_matrix = adjacency.assemble_adjacency_matrix(
                         adjacency_data,
-                        train_df["fips"].unique(maintain_order=True).to_list(),
+                        train_df["fips"].unique(maintain_order=True).to_list(),  # type: ignore
                     )
 
                     # scale the data
@@ -267,10 +267,10 @@ if __name__ == "__main__":
                         pool=pool,
                         regression_covariates=regression_covariates,
                         exposure=train_df["pop"].to_jax(),
-                        groups=train_df["state"],
+                        groups=train_df["state"],  # type: ignore
                         group_fixed_effect=False,
                         spatial=car,
-                        spatial_units=train_df["geoid"],
+                        spatial_units=train_df["geoid"],  # type: ignore
                         adjacency_matrix=adjacency_matrix,
                         spatial_sigma=dist.HalfNormal(0.25),
                         car_sigma=dist.HalfNormal(0.25),

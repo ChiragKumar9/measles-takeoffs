@@ -278,6 +278,8 @@ def plot_future_scenario_cases(
     scale,
     fig,
     ax,
+    validation_2025_samples=None,
+    validation_2025_mask=None,
 ):
     scenario_labels = {
         "no_change": "No changes in vaccination",
@@ -309,6 +311,27 @@ def plot_future_scenario_cases(
             raw = all_future_samples[
                 (scenario, year)
             ]  # (n_samples, n_counties)
+
+            # NEW: Apply no_change constraint - must be >= 2025 validation
+            if (
+                scenario == "no_change"
+                and validation_2025_samples is not None
+                and validation_2025_mask is not None
+            ):
+                # Lower bound: must be >= 2025
+                constrained = jnp.where(
+                    validation_2025_mask,
+                    jnp.maximum(raw, validation_2025_samples),
+                    raw,
+                )
+                raw = constrained
+
+                # Upper bound: must be <= baseline 2026
+                if ("targeted_worsening", 2026) in all_future_samples:
+                    baseline_raw_2026 = all_future_samples[
+                        ("targeted_worsening", 2026)
+                    ]
+                    raw = jnp.minimum(raw, baseline_raw_2026)
 
             # Apply monotonicity constraints at county level, sample-by-sample,
             # relative to 2026 baseline, before multiplying by importation samples
@@ -436,6 +459,27 @@ def plot_future_scenario_cases(
         cumulative_samples = None
         for year in future_years:
             raw = all_future_samples[(scenario, year)]
+
+            # Apply no_change constraint - must be >= 2025 validation
+            if (
+                scenario == "no_change"
+                and validation_2025_samples is not None
+                and validation_2025_mask is not None
+            ):
+                # Lower bound: must be >= 2025
+                constrained = jnp.where(
+                    validation_2025_mask,
+                    jnp.maximum(raw, validation_2025_samples),
+                    raw,
+                )
+                raw = constrained
+
+                # Upper bound: must be <= baseline 2026
+                if ("targeted_worsening", 2026) in all_future_samples:
+                    baseline_raw_2026 = all_future_samples[
+                        ("targeted_worsening", 2026)
+                    ]
+                    raw = jnp.minimum(raw, baseline_raw_2026)
 
             # Apply same monotonicity constraints
             if (
@@ -722,6 +766,8 @@ def create_supplemental_future_projections_figure(
     importation_count_samples,
     scale,
     output_path,
+    validation_2025_samples=None,
+    validation_2025_mask=None,
 ):
     """
     Create a standalone figure showing alternative future projection scenarios.
@@ -770,13 +816,15 @@ def create_supplemental_future_projections_figure(
         scale=scale,
         fig=fig,
         ax=ax,
+        validation_2025_samples=validation_2025_samples,
+        validation_2025_mask=validation_2025_mask,
     )
 
     fig.tight_layout()
 
     # Save in both formats
     fig.savefig(
-        f"{output_path}.png",
+        f"{output_path}_constrained.png",
         dpi=300,
         bbox_inches="tight",
     )
@@ -1480,6 +1528,7 @@ if __name__ == "__main__":
             "validation_year",
             "cases_outbreak",
             "type",
+            "fips",
         ]
     )
 
@@ -1520,6 +1569,7 @@ if __name__ == "__main__":
         ),
         on=["county", "state", "year"],
         how="left",
+        maintain_order="left",
     )
     importation_samples = jnp.array(
         np.vstack(all_counties["importation_probability_samples"].to_numpy())
@@ -1822,6 +1872,7 @@ if __name__ == "__main__":
         reference_scenario_df.select("fips"),
         on="fips",
         how="inner",
+        maintain_order="left",
     )
 
     # Load importation probabilities fresh and attach samples before
@@ -1869,6 +1920,7 @@ if __name__ == "__main__":
         ),
         on="fips",
         how="left",
+        maintain_order="left",
     )
 
     assert future_base["fips"].is_duplicated().sum() == 0, (
@@ -1887,6 +1939,53 @@ if __name__ == "__main__":
     importation_count_samples_future = jnp.array(
         np.vstack(future_base["expected_importations_samples"].to_numpy())  # type: ignore
     ).T
+
+    # Load 2025 validation samples for no_change constraint
+    validation_2025_df = pl.read_csv(
+        os.path.join(output_dir, "projection_dataset_2025.csv"),
+        schema_overrides={"fips": pl.String},
+    )
+
+    # Load the validation samples (already done earlier, but we'll extract 2025 specifically)
+    # Get mask for 2025 validation year from all_counties
+    mask_2025 = all_counties["validation_year"] == 2025
+    samples_2025_raw = samples[
+        :, mask_2025.to_numpy()
+    ]  # (n_samples, n_counties_2025)
+
+    # Get the fips codes for 2025 in the same order as samples_2025_raw
+    fips_2025 = all_counties.filter(pl.col("validation_year") == 2025)[
+        "fips"
+    ].to_list()
+
+    # Create a mapping from fips to column index in samples_2025_raw
+    fips_2025_to_col = {fips: i for i, fips in enumerate(fips_2025)}
+
+    # Get fips from future_base (in its current order)
+    fips_future = future_base["fips"].to_list()
+
+    # Align 2025 samples to match future_base county order
+    # For counties not in 2025 validation, we'll use None as a sentinel
+    aligned_2025_samples = []
+    alignment_mask = []  # True where we have 2025 data, False otherwise
+
+    for fips in fips_future:
+        if fips in fips_2025_to_col:
+            col_idx = fips_2025_to_col[fips]
+            aligned_2025_samples.append(samples_2025_raw[:, col_idx])
+            alignment_mask.append(True)
+        else:
+            # No 2025 data for this county - create dummy column of zeros
+            aligned_2025_samples.append(jnp.zeros(samples_2025_raw.shape[0]))
+            alignment_mask.append(False)
+
+    # Stack into array: (n_samples, n_counties_future)
+    validation_2025_samples_aligned = jnp.stack(aligned_2025_samples, axis=1)
+    alignment_mask = jnp.array(alignment_mask)
+
+    print(
+        f"\n2025 validation alignment: {alignment_mask.sum()}/{len(alignment_mask)} counties have 2025 data"
+    )
 
     all_future_samples = {}
     for scenario in scenarios_ordered:
@@ -1932,6 +2031,8 @@ if __name__ == "__main__":
         scale=scale_2025,
         fig=fig,
         ax=ax_e,
+        validation_2025_samples=validation_2025_samples_aligned,
+        validation_2025_mask=alignment_mask,
     )
 
     map_fips_code_data(
@@ -1954,7 +2055,9 @@ if __name__ == "__main__":
     fig.tight_layout()
 
     fig.savefig(
-        os.path.join(fig_dir, "figure_validation_and_risk_projections.png"),
+        os.path.join(
+            fig_dir, "figure_validation_and_risk_projections_constrained.png"
+        ),
         dpi=300,
         bbox_inches="tight",
     )
@@ -2008,6 +2111,8 @@ if __name__ == "__main__":
         output_path=os.path.join(
             fig_dir, "figure_supplemental_future_projections"
         ),
+        validation_2025_samples=validation_2025_samples_aligned,
+        validation_2025_mask=alignment_mask,
     )
 
     vaccination_scenario_effects = create_vaccination_scenario_effects_table(
@@ -2023,7 +2128,7 @@ if __name__ == "__main__":
         scale=scale_2025,
         output_path=os.path.join(
             fig_dir,
-            "supplemental_data_s4a_vaccination_scenario_effects_by_county.csv",
+            "supplemental_data_s4a_vaccination_scenario_effects_by_county_constrained.csv",
         ),
     )
 
@@ -2040,6 +2145,6 @@ if __name__ == "__main__":
         scale=scale_2025,
         output_path=os.path.join(
             fig_dir,
-            "supplemental_data_s4b_vaccination_scenario_effects_by_state.csv",
+            "supplemental_data_s4b_vaccination_scenario_effects_by_state_constrained.csv",
         ),
     )

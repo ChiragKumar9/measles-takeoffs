@@ -150,8 +150,8 @@ class PartialPooledPoisson:
                         )
                 # spatial_random_effects is (num_spatial_units, num_years); transpose to (num_years, num_spatial_units)
                 full_spatial_effect = (
-                    spatial_random_effects.T * spatial_random_sigma
-                )  # type: ignore
+                    spatial_random_effects.T * spatial_random_sigma  # type: ignore
+                )
             else:
                 with numpyro.plate(
                     "spatial_random_effects_plate",
@@ -197,8 +197,8 @@ class PartialPooledPoisson:
 
                     # Scale by year-specific sigma: broadcasting (num_years, 1) * (num_years, num_neighbors)
                     spatial_effect = (
-                        spatial_sigma[:, None] * raw_spatial_effect
-                    )  # type: ignore
+                        spatial_sigma[:, None] * raw_spatial_effect  # type: ignore
+                    )
 
                     full_spatial_effect = full_spatial_effect.at[  # type: ignore
                         :, self.has_a_neighbor
@@ -229,7 +229,7 @@ class PartialPooledPoisson:
             if self.years is not None:
                 # spatial_effect is a (num_years, num_spatial_units) matrix
                 # index by (year, spatial_unit) to get a per-observation effect
-                full_spatial_effect = full_spatial_effect[
+                full_spatial_effect = full_spatial_effect[  # type: ignore
                     self.years, self.spatial_units
                 ]  # type: ignore
             else:
