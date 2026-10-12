@@ -107,7 +107,7 @@ def plot_state_std_imports(df, fig, ax):
 
 def plot_importation_probability_roc_validation(df, fig, ax):
     # roc curve
-    tpr_log, fpr_log, _ = roc_curve(
+    fpr_log, tpr_log, _ = roc_curve(
         (df["imported"] >= 1).cast(pl.Int64).to_numpy(),
         df["probability_at_least_one_import_log"].to_numpy(),
     )
@@ -116,7 +116,7 @@ def plot_importation_probability_roc_validation(df, fig, ax):
         df["probability_at_least_one_import_log"].to_numpy(),
     )
 
-    tpr, fpr, _ = roc_curve(
+    fpr, tpr, _ = roc_curve(
         (df["imported"] >= 1).cast(pl.Int64).to_numpy(),
         df["probability_at_least_one_import"].to_numpy(),
     )
@@ -126,22 +126,22 @@ def plot_importation_probability_roc_validation(df, fig, ax):
     )
 
     ax.plot(
-        tpr_log * 100,
         fpr_log * 100,
+        tpr_log * 100,
         color="purple",
         lw=2,
         label=f"Log10-pop weighted\nAUC: {score_log:.2f}",
     )
     ax.plot(
-        tpr * 100,
         fpr * 100,
+        tpr * 100,
         color="salmon",
         lw=2,
         label=f"Pop weighted\nAUC: {score:.2f}",
     )
     ax.plot([0, 100], [0, 100], color="gray", lw=1, linestyle="--")
-    ax.set_xlabel("True positive rate (%)")
-    ax.set_ylabel("False positive rate (%)")
+    ax.set_xlabel("False positive rate (%)")
+    ax.set_ylabel("True positive rate (%)")
     ax.set_xlim([0, 100])
     ax.set_ylim([0, 100])
     ax.legend(loc="lower right", edgecolor="black")

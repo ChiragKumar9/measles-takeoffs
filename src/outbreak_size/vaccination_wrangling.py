@@ -148,6 +148,80 @@ def read_montana_data(data_dir):
     return montana
 
 
+def read_oklahoma_data(data_dir):
+    # Oklahoma's sheet has the header row first and the description row second
+    # (Montana's sheet has these reversed), but both have exactly 2 non-data
+    # rows on top, so skip_rows=1 still lands us on the first data row.
+    oklahoma = pl.read_excel(
+        os.path.join(data_dir, "Oklahoma.xlsx"), read_options={"skip_rows": 1}
+    )
+
+    # the columns are:
+    columns = [
+        "year",
+        "state",
+        "county",
+        "Race",
+        "nonmed_exempt_pct",
+        "nonmed_exempt_num",
+        "med_exempt_pct",
+        "MMR_cov",
+        "all_vacc_cov",
+        "measles_cases",
+        "junk",
+    ]
+    oklahoma.columns = columns
+    # drop things we don't need (junk is a trailing stray column in the sheet)
+    oklahoma = oklahoma.drop(
+        ["Race", "nonmed_exempt_num", "measles_cases", "junk"]
+    )
+
+    # drop trailing empty rows past the actual data
+    oklahoma = oklahoma.filter(pl.col("year").is_not_null())
+    oklahoma = oklahoma.with_columns(year=pl.col("year").cast(pl.Int64))
+
+    # county names have inconsistent casing, so normalize for merging purposes
+    oklahoma = oklahoma.with_columns(
+        county=pl.col("county").str.to_titlecase()
+    )
+
+    # cast to floats. Note: unlike Montana.xlsx (which stores 0-100 values),
+    # Oklahoma.xlsx stores these columns as fractions (e.g. 0.95) with Excel's
+    # built-in percent display format applied, so they show as "95.00%" when
+    # opened in Excel despite the underlying stored value being 0.95. The
+    # sheet's own header text ("Percentage (0-100%)") is misleading here.
+    # Multiply by 100 so this matches the 0-100 scale used everywhere else.
+    oklahoma = oklahoma.with_columns(
+        [
+            (pl.col(col).cast(pl.Float64, strict=False) * 100).alias(col)
+            for col in [
+                "nonmed_exempt_pct",
+                "med_exempt_pct",
+                "MMR_cov",
+                "all_vacc_cov",
+            ]
+        ]
+    )
+
+    # since we can't really QC this data, remove rows with no MMR coverage
+    # (unlike Montana, don't also filter on all_vacc_cov, since Oklahoma has
+    # valid MMR coverage for some rows where all_vacc_cov is 0)
+    oklahoma = oklahoma.filter(pl.col("MMR_cov") > 0)
+
+    # since we do the merging of estimated_mmr_cov post adding in the oklahoma
+    # data, do it here
+    oklahoma = oklahoma.with_columns(
+        # use mmr cov when available or not zero, otherwise use all vacc cov
+        estimated_mmr_cov=pl.when(
+            pl.col("MMR_cov").is_not_null() & (pl.col("MMR_cov") > 0)
+        )
+        .then(pl.col("MMR_cov"))
+        .otherwise(pl.col("all_vacc_cov"))
+    )
+
+    return oklahoma
+
+
 # Mapping of 2-digit state FIPS codes to full state names for the 13 target states
 _TARGET_STATE_FIPS_TO_NAME = {
     "41": "Oregon",

@@ -14,9 +14,10 @@ import polars as pl
 import yaml
 from addfips import AddFIPS
 from matplotlib import rc
+from matplotlib.transforms import blended_transform_factory
 from scipy import stats
 
-from outbreak_size import adjacency
+from outbreak_size import adjacency, waic
 
 data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 output_dir = os.path.join(
@@ -71,6 +72,11 @@ def plot_predictions(
     label_naive="Mechanistic: MMR coverage",
     label_statistical="Statistical: All covariates",
     show_r2=False,
+    r2_x_frac=0.00025,
+    r2_x_axes_frac=None,
+    color_naive="red",
+    color_statistical="green",
+    waic_values=None,  # (statistical WAIC, naive WAIC); replaces the R2 text
 ):
     median = jnp.median(samples, axis=0)
     lower = jnp.quantile(samples, 0.025, axis=0)
@@ -85,8 +91,8 @@ def plot_predictions(
             naive_model["upper"] - naive_model["median"],
         ],
         fmt="o",
-        ecolor="red",
-        c="red",
+        ecolor=color_naive,
+        c=color_naive,
         capsize=0,
         alpha=0.4,
         label=label_naive,
@@ -97,8 +103,8 @@ def plot_predictions(
         median,
         yerr=[median - lower, upper - median],
         fmt="o",
-        ecolor="green",
-        c="green",
+        ecolor=color_statistical,
+        c=color_statistical,
         capsize=0,
         alpha=0.8,
         label=label_statistical,
@@ -176,32 +182,56 @@ def plot_predictions(
     ]
     ax.yaxis.set_minor_locator(tck.FixedLocator(minor_y_ticks))
 
-    if show_r2:
-        # add a text annotation of the R2
-        R2 = jnp.corrcoef(df["cases_outbreak"].to_jax(), median)[0, 1] ** 2
-        R2 = R2 * 100  # as a percentage
+    if show_r2 or waic_values is not None:
+        # r2_x_axes_frac, when given, places the text at a fixed fraction of
+        # the axes width (independent of the symlog data scale) instead of
+        # r2_x_frac's data-coordinate fraction; use this on any figure whose
+        # aspect ratio differs from the one r2_x_frac was tuned for, since a
+        # data-coordinate x is compressed almost flat near 0 on a symlog axis
+        # and barely moves with small changes to r2_x_frac
+        if r2_x_axes_frac is not None:
+            text_kwargs = dict(
+                transform=blended_transform_factory(ax.transAxes, ax.transData)
+            )
+            r2_x = r2_x_axes_frac
+        else:
+            text_kwargs = {}
+            r2_x = r2_x_frac * max(df["cases_outbreak"].max(), upper.max())
+
+        # add a text annotation of the R2, or of the WAIC if given
+        if waic_values is not None:
+            statistical_text = f"WAIC = {waic_values[0]:.0f}"
+        else:
+            R2 = jnp.corrcoef(df["cases_outbreak"].to_jax(), median)[0, 1] ** 2
+            R2 = R2 * 100  # as a percentage
+            statistical_text = f"$R^2$ = {R2:.2f}%"
         ax.text(
-            0.00025 * max(df["cases_outbreak"].max(), upper.max()),
+            r2_x,
             0.35 * max(df["cases_outbreak"].max(), upper.max()),
-            f"$R^2$ = {R2:.2f}%",
+            statistical_text,
             fontsize=30,
-            color="green",
+            color=color_statistical,
+            **text_kwargs,
         )
 
-        # add a text annotation of the R2
-        R2 = (
-            jnp.corrcoef(df["cases_outbreak"].to_jax(), naive_model["median"])[
-                0, 1
-            ]
-            ** 2
-        )
-        R2 = R2 * 100  # as a percentage
+        if waic_values is not None:
+            naive_text = f"WAIC = {waic_values[1]:.0f}"
+        else:
+            R2 = (
+                jnp.corrcoef(
+                    df["cases_outbreak"].to_jax(), naive_model["median"]
+                )[0, 1]
+                ** 2
+            )
+            R2 = R2 * 100  # as a percentage
+            naive_text = f"$R^2$ = {R2:.2f}%"
         ax.text(
-            0.00025 * max(df["cases_outbreak"].max(), upper.max()),
+            r2_x,
             0.63 * max(df["cases_outbreak"].max(), upper.max()),
-            f"$R^2$ = {R2:.2f}%",
+            naive_text,
             fontsize=30,
-            color="red",
+            color=color_naive,
+            **text_kwargs,
         )
     ax.set_ylim(-0.05)
 
@@ -2334,34 +2364,75 @@ if __name__ == "__main__":
         va="top",
         ha="right",
     )
+    df_waic = df.filter(pl.col("year").is_in([2021, 2022, 2023, 2024, 2025]))
+    waic_statistical, p_waic = waic.waic_posterior(
+        df_waic["cases_outbreak"], predictive_samples["mu"]
+    )
+    waic_naive = waic.waic_point_estimate(
+        df_waic["cases_outbreak"], naive_model["mu"], naive_model["k"]
+    )
+    # lower is better; the naive model has no posterior, so its WAIC is the
+    # AIC-equivalent (log-likelihood penalized by its k fitted parameters)
+    print(
+        f"WAIC 2021-2025: statistical {waic_statistical:.1f} "
+        f"(effective parameters {p_waic:.1f}), naive mechanistic "
+        f"{waic_naive:.1f} (k = {naive_model['k']})"
+    )
     plot_predictions(
-        df.filter(pl.col("year").is_in([2021, 2022, 2023, 2024, 2025])),
+        df_waic,
         predictive_samples["cases"],
         naive_model,
         fig,
         ax[0, 0],  # type: ignore
-        show_r2=True,
+        waic_values=(waic_statistical, waic_naive),
     )
 
-    # while we're here, make a plot of the performance for the R01
-    fig_r01, ax_r01 = setup_plot(1, 1, figsize=(10, 7.5))  # type: ignore
-    plot_predictions(
-        df.filter(pl.col("year").is_in([2021, 2022, 2023, 2024, 2025])),
-        predictive_samples["cases"],
-        naive_model,
-        fig_r01,
-        ax_r01,
-        label_naive="Naive mechanistic model (vaccine coverage only)",
-        label_statistical="Statistical model",
-        show_r2=True,
-    )
-    fig_r01.savefig(
-        os.path.join(
-            fig_dir, f"figure_county_level_predictions_r01_no_CAR.png"
-        ),
-        dpi=300,
-        bbox_inches="tight",
-    )
+    # while we're here, make a plot of the performance for the R01, for
+    # every state_fixed_effect x pool variant we've fit at CAR=False
+    r01_df = df.filter(pl.col("year").is_in([2021, 2022, 2023, 2024, 2025]))
+    for state_fixed_effect_r01, pool_r01 in [
+        (True, True),
+        (True, False),
+        (False, True),
+        (False, False),
+    ]:
+        with open(
+            os.path.join(
+                output_dir,
+                f"predictive_partial_pooled_poisson_state_fixed_effect={state_fixed_effect_r01}_pool={pool_r01}_five_year=False_CAR=False_All covariates_[2021, 2022, 2023, 2024, 2025].pkl",
+            ),
+            "rb",
+        ) as file:
+            predictive_samples_r01 = pickle.load(file)
+
+        fig_r01, ax_r01 = setup_plot(1, 1, figsize=(10, 7.5))  # type: ignore
+        plot_predictions(
+            r01_df,
+            predictive_samples_r01["cases"],
+            naive_model,
+            fig_r01,
+            ax_r01,
+            label_naive="Naive mechanistic model (vaccine coverage only)",
+            label_statistical="Statistical model",
+            show_r2=True,
+            # a data-coordinate x (r2_x_frac) is compressed almost flat near
+            # 0 on this symlog axis, so use an axes-fraction position
+            # instead to actually move the text
+            r2_x_axes_frac=0.05,
+            # same colors as the mechanistic (MMR coverage) and statistical
+            # bars in figure_r01_validation_comparison.py
+            color_naive="#eb6834",
+            color_statistical="#2a78d6",
+        )
+        fig_r01.savefig(
+            os.path.join(
+                fig_dir,
+                f"figure_county_level_predictions_r01_state_fixed_effect={state_fixed_effect_r01}_pool={pool_r01}.png",
+            ),
+            dpi=300,
+            bbox_inches="tight",
+        )
+        plt.close(fig_r01)
 
     with open(
         os.path.join(

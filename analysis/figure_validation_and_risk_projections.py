@@ -331,7 +331,7 @@ def plot_future_scenario_cases(
                     baseline_raw_2026 = all_future_samples[
                         ("targeted_worsening", 2026)
                     ]
-                    raw = jnp.minimum(raw, baseline_raw_2026)
+                    raw = jnp.minimum(raw, baseline_raw_2026)  # type: ignore
 
             # Apply monotonicity constraints at county level, sample-by-sample,
             # relative to 2026 baseline, before multiplying by importation samples
@@ -340,13 +340,13 @@ def plot_future_scenario_cases(
                 and ("baseline", 2026) in all_future_samples
             ):
                 baseline_raw_2026 = all_future_samples[("baseline", 2026)]
-                raw = jnp.maximum(raw, baseline_raw_2026)
+                raw = jnp.maximum(raw, baseline_raw_2026)  # type: ignore
             elif (
                 scenario in IMPROVING_SCENARIOS
                 and ("baseline", 2026) in all_future_samples
             ):
                 baseline_raw_2026 = all_future_samples[("baseline", 2026)]
-                raw = jnp.minimum(raw, baseline_raw_2026)
+                raw = jnp.minimum(raw, baseline_raw_2026)  # type: ignore
 
             combined_raw = (
                 raw * importation_samples + importation_count_samples
@@ -479,7 +479,7 @@ def plot_future_scenario_cases(
                     baseline_raw_2026 = all_future_samples[
                         ("targeted_worsening", 2026)
                     ]
-                    raw = jnp.minimum(raw, baseline_raw_2026)
+                    raw = jnp.minimum(raw, baseline_raw_2026)  # type: ignore
 
             # Apply same monotonicity constraints
             if (
@@ -487,13 +487,13 @@ def plot_future_scenario_cases(
                 and ("baseline", 2026) in all_future_samples
             ):
                 baseline_raw_2026 = all_future_samples[("baseline", 2026)]
-                raw = jnp.maximum(raw, baseline_raw_2026)
+                raw = jnp.maximum(raw, baseline_raw_2026)  # type: ignore
             elif (
                 scenario in IMPROVING_SCENARIOS
                 and ("baseline", 2026) in all_future_samples
             ):
                 baseline_raw_2026 = all_future_samples[("baseline", 2026)]
-                raw = jnp.minimum(raw, baseline_raw_2026)
+                raw = jnp.minimum(raw, baseline_raw_2026)  # type: ignore
 
             combined_raw = (
                 raw * importation_samples + importation_count_samples
@@ -692,9 +692,12 @@ def map_fips_code_data(
         cbar.set_label(cbar_label, rotation=0, labelpad=0, fontsize=28)
 
         if cbar_type == "exemptions":
-            cbar.set_ticks([1.25, 4.0, 8.0, 12.5, 17.5, 50])
+            # midpoint of each bucket (the bar spaces buckets evenly and
+            # interpolates within them), so every label is centered on its
+            # color block
+            cbar.set_ticks([0.75, 3.75, 7.5, 12.5, 17.5, 60])
             cbar.set_ticklabels(
-                ["≤2.5%", "2.5%-5%", "5%-10%", "10%-15%", "15%-20%", ">20%"]
+                ["< 2.5%", "2.5%-5%", "5%-10%", "10%-15%", "15%-20%", "≥20%"]
             )
             cbar.ax.tick_params(labelsize=24, rotation=-60, length=0)
         if cbar_type == "percentile_risk":
@@ -1478,6 +1481,163 @@ def create_state_vaccination_scenario_effects_table(
     return results_df
 
 
+def plot_case_concentration_curves(
+    validation_percentiles,
+    validation_cases,
+    plot_scenarios,
+    scenario_colors,
+    all_future_samples,
+    importation_samples,
+    importation_count_samples,
+    scale,
+    output_path,
+):
+    """
+    Three-panel case-concentration (Lorenz-style) curves.
+
+    x-axis: county outbreak-risk percentile.
+    y-axis: cumulative % of cases in counties with percentile <= x.
+
+    Each panel plots two shared validation lines plus one line per projection
+    scenario:
+      - model validation: validation-predicted percentile (importations
+        included in the ranking) vs cumulative share of *observed* cases;
+      - empirical validation: observed-case percentile vs cumulative share of
+        *observed* cases (purely data-derived Lorenz curve);
+      - projection scenarios: projected percentile vs cumulative share of
+        projected cases.
+    Panels are, in order: 2026, 2030, and cumulative 2026-2030 projections.
+
+    Projection percentiles use the same ranking recipe as subplot b: rank
+    counties within each posterior draw, divide by the global max rank, scale
+    to [0, 100], then average across draws. Per-county projected case counts
+    are the median across draws.
+    """
+    scenario_labels = {
+        "no_change": "No changes in vaccination",
+        "baseline": "Vaccination trends continue",
+        "targeted_worsening": "Vaccinations universally decline",
+        "targeted_improvement": "Universal 95% coverage by 2030",
+    }
+
+    WORSENING_SCENARIOS = {"targeted_worsening", "universal_worsening"}
+    IMPROVING_SCENARIOS = {"targeted_improvement", "universal_improvement"}
+
+    def cumulative_curve(percentiles, cases):
+        percentiles = np.asarray(percentiles, dtype=float)
+        cases = np.asarray(cases, dtype=float)
+        order = np.argsort(percentiles)
+        p_sorted = percentiles[order]
+        cum = np.cumsum(cases[order])
+        total = cum[-1]
+        y = cum / total * 100 if total > 0 else np.zeros_like(cum)
+        return p_sorted, y
+
+    def projected_percentile_and_cases(sample_matrix):
+        # sample_matrix: (n_draws, n_counties), importation-included, /scale.
+        sample_matrix = np.asarray(sample_matrix)
+        ranked = stats.rankdata(sample_matrix, axis=1, method="average")
+        ranked = ranked / ranked.max(keepdims=True) * 100
+        percentiles = np.mean(ranked, axis=0)
+        cases = np.median(sample_matrix, axis=0)
+        return percentiles, cases
+
+    def scenario_combined_samples(scenario, year):
+        raw = all_future_samples[(scenario, year)]
+        # Same monotonicity constraints applied to the main projection figure.
+        if (
+            scenario in WORSENING_SCENARIOS
+            and ("baseline", 2026) in all_future_samples
+        ):
+            raw = jnp.maximum(raw, all_future_samples[("baseline", 2026)])
+        elif (
+            scenario in IMPROVING_SCENARIOS
+            and ("baseline", 2026) in all_future_samples
+        ):
+            raw = jnp.minimum(raw, all_future_samples[("baseline", 2026)])
+        return (raw * importation_samples + importation_count_samples) / scale
+
+    panel_defs = [
+        ("2026", [2026]),
+        ("2030", [2030]),
+        ("Cumulative 2026-2030", [2026, 2027, 2028, 2029, 2030]),
+    ]
+
+    fig, axes = plt.subplots(1, 3, figsize=(24, 8), sharey=True)
+
+    # Model validation: predicted percentile vs observed cumulative share.
+    model_p, model_y = cumulative_curve(
+        validation_percentiles, validation_cases
+    )
+
+    # Empirical validation: observed-case percentile vs observed cumulative
+    # share (purely data-derived).
+    obs_percentiles = stats.rankdata(
+        np.asarray(validation_cases, dtype=float), method="average"
+    )
+    obs_percentiles = obs_percentiles / obs_percentiles.max() * 100
+    emp_p, emp_y = cumulative_curve(obs_percentiles, validation_cases)
+
+    for ax, (title, years) in zip(axes, panel_defs):
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.get_xaxis().tick_bottom()
+        ax.get_yaxis().tick_left()
+        ax.tick_params(axis="x", direction="out")
+        ax.tick_params(axis="y", direction="out")
+        for spine in ax.spines.values():
+            spine.set_position(("outward", 5))
+        ax.set_axisbelow(True)
+
+        ax.plot(
+            model_p,
+            model_y,
+            color="black",
+            linewidth=2.5,
+            label="Validation (model percentile)",
+        )
+        ax.plot(
+            emp_p,
+            emp_y,
+            color="black",
+            linewidth=2.5,
+            linestyle="--",
+            label="Validation (observed percentile)",
+        )
+
+        for scenario in plot_scenarios:
+            combined = None
+            for year in years:
+                cy = scenario_combined_samples(scenario, year)
+                combined = cy if combined is None else combined + cy
+            percentiles, cases = projected_percentile_and_cases(combined)
+            proj_p, proj_y = cumulative_curve(percentiles, cases)
+            ax.plot(
+                proj_p,
+                proj_y,
+                color=scenario_colors[scenario],
+                linewidth=2.5,
+                label=scenario_labels[scenario],
+            )
+
+        ax.set_title(title)
+        ax.set_xlabel("County outbreak risk percentile")
+        ax.set_xlim(0, 100)
+        ax.set_ylim(0, 100)
+
+    axes[0].set_ylabel("Cumulative % of cases")
+    axes[0].legend(loc="upper left", edgecolor="black", fontsize=18)
+
+    fig.tight_layout()
+    fig.savefig(f"{output_path}.png", dpi=300, bbox_inches="tight")
+    fig.savefig(f"{output_path}.pdf", dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    print(
+        f"Supplemental case-concentration figure saved to "
+        f"{output_path}.png and {output_path}.pdf"
+    )
+
+
 if __name__ == "__main__":
     # Build figure with subplots a-d in a 2x2 grid and e spanning the full bottom row
     fig = plt.figure(figsize=(20, 22.5))
@@ -1735,8 +1895,24 @@ if __name__ == "__main__":
         samples_observed * importation_samples_observed
         + importation_count_samples_observed
     )
+    del samples_observed  # dead past this point
     samples_scaled = samples_unconditioned / scale
+    del samples_unconditioned  # dead past this point
     samples_observed_scaled = samples_observed_unconditioned / scale
+    del samples_observed_unconditioned  # dead past this point
+    # note: samples_observed_scaled itself is never read anywhere below --
+    # pre-existing dead code, left in place per instructions not to remove
+    # pre-existing dead code beyond what this change orphaned
+
+    # importation_samples/importation_count_samples (and their _observed
+    # variants) are dead past this point too -- panel e loads its own fresh
+    # importation_*_future arrays from pickles later, it doesn't reuse these
+    del (
+        importation_samples,
+        importation_count_samples,
+        importation_samples_observed,
+        importation_count_samples_observed,
+    )
 
     for year in validation_years:
         mask = all_counties["validation_year"] == year
@@ -2011,6 +2187,27 @@ if __name__ == "__main__":
         "rb",
     ) as f:
         import_scaler_2025 = pickle.load(f)
+
+    plot_case_concentration_curves(
+        validation_percentiles=observed_ranked,
+        validation_cases=df_train_observed["cases"].fill_null(0).to_numpy(),
+        plot_scenarios=[
+            "no_change",
+            "baseline",
+            "targeted_improvement",
+            "targeted_worsening",
+        ],
+        scenario_colors=scenario_colors,
+        all_future_samples=all_future_samples,
+        importation_samples=jnp.minimum(
+            importation_samples_future * import_scaler_2025, 1
+        ),
+        importation_count_samples=importation_count_samples_future,
+        scale=scale_2025,
+        output_path=os.path.join(
+            fig_dir, "figure_supplemental_case_concentration_curves"
+        ),
+    )
 
     plot_scenarios = [
         "targeted_worsening",

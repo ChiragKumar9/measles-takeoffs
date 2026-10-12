@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 import polars as pl
 import yaml
+from addfips import AddFIPS
 from matplotlib import rc
 from scipy.stats import linregress
 from shapely.geometry import MultiPolygon, Polygon
@@ -55,7 +56,15 @@ def setup_plot(nrows, ncols):
 
 
 def map_fips_code_data(
-    fips, vals, fig, ax, cbar_label, cbar_type, point_data=None
+    fips,
+    vals,
+    fig,
+    ax,
+    cbar_label,
+    cbar_type,
+    point_data=None,
+    legend_bbox_to_anchor=None,
+    cbar_orientation="horizontal",
 ):
     """
     Create a static US county map using GeoPandas
@@ -168,15 +177,35 @@ def map_fips_code_data(
     has_data_mask = counties_with_data["value"].notna()
     no_data_mask = counties_with_data["value"].isna()
 
-    counties_with_data[no_data_mask].plot(
-        ax=ax, color="lightgrey", linewidth=0.3, edgecolor="grey"
-    )
+    # geopandas/matplotlib errors on an empty GeoDataFrame (can't compute an
+    # aspect ratio with no geometries), which happens when every county has
+    # data, e.g. the R01 coverage map's backfilled version
+    if no_data_mask.any():
+        counties_with_data[no_data_mask].plot(
+            ax=ax, color="lightgrey", linewidth=0.3, edgecolor="grey"
+        )
 
     # Create normalization for colorbar
     if cbar_type == "continuous_cases":
         norm = mcolors.Normalize(vmin=0, vmax=500)
         cmap = mcolors.LinearSegmentedColormap.from_list(
             "custom", ["#fee5d9", "#a50f15"], N=256
+        )
+    elif cbar_type == "exemptions":
+        breakpoints = [-1.0, 2.5, 5.0, 10.0, 15.0, 20.0, 100.0]
+        norm = mcolors.BoundaryNorm(
+            boundaries=breakpoints,
+            ncolors=len(breakpoints) - 1,
+        )
+        cmap = mcolors.ListedColormap(
+            [
+                "#fee5d9",
+                "#fcbba1",
+                "#fc9272",
+                "#fb6a4a",
+                "#de2d26",
+                "#a50f15",
+            ]
         )
     elif cbar_type == "continuous_coverage":
         norm = mcolors.Normalize(vmin=70, vmax=100)
@@ -251,18 +280,58 @@ def map_fips_code_data(
     if cbar_type is not None:
         sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)  # type: ignore
 
-        cbar = fig.colorbar(
-            sm,
-            ax=ax,
-            shrink=0.7,  # Size of colorbar relative to axes
-            aspect=20,  # Ratio of long to short dimensions
-            pad=0.0,  # Distance between axes and colorbar
-            extend="neither",  # Add arrow at top ('neither', 'both', 'min', 'max')
-            orientation="horizontal",  # 'vertical' or 'horizontal'
-        )
+        if cbar_orientation == "horizontal":
+            cbar = fig.colorbar(
+                sm,
+                ax=ax,
+                shrink=0.7,  # Size of colorbar relative to axes
+                aspect=20,  # Ratio of long to short dimensions
+                pad=0.0,  # Distance between axes and colorbar
+                extend="neither",  # Add arrow at top ('neither', 'both', 'min', 'max')
+                orientation="horizontal",
+            )
+        else:
+            # fig.colorbar(ax=ax) sizes the bar from the axes box *before*
+            # the equal-aspect map shrinks it, so the bar would be taller
+            # than the map; place it explicitly at the map's own extent
+            ax.apply_aspect()
+            map_box = ax.get_position()
+            # trim the axes' autoscale margin so the bar spans only the
+            # drawn counties (top of the lower 48 to bottom of Alaska)
+            y_lo, y_hi = ax.get_ylim()
+            x_lo, x_hi = ax.get_xlim()
+            data_x0, data_y0, data_x1, data_y1 = (
+                counties_with_data.total_bounds
+            )
+            bar_y0 = map_box.y0 + map_box.height * (data_y0 - y_lo) / (
+                y_hi - y_lo
+            )
+            bar_h = map_box.height * (data_y1 - data_y0) / (y_hi - y_lo)
+            # start just right of the easternmost county, not the axes edge
+            bar_x0 = (
+                map_box.x0
+                + map_box.width * (data_x1 - x_lo) / (x_hi - x_lo)
+                + 0.008
+            )
+            cax = fig.add_axes((bar_x0, bar_y0, 0.022, bar_h))
+            cbar = fig.colorbar(sm, cax=cax, extend="neither")
 
-        # Customize the colorbar
-        cbar.set_label(cbar_label, rotation=0, labelpad=0, fontsize=28)
+        # Customize the colorbar; a vertical bar keeps its tick labels
+        # horizontal and its title rotated clockwise (-90) along the bar,
+        # with enough labelpad to clear the (wider) tick labels
+        if cbar_orientation == "horizontal":
+            cbar.set_label(cbar_label, rotation=0, labelpad=0, fontsize=28)
+            bucket_tick_rotation = -60
+            bucket_tick_size = 24
+        else:
+            cbar.set_label(
+                cbar_label,
+                rotation=-90,
+                labelpad=30,
+                fontsize=24,
+            )
+            bucket_tick_rotation = 0
+            bucket_tick_size = 24
 
         # Set ticks
         if cbar_type == "binary":
@@ -273,28 +342,54 @@ def map_fips_code_data(
             cbar.set_ticks([-9, -1.2, -0.2, 0.2, 0.8, 1.7, 20])
             cbar.set_ticklabels(
                 [
-                    "≤-2%",  # less than equal
-                    "-2% to -1%",
-                    "-1% to -0.2%",
-                    "-0.2% to 0.2%",
-                    "0.2% to 1%",
-                    "1% to 2%",
-                    ">2%",
+                    "< -2",  # BoundaryNorm bins are left-closed
+                    "-2 to -1",
+                    "-1 to -0.2",
+                    "-0.2 to 0.2",
+                    "0.2 to 1",
+                    "1 to 2",
+                    "≥2",
                 ]
             )
             cbar.ax.tick_params(labelsize=24, rotation=-60, length=0)
         elif cbar_type == "bucketed_coverage":
             cbar.set_ticks([35, 75, 85, 92.5, 97.5])
-            cbar.set_ticklabels(
-                [
-                    "≤70%",
-                    "70%-80%",
-                    "80%-90%",
-                    "90%-95%",
-                    ">95%",
-                ]
+            tick_text = ["< 70%", "70%-80%", "80%-90%", "90%-95%", "≥95%"]
+            # the unit is in the colorbar title instead; shorter labels let
+            # the rotated text be larger within its segment
+            tick_text = [t.replace("%", "") for t in tick_text]
+            cbar.set_ticklabels(tick_text)
+            cbar.ax.tick_params(
+                labelsize=bucket_tick_size,
+                rotation=bucket_tick_rotation,
+                length=0,
             )
-            cbar.ax.tick_params(labelsize=24, rotation=-60, length=0)
+        elif cbar_type == "exemptions":
+            # midpoint of each bucket (the bar spaces buckets evenly and
+            # interpolates within them), so every label is centered on its
+            # color block
+            cbar.set_ticks([0.75, 3.75, 7.5, 12.5, 17.5, 60])
+            tick_text = [
+                "< 2.5%",
+                "2.5%-5%",
+                "5%-10%",
+                "10%-15%",
+                "15%-20%",
+                "≥20%",
+            ]
+            if cbar_orientation == "vertical":
+                tick_text = [t.replace("%", "") for t in tick_text]
+            cbar.set_ticklabels(tick_text)
+            cbar.ax.tick_params(
+                labelsize=bucket_tick_size,
+                rotation=bucket_tick_rotation,
+                length=0,
+            )
+
+        if cbar_orientation == "vertical":
+            for tick_label in cbar.ax.get_yticklabels():
+                tick_label.set_ha("left")
+                tick_label.set_va("center")
 
     # Add state borders
     states.boundary.plot(ax=ax, linewidth=1.0, edgecolor="black", alpha=0.8)
@@ -341,15 +436,26 @@ def map_fips_code_data(
                 plt.scatter([], [], s=size, c="red", alpha=0.8, label=label)
             )
 
+        # default: center the legend under the drawn counties (not the axes
+        # box, whose autoscale margin is wider than the map)
+        legend_loc = "upper right"
+        if legend_bbox_to_anchor is None:
+            ax.apply_aspect()
+            x_lo, x_hi = ax.get_xlim()
+            data_x0, _, data_x1, _ = counties_with_data.total_bounds
+            map_center = ((data_x0 + data_x1) / 2 - x_lo) / (x_hi - x_lo)
+            legend_loc = "upper center"
+            legend_bbox_to_anchor = (map_center, 0.035)
+
         # Add the legend
         ax.legend(
             handles=legend_elements,
             title="Measles cases (N)",
-            loc="upper right",
+            loc=legend_loc,
             frameon=False,
             scatterpoints=1,
             ncol=3,
-            bbox_to_anchor=(1.15, 0.035),
+            bbox_to_anchor=legend_bbox_to_anchor,
         )
 
     # Remove axis
@@ -895,7 +1001,10 @@ if __name__ == "__main__":
         )
     )
     # plus add anything that may be missing from 2021-2025
-    missing = pl.read_csv(os.path.join(data_dir, "missing_counties.csv"))
+    missing = pl.read_csv(
+        os.path.join(data_dir, "missing_counties.csv"),
+        schema_overrides={"fips": pl.String},
+    )
     missing = missing.with_columns(
         state_county_year=pl.concat_str(
             [
@@ -911,6 +1020,18 @@ if __name__ == "__main__":
         ~pl.col("state_county_year").is_in(df["state_county_year"])
     )
     df = pl.concat([df, missing], how="diagonal_relaxed")
+
+    # "New York City" cases were assigned to Kings (00_explore_data.py:176),
+    # but the 2025 row still has fips 36061 (Manhattan) because there's no
+    # 2024 NY vaccine data to join against for any county; fix it to Kings'
+    # own fips (36047) so it isn't plotted on the wrong county
+    df = df.with_columns(
+        fips=pl.when(
+            (pl.col("state") == "New York") & (pl.col("county") == "Kings")
+        )
+        .then(pl.lit("36047"))
+        .otherwise(pl.col("fips"))
+    )
 
     # let's just plot Fulton and Gwinnett counties over Fulton county only
     df = (
@@ -1448,6 +1569,52 @@ if __name__ == "__main__":
         .otherwise(pl.col("fips"))
     )
 
+    oklahoma_vacc = vaccination_wrangling.read_oklahoma_data(data_dir=data_dir)
+    vaccination_data = vaccination_data.join(
+        oklahoma_vacc,
+        on=["state", "county", "year"],
+        how="left",
+        suffix="_oklahoma",
+    )
+    vaccination_data = vaccination_data.with_columns(
+        all_vacc_cov=pl.when(
+            (pl.col("state") == "Oklahoma") & pl.col("all_vacc_cov").is_null()
+        )
+        .then(pl.col("all_vacc_cov_oklahoma"))
+        .otherwise(pl.col("all_vacc_cov")),
+        MMR_cov=pl.when(
+            (pl.col("state") == "Oklahoma") & pl.col("MMR_cov").is_null()
+        )
+        .then(pl.col("MMR_cov_oklahoma"))
+        .otherwise(pl.col("MMR_cov")),
+        nonmed_exempt_pct=pl.when(
+            (pl.col("state") == "Oklahoma")
+            & pl.col("nonmed_exempt_pct").is_null()
+        )
+        .then(pl.col("nonmed_exempt_pct_oklahoma"))
+        .otherwise(pl.col("nonmed_exempt_pct")),
+        med_exempt_pct=pl.when(
+            (pl.col("state") == "Oklahoma")
+            & pl.col("med_exempt_pct").is_null()
+        )
+        .then(pl.col("med_exempt_pct_oklahoma"))
+        .otherwise(pl.col("med_exempt_pct")),
+        estimated_mmr_cov=pl.when(
+            (pl.col("state") == "Oklahoma")
+            & pl.col("estimated_mmr_cov").is_null()
+        )
+        .then(pl.col("estimated_mmr_cov_oklahoma"))
+        .otherwise(pl.col("estimated_mmr_cov")),
+    ).drop(
+        [
+            "MMR_cov_oklahoma",
+            "all_vacc_cov_oklahoma",
+            "nonmed_exempt_pct_oklahoma",
+            "med_exempt_pct_oklahoma",
+            "estimated_mmr_cov_oklahoma",
+        ]
+    )
+
     vaccination_data = vaccination_data.sort(
         "state", "county", "year"
     ).with_columns(
@@ -1587,6 +1754,10 @@ if __name__ == "__main__":
         vaccination_data_export.write_csv(
             os.path.join(data_dir, f"{year}_vaccination_data.csv")
         )
+        if year == 2026:
+            # keep this for the R01-only NME map below; verified elsewhere
+            # to match outputs/projection_dataset_2026.csv exactly
+            nme_2026 = vaccination_data_export
 
     # map
     ax[1, 0].text(  # type: ignore
@@ -1681,7 +1852,7 @@ if __name__ == "__main__":
     print(f"Average MMR coverage in 2011 (counties reporting): {avg_2011}%")
     print(f"Average MMR coverage in 2025 (counties reporting): {avg_2025}%")
     print(
-        f"Average annual rate of change since 2020 (across counties): {avg_roc}%/year"
+        f"Average annual rate of change since 2020 (across counties): {avg_roc} percentage points/year"
     )
     print(
         f"Average MMR coverage in 2011-15 (counties reporting): {avg_2011_15}%"
@@ -1705,7 +1876,7 @@ if __name__ == "__main__":
         vaccination_data_roc["slope"],
         fig,
         ax[1, 1],  # type: ignore
-        cbar_label="Average annual MMR vaccine coverage change\nsince 2020 (%)",
+        cbar_label="Average annual MMR vaccine coverage change\nsince 2020 (percentage points)",
         cbar_type="discrete",
     )
 
@@ -1764,3 +1935,167 @@ if __name__ == "__main__":
         dpi=300,
         bbox_inches="tight",
     )
+
+    # ------------------------------------------------------------------
+    # R01-only standalone figures. Built on their own figure/axes, saved
+    # after the main figure above, so they don't affect it.
+    # ------------------------------------------------------------------
+
+    # --- case map, with as much case data placed as possible ---
+    addfips = AddFIPS()
+    case_map_df = df.with_columns(
+        fips=pl.when(pl.col("fips").is_null())
+        .then(
+            pl.struct(["county", "state"]).map_elements(
+                lambda row: addfips.get_county_fips(
+                    row["county"], row["state"]
+                ),
+                return_dtype=pl.String,
+            )
+        )
+        .otherwise(pl.col("fips"))
+    ).with_columns(
+        # a few remaining region-level/state-level rows that addfips can't
+        # resolve by name; R01-map-only placements (see plan)
+        fips=pl.when(
+            (pl.col("state") == "Iowa") & (pl.col("county") == "Eastern")
+        )
+        .then(pl.lit("19061"))
+        .when((pl.col("state") == "Iowa") & (pl.col("county") == "Western"))
+        .then(pl.lit("19193"))
+        .when((pl.col("state") == "Iowa") & (pl.col("county") == "Central"))
+        .then(pl.lit("19179"))
+        .when(
+            (pl.col("state") == "Alaska") & (pl.col("county") == "Gulf Coast")
+        )
+        .then(pl.lit("02020"))
+        .when((pl.col("state") == "Delaware") & (pl.col("county") == "State"))
+        .then(pl.lit("10001"))
+        .otherwise(pl.col("fips"))
+    )
+
+    case_map_totals = case_map_df.group_by("fips").agg(cases=pl.sum("cases"))
+    still_unplaced = case_map_df.filter(pl.col("fips").is_null())
+    print(
+        f"R01 case map: still-unplaced rows = {still_unplaced.height}, "
+        f"cases = {still_unplaced['cases'].sum() if still_unplaced.height else 0}"
+    )
+    if still_unplaced.height:
+        print(still_unplaced.select("state", "county", "year", "cases"))
+
+    placed_totals = case_map_totals.filter(pl.col("fips").is_not_null())
+    print(f"R01 case map: total cases = {placed_totals['cases'].sum()}")
+    print(f"R01 case map: counties with >=1 case = {placed_totals.height}")
+    print(
+        f"R01 case map: county-year rows (state/county/year, pre-aggregation) "
+        f"= {case_map_df.height}"
+    )
+    print(
+        "(SC total includes post-2025 outbreak cases: 847 in this dataset "
+        "vs 333 CDC-reported for calendar-2025 alone)"
+    )
+
+    fig_r01_case, ax_r01_case = plt.subplots(figsize=(12, 9))
+    map_fips_code_data(
+        None,
+        None,
+        fig_r01_case,
+        ax_r01_case,
+        cbar_label=None,
+        cbar_type=None,
+        point_data=placed_totals[["fips", "cases"]].with_columns(
+            cases=pl.when(pl.col("cases") < 5)
+            .then(pl.lit(5))
+            .otherwise(pl.col("cases"))
+        ),
+        # this map is its own figure rather than one panel of a 2x2 grid, so
+        # the default anchor (tuned for that grid) sits well below/right of
+        # the visible map; pull it back in
+        legend_bbox_to_anchor=(0.865, 0.05),
+    )
+    fig_r01_case.savefig(
+        os.path.join(fig_dir, "figure_r01_case_map.png"),
+        dpi=300,
+        bbox_inches="tight",
+    )
+    plt.close(fig_r01_case)
+
+    # --- MMR coverage map (R01-only, as of year 2024 (2024-2025 school
+    # year): counties missing a 2024 row are filled with their latest
+    # available year <= 2024 instead of being left grey) ---
+    vaccination_data_latest_filled = (
+        vaccination_data.filter(pl.col("year") <= 2024)
+        .filter(pl.col("estimated_mmr_cov").is_not_null())
+        .sort(["fips", "year"], descending=True)
+        .group_by("fips", maintain_order=True)
+        .agg(pl.first("estimated_mmr_cov").alias("estimated_mmr_cov"))
+    )
+
+    # --- R01-ONLY OVERRIDE (revert by deleting this block) ---
+    # Montana's real county-level coverage only exists for 2019; every other
+    # year is a statewide-imputed placeholder (see
+    # vaccination_wrangling.impute_from_state_level_coverages), which the
+    # "latest year <= 2024" rule above would otherwise prefer over the real,
+    # county-varying 2019 numbers. Force Montana counties to their real 2019
+    # values here instead.
+    montana_2019 = vaccination_data.filter(
+        (pl.col("state") == "Montana") & (pl.col("year") == 2019)
+    ).select("fips", "estimated_mmr_cov")
+    vaccination_data_latest_filled = (
+        vaccination_data_latest_filled.join(
+            montana_2019, on="fips", how="left", suffix="_montana_2019"
+        )
+        .with_columns(
+            estimated_mmr_cov=pl.when(
+                pl.col("estimated_mmr_cov_montana_2019").is_not_null()
+            )
+            .then(pl.col("estimated_mmr_cov_montana_2019"))
+            .otherwise(pl.col("estimated_mmr_cov"))
+        )
+        .drop("estimated_mmr_cov_montana_2019")
+    )
+    # --- END R01-ONLY OVERRIDE ---
+
+    fig_r01_cov, ax_r01_cov = plt.subplots(figsize=(12, 9))
+    map_fips_code_data(
+        vaccination_data_latest_filled["fips"].to_list(),
+        vaccination_data_latest_filled["estimated_mmr_cov"].to_list(),
+        fig_r01_cov,
+        ax_r01_cov,
+        cbar_label="MMR vaccine coverage (%)",
+        cbar_type="bucketed_coverage",
+        cbar_orientation="vertical",
+    )
+    fig_r01_cov.savefig(
+        os.path.join(fig_dir, "figure_r01_mmr_coverage_map.png"),
+        dpi=300,
+        bbox_inches="tight",
+    )
+    plt.close(fig_r01_cov)
+
+    # --- nonmedical exemption rate map (same 2026 data as the policy
+    # figure's panel a) ---
+    # nonmed_exempt_pct comes out of the Excel source as Utf8 (unlike
+    # estimated_mmr_cov, which is cast to Float64 above); every other user
+    # of this column happens to round-trip it through a CSV write+re-read,
+    # which silently re-infers Float64, so this direct in-memory use is the
+    # first place that needs an explicit cast
+    nme_2026_map = nme_2026.filter(  # type: ignore
+        pl.col("fips").str.len_chars() == 5
+    ).with_columns(pl.col("nonmed_exempt_pct").cast(pl.Float64))
+    fig_r01_nme, ax_r01_nme = plt.subplots(figsize=(12, 9))
+    map_fips_code_data(
+        nme_2026_map["fips"],
+        nme_2026_map["nonmed_exempt_pct"],
+        fig_r01_nme,
+        ax_r01_nme,
+        cbar_label="Nonmedical exemption rate (%)",
+        cbar_type="exemptions",
+        cbar_orientation="vertical",
+    )
+    fig_r01_nme.savefig(
+        os.path.join(fig_dir, "figure_r01_nme_map.png"),
+        dpi=300,
+        bbox_inches="tight",
+    )
+    plt.close(fig_r01_nme)

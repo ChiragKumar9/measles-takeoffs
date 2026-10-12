@@ -8,6 +8,8 @@ import polars as pl
 import yaml
 from matplotlib import rc
 
+from outbreak_size import waic
+
 data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 output_dir = os.path.join(
     os.path.dirname(os.path.dirname(__file__)), "outputs"
@@ -52,7 +54,8 @@ def setup_plot(nrows, ncols):
     return fig, ax
 
 
-def plot_predictions(df, samples, naive_model, fig, ax):
+def plot_predictions(df, samples, naive_model, fig, ax, waic_values):
+    # waic_values: (statistical WAIC, naive WAIC)
     median = jnp.median(samples, axis=0)
     lower = jnp.quantile(samples, 0.025, axis=0)
     upper = jnp.quantile(samples, 0.975, axis=0)
@@ -85,8 +88,8 @@ def plot_predictions(df, samples, naive_model, fig, ax):
         label="Statistical: All covariates",
     )
 
-    ax.set_xlabel("Reported cases (N)")
-    ax.set_ylabel("Predicted cases (N)")
+    ax.set_xlabel("Reported outbreak size (N)")
+    ax.set_ylabel("Model-calibrated outbreak size (N)")
     ax.set_xscale("symlog")
     ax.set_yscale("symlog")
     ax.plot(
@@ -101,7 +104,7 @@ def plot_predictions(df, samples, naive_model, fig, ax):
     ax.set_yticks([0, 1, 10, 100], labels=["0", "1", "10", "100"])
     ax.set_xticks([0, 1, 10, 100], labels=["0", "1", "10", "100"])
 
-    ax.legend(loc=(0.0, 0.83), edgecolor="black")
+    ax.legend(loc=(0.0, 1.05), edgecolor="black")
 
     # Manually set minor tick locations on the x-axis
     minor_x_ticks = [
@@ -151,16 +154,22 @@ def plot_predictions(df, samples, naive_model, fig, ax):
     ]
     ax.yaxis.set_minor_locator(tck.FixedLocator(minor_y_ticks))
 
-    # add a text annotation of the R2
-    R2 = jnp.corrcoef(df["cases_outbreak"].to_jax(), median)[0, 1] ** 2
-    R2 = R2 * 100  # as a percentage
-    # ax.text(
-    #     0.00005 * max(df["cases_outbreak"].max(), upper.max()),
-    #     0.08 * max(df["cases_outbreak"].max(), upper.max()),
-    #     f"$R^2$ = {R2:.2f}%",
-    #     fontsize=26,
-    #     color="green",
-    # )
+    # add a text annotation of the WAIC (lower is better)
+    ax.text(
+        0.00025 * max(df["cases_outbreak"].max(), upper.max()),
+        0.35 * max(df["cases_outbreak"].max(), upper.max()),
+        f"WAIC = {waic_values[0]:.0f}",
+        fontsize=30,
+        color="green",
+    )
+
+    ax.text(
+        0.00025 * max(df["cases_outbreak"].max(), upper.max()),
+        0.63 * max(df["cases_outbreak"].max(), upper.max()),
+        f"WAIC = {waic_values[1]:.0f}",
+        fontsize=30,
+        color="red",
+    )
     ax.set_ylim(-0.05)
 
     return fig, ax
@@ -530,7 +539,7 @@ def plot_5yr_performance_comparison(df, fig, ax):
         loc="upper left",
     )
 
-    ax.set_xlabel("Year-to-year change in MMR coverage (%)")
+    ax.set_xlabel("Year-to-year change in MMR coverage (pp)")
     ax.set_ylabel("Residuals (reported - predicted cases)")
 
     # ax.set_yticks([-10, 0, 10, 20])
@@ -747,16 +756,31 @@ if __name__ == "__main__":
         va="top",
         ha="right",
     )
+    df_waic = df.filter(
+        pl.col("year").is_in(
+            [2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020]
+        )
+    )
+    waic_statistical, p_waic = waic.waic_posterior(
+        df_waic["cases_outbreak"], predictive_samples["mu"]
+    )
+    waic_naive = waic.waic_point_estimate(
+        df_waic["cases_outbreak"], naive_model["mu"], naive_model["k"]
+    )
+    # lower is better; the naive model has no posterior, so its WAIC is the
+    # AIC-equivalent (log-likelihood penalized by its k fitted parameters)
+    print(
+        f"WAIC 2011-2020: statistical {waic_statistical:.1f} "
+        f"(effective parameters {p_waic:.1f}), naive mechanistic "
+        f"{waic_naive:.1f} (k = {naive_model['k']})"
+    )
     plot_predictions(
-        df.filter(
-            pl.col("year").is_in(
-                [2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020]
-            )
-        ),
+        df_waic,
         predictive_samples["cases"],
         naive_model,
         fig,
         ax[0, 0],  # type: ignore
+        waic_values=(waic_statistical, waic_naive),
     )
 
     ax[0, 1].text(  # type: ignore

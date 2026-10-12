@@ -1,5 +1,6 @@
 import argparse
 import os
+import re
 
 import polars as pl
 import yaml
@@ -495,6 +496,58 @@ def read_vaccinations(data_dir=data_dir) -> pl.DataFrame:
     kansas_vacc = vaccination_wrangling.read_kansas_data(data_dir=data_dir)
     df = pl.concat([df, kansas_vacc], how="diagonal_relaxed")
 
+    # fill in oklahoma data (mainly adds 2024 coverage, which was previously
+    # missing). We only fill in nulls, since where the new file overlaps with
+    # existing data (2019-2023 MMR coverage) the values already match, and we
+    # don't want to overwrite existing exemption values with the new file's.
+    # at this point df's columns are lowercase ("mmr_cov"), but the reader
+    # returns "MMR_cov" (to match Montana's convention) and an
+    # "estimated_mmr_cov" column that df doesn't have yet (it's computed
+    # downstream in process_vaccinations_df). Align names before joining so
+    # the join suffix logic below actually collides on the right columns.
+    oklahoma_vacc = (
+        vaccination_wrangling.read_oklahoma_data(data_dir=data_dir)
+        .rename({"MMR_cov": "mmr_cov"})
+        .drop("estimated_mmr_cov")
+    )
+    df = df.join(
+        oklahoma_vacc,
+        on=["state", "county", "year"],
+        how="left",
+        suffix="_oklahoma",
+    )
+    df = df.with_columns(
+        all_vacc_cov=pl.when(
+            (pl.col("state") == "Oklahoma") & pl.col("all_vacc_cov").is_null()
+        )
+        .then(pl.col("all_vacc_cov_oklahoma"))
+        .otherwise(pl.col("all_vacc_cov")),
+        mmr_cov=pl.when(
+            (pl.col("state") == "Oklahoma") & pl.col("mmr_cov").is_null()
+        )
+        .then(pl.col("mmr_cov_oklahoma"))
+        .otherwise(pl.col("mmr_cov")),
+        nonmed_exempt_pct=pl.when(
+            (pl.col("state") == "Oklahoma")
+            & pl.col("nonmed_exempt_pct").is_null()
+        )
+        .then(pl.col("nonmed_exempt_pct_oklahoma"))
+        .otherwise(pl.col("nonmed_exempt_pct")),
+        med_exempt_pct=pl.when(
+            (pl.col("state") == "Oklahoma")
+            & pl.col("med_exempt_pct").is_null()
+        )
+        .then(pl.col("med_exempt_pct_oklahoma"))
+        .otherwise(pl.col("med_exempt_pct")),
+    ).drop(
+        [
+            "mmr_cov_oklahoma",
+            "all_vacc_cov_oklahoma",
+            "nonmed_exempt_pct_oklahoma",
+            "med_exempt_pct_oklahoma",
+        ]
+    )
+
     return df
 
 
@@ -759,6 +812,19 @@ def merge_outbreaks_vaccinations(
         .otherwise(pl.col("fips"))
     )
     merged_df = merged_df.drop(["fips_right"])
+
+    # "New York City" cases were assigned to Kings above, but the 2025 row
+    # still gets the case sheet's own NYC fips (Manhattan, 36061) because
+    # there's no 2024 NY vaccine data for any county to join against; fix it
+    # to Kings' own fips so it isn't attributed to the wrong county
+    merged_df = merged_df.with_columns(
+        fips=pl.when(
+            (pl.col("state") == "New York") & (pl.col("county") == "Kings")
+        )
+        .then(pl.lit("36047"))
+        .otherwise(pl.col("fips"))
+    )
+
     print("Merged df shape after merge:", merged_df.shape)
     return merged_df
 
@@ -1099,6 +1165,265 @@ def impute_from_bordering_years(
         return pl.DataFrame()
 
 
+def print_vaccine_data_availability(
+    vaccinations_df: pl.DataFrame,
+    data_dir: str = data_dir,
+    first_year: int = 2011,
+    last_year: int = 2024,
+) -> None:
+    """
+    Share of all US county-years (50 states + DC, from county_adjacencies.txt)
+    in first_year..last_year that have vaccine data, before any imputation:
+    all three fields (MMR-or-all-vaccine coverage, nonmedical and medical
+    exemptions) vs MMR-or-all-vaccine coverage alone.
+    """
+    adjacency = pl.read_csv(
+        os.path.join(data_dir, "county_adjacencies.txt"),
+        separator="|",
+        schema_overrides={"County GEOID": pl.String},
+    )
+    counties = adjacency["County GEOID"].drop_nulls().unique()
+    counties = counties.filter(
+        counties.str.slice(0, 2).cast(pl.Int64) <= 56
+    )  # 50 states + DC
+    years = list(range(first_year, last_year + 1))
+    available = (
+        vaccinations_df.filter(
+            pl.col("fips").is_in(counties.implode())
+            & pl.col("year").is_in(years)
+        )
+        .group_by(["fips", "year"])
+        .agg(
+            mmr=pl.col("estimated_mmr_cov").is_not_null().any(),
+            all_three=(
+                pl.col("estimated_mmr_cov").is_not_null()
+                & pl.col("nonmed_exempt_pct").is_not_null()
+                & pl.col("med_exempt_pct").is_not_null()
+            ).any(),
+        )
+    )
+    # every county x every year, so county-years absent from the data count
+    # as missing
+    grid = (
+        pl.DataFrame({"fips": counties})
+        .join(pl.DataFrame({"year": years}), how="cross")
+        .join(available, on=["fips", "year"], how="left")
+        .with_columns(pl.col("mmr", "all_three").fill_null(False))
+    )
+    print(
+        f"\nVaccine data availability before imputation: {counties.len()} "
+        f"counties x {first_year}-{last_year} = {grid.height} county-years"
+    )
+    print(
+        f"  all three fields (MMR/all-vaccine coverage + nonmedical + medical "
+        f"exemptions): {100 * grid['all_three'].mean():.1f}% "
+        f"({grid['all_three'].sum()})"
+    )
+    print(
+        f"  MMR/all-vaccine coverage alone: {100 * grid['mmr'].mean():.1f}% "
+        f"({grid['mmr'].sum()})"
+    )
+    print(
+        grid.group_by("year")
+        .agg(
+            pct_all_three=100 * pl.col("all_three").mean(),
+            pct_mmr_alone=100 * pl.col("mmr").mean(),
+        )
+        .sort("year")
+        .with_columns(pl.col("pct_all_three", "pct_mmr_alone").round(1))
+    )
+
+
+def print_missing_vaccine_data_breakdown(
+    raw_merged_df: pl.DataFrame, imputed_from_bordering: pl.DataFrame
+) -> None:
+    """
+    Where the missing vaccine data for outbreak county-years comes from, and
+    which imputation step (impute_from_bordering_years) fills it.
+
+    raw_merged_df: outbreaks merged with vaccinations, before imputation.
+    imputed_from_bordering: its output (rows with at least one field filled;
+    empty if none). MMR = MMR-or-all-vaccine coverage, NME = nonmedical and
+    MED = medical exemptions.
+    """
+    key = ["state", "county", "year"]
+    n_all = raw_merged_df.height
+    missing = (
+        raw_merged_df.with_columns(
+            mmr_missing=pl.col("estimated_mmr_cov").is_null(),
+            nme_missing=pl.col("nonmed_exempt_pct").is_null(),
+            med_missing=pl.col("med_exempt_pct").is_null(),
+            multi_county_region=pl.col("county").is_in(
+                list(higher_level_regions().keys())
+            ),
+        )
+        .filter(
+            pl.col("mmr_missing")
+            | pl.col("nme_missing")
+            | pl.col("med_missing")
+        )
+        .with_columns(
+            pattern=pl.concat_str(
+                [
+                    pl.when(pl.col("mmr_missing")).then(pl.lit("MMR")),
+                    pl.when(pl.col("nme_missing")).then(pl.lit("NME")),
+                    pl.when(pl.col("med_missing")).then(pl.lit("MED")),
+                ],
+                separator=" + ",
+                ignore_nulls=True,
+            )
+        )
+    )
+    n_missing = missing.height
+
+    if imputed_from_bordering.height > 0:
+        imputed = imputed_from_bordering.select(
+            *key,
+            "imputation_source",
+            complete=pl.col("estimated_mmr_cov").is_not_null()
+            & pl.col("nonmed_exempt_pct").is_not_null()
+            & pl.col("med_exempt_pct").is_not_null(),
+        )
+    else:
+        imputed = pl.DataFrame(
+            schema={
+                **{k: missing.schema[k] for k in key},
+                "imputation_source": pl.String,
+                "complete": pl.Boolean,
+            }
+        )
+    assert imputed.select(key).is_duplicated().sum() == 0
+    missing = missing.join(imputed, on=key, how="left", maintain_order="left")
+
+    def tier(source):
+        steps = {
+            "state-year"
+            if s.split(":")[1].startswith("state")
+            else "neighboring-year"
+            for s in source.split("; ")
+        }
+        if steps == {"neighboring-year"}:
+            return "completed by neighboring-year data only"
+        if steps == {"state-year"}:
+            return "completed by state-year data only"
+        return "completed by neighboring-year + state-year data"
+
+    missing = missing.with_columns(
+        outcome=pl.when(pl.col("complete").fill_null(False))
+        .then(
+            pl.col("imputation_source").map_elements(
+                tier, return_dtype=pl.String
+            )
+        )
+        .when(pl.col("complete").is_not_null())
+        .then(pl.lit("partly filled, still incomplete"))
+        .when(pl.col("multi_county_region"))
+        .then(pl.lit("not imputed: multi-county region"))
+        .otherwise(pl.lit("nothing found for this county"))
+    )
+
+    pct = lambda n, d: round(100 * n / d, 1)
+    print("\n" + "=" * 80)
+    print("MISSING VACCINE DATA FOR OUTBREAK COUNTY-YEARS")
+    print("=" * 80)
+    print(
+        f"{n_all} outbreak county-years before imputation: "
+        f"{n_all - n_missing} complete ({pct(n_all - n_missing, n_all)}%), "
+        f"{n_missing} missing at least one field ({pct(n_missing, n_all)}%), "
+        f"holding {missing['cases'].sum()} of {raw_merged_df['cases'].sum()} "
+        f"cases ({pct(missing['cases'].sum(), raw_merged_df['cases'].sum())}%)"
+    )
+    print(
+        "fields missing (a row can miss several): "
+        f"MMR {missing['mmr_missing'].sum()}, "
+        f"NME {missing['nme_missing'].sum()}, "
+        f"MED {missing['med_missing'].sum()}"
+    )
+
+    print("\nA. which fields are missing:")
+    print(
+        missing.group_by("pattern")
+        .agg(
+            rows=pl.len(),
+            completed_by_imputation=pl.col("complete").fill_null(False).sum(),
+        )
+        .with_columns(
+            pct_of_missing=(100 * pl.col("rows") / n_missing).round(1),
+            pct_of_all=(100 * pl.col("rows") / n_all).round(1),
+        )
+        .sort("rows", descending=True)
+    )
+
+    print("\nB. what imputation does with them:")
+    print(
+        missing.group_by("outcome")
+        .agg(rows=pl.len())
+        .with_columns(
+            pct_of_missing=(100 * pl.col("rows") / n_missing).round(1),
+            pct_of_all=(100 * pl.col("rows") / n_all).round(1),
+        )
+        .sort("rows", descending=True)
+    )
+
+    print(
+        "\nC. step that filled each field, among rows completed by imputation "
+        "(year+0 / year-2 = same county, outbreak year / two years before; "
+        "state_cdc = CDC state-level data for the vaccination year):"
+    )
+    done = missing.filter(pl.col("complete").fill_null(False))
+    steps = ["year+0", "year-2", "state_cdc", "state_cdc_zero"]
+    filled = {}
+    for field, missing_col in [
+        ("mmr", "mmr_missing"),
+        ("nonmed", "nme_missing"),
+        ("med", "med_missing"),
+    ]:
+        # "(^|; )" anchors the field name, so "med:" does not match inside
+        # "nonmed:"
+        filled[field] = [
+            done.filter(
+                pl.col("imputation_source").str.contains(
+                    f"(^|; ){field}:{re.escape(step)}(;|$)"
+                )
+            ).height
+            for step in steps
+        ]
+        # every field that was missing in a completed row was filled by
+        # exactly one step
+        assert sum(filled[field]) == done.filter(pl.col(missing_col)).height
+    print(pl.DataFrame({"filled by": steps, **filled}))
+
+    print("\nD. fields missing x what imputation does:")
+    print(
+        missing.group_by("pattern", "outcome")
+        .agg(rows=pl.len())
+        .pivot(on="outcome", index="pattern", values="rows")
+        .fill_null(0)
+    )
+
+    print("\nE. by outbreak year (all rows, missing, completed):")
+    print(
+        raw_merged_df.group_by("year")
+        .agg(all_rows=pl.len())
+        .join(
+            missing.group_by("year").agg(
+                missing=pl.len(),
+                completed=pl.col("complete").fill_null(False).sum(),
+            ),
+            on="year",
+            how="left",
+        )
+        .fill_null(0)
+        .with_columns(
+            pct_missing=(100 * pl.col("missing") / pl.col("all_rows")).round(
+                1
+            ),
+            never_completed=pl.col("missing") - pl.col("completed"),
+        )
+        .sort("year")
+    )
+
+
 if __name__ == "__main__":
     load_dotenv()
 
@@ -1110,6 +1435,7 @@ if __name__ == "__main__":
 
     vaccinations_df = read_vaccinations(data_dir)
     vaccinations_df = process_vaccinations_df(vaccinations_df)
+    print_vaccine_data_availability(vaccinations_df, data_dir)
 
     # ------------------------------------------------------------------
     # Write processed_vaccinations_data.csv using a state-imputed copy.
@@ -1139,6 +1465,23 @@ if __name__ == "__main__":
     merged_df = assemble_analysis_dataset(merged_df, params)
     merged_df_no_vaccine_data = assemble_analysis_dataset(
         merged_df_no_vaccine_data, params
+    )
+
+    # fill in fips codes for real counties (e.g. "Kings", "Johnson") among
+    # the missing-vaccine-data rows by name; leaves rows whose "county" is a
+    # multi-county region name (no single matching county) unchanged
+    missing_addfips = AddFIPS()
+    merged_df_no_vaccine_data = merged_df_no_vaccine_data.with_columns(
+        fips=pl.when(pl.col("fips").is_null())
+        .then(
+            pl.struct(["county", "state"]).map_elements(
+                lambda row: missing_addfips.get_county_fips(
+                    row["county"], row["state"]
+                ),
+                return_dtype=pl.String,
+            )
+        )
+        .otherwise(pl.col("fips"))
     )
 
     # save the merged df no vaccine data
@@ -1197,6 +1540,8 @@ if __name__ == "__main__":
             imputation_source=pl.lit(None, dtype=pl.Utf8)
         )
         print("No rows could be imputed from bordering years")
+
+    print_missing_vaccine_data_breakdown(raw_merged_df, imputed_from_bordering)
 
     # remove "District 1" as well
     merged_df = merged_df.filter(

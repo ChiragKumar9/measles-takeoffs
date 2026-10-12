@@ -122,6 +122,13 @@ if __name__ == "__main__":
             lower[supercritical_mask] = sp_lower
             upper[supercritical_mask] = sp_upper
 
+            # Poisson mean for every row (the predictive distribution is
+            # Poisson(mu)), kept for WAIC; llf and k are the supercritical
+            # GLM's log-likelihood and its number of fitted parameters
+            mu = np.empty(n)
+            mu[subcritical_mask] = sc_mu
+            mu[supercritical_mask] = sp_mu
+
             # pickle results
             with open(
                 os.path.join(
@@ -137,6 +144,9 @@ if __name__ == "__main__":
                         "upper": upper,
                         "subcritical_mask": subcritical_mask,
                         "supercritical_mask": supercritical_mask,
+                        "mu": mu,
+                        "llf": model.llf,
+                        "k": np.linalg.matrix_rank(X_super),
                     },
                     f,
                 )

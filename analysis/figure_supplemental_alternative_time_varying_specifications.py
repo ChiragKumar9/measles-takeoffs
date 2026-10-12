@@ -78,16 +78,18 @@ def plot_time_varying_vaccine_effect(
         )
 
         if rolling_average:
-            n = 2
-            median_effect_expanded = jnp.convolve(
-                median_effect, jnp.ones(n) / n, mode="same"
-            )
-            lower_effect_expanded = jnp.convolve(
-                lower_effect, jnp.ones(n) / n, mode="same"
-            )
-            upper_effect_expanded = jnp.convolve(
-                upper_effect, jnp.ones(n) / n, mode="same"
-            )
+            # centered 3-year mean; at the ends, average only the years
+            # available (mode="same" with zero-padding shrinks ends toward 0)
+            n = 3
+
+            def smooth(x):
+                return jnp.convolve(
+                    x, jnp.ones(n), mode="same"
+                ) / jnp.convolve(jnp.ones_like(x), jnp.ones(n), mode="same")
+
+            median_effect_expanded = smooth(median_effect)
+            lower_effect_expanded = smooth(lower_effect)
+            upper_effect_expanded = smooth(upper_effect)
         else:
             median_effect_expanded = median_effect
             lower_effect_expanded = lower_effect

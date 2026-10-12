@@ -364,7 +364,7 @@ def plot_5yr_performance_comparison(df, fig, ax):
         loc="lower left",
     )
 
-    ax.set_xlabel("Year-to-year change in MMR coverage (%)")
+    ax.set_xlabel("Year-to-year change in MMR coverage (pp)")
     ax.set_ylabel("Residuals (reported - predicted cases)")
 
     ax.set_yticks([-10, 0, 10, 20])
@@ -523,7 +523,7 @@ def plot_5yr_performance_comparison_mechanistic(df, fig, ax):
         edgecolor="black",
         loc="lower left",
     )
-    ax.set_xlabel("Year-to-year change in MMR coverage (%)")
+    ax.set_xlabel("Year-to-year change in MMR coverage (pp)")
     ax.set_ylabel("Residuals (reported - predicted cases)")
 
     ax.set_yscale("symlog")

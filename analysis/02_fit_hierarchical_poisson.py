@@ -522,6 +522,110 @@ if __name__ == "__main__":
                                         )
                                         clear_caches()
 
+    # R01 predictions panel: All covariates, 2021-2025, no pooling, with a
+    # state fixed effect, no CAR term. The main loop above only fits
+    # car=True, so
+    # this configuration is fit here as a one-off instead of widening that
+    # loop (which would refit every car=True combination too). Must run
+    # before `df = df.sort("year")` below, since it isn't stable and this
+    # filter needs to match the unsorted row order that
+    # figure_predicting_county_level_outbreaks.py's own df.filter(year in
+    # 2021-2025) uses.
+    df_year = df.filter(pl.col("year").is_in([2021, 2022, 2023, 2024, 2025]))
+    vars = [
+        "estimated_mmr_cov",
+        "nonmed_exempt_pct",
+        "med_exempt_pct",
+        "fraction_under_5",
+        "fraction_school_aged",
+        "avg_house_size",
+        "std_house_size",
+        "fraction_public",
+        "fraction_white",
+        "fraction_graduate_degree",
+        "pop_density",
+        "log_income",
+    ]
+    covariates = df_year.select(vars)
+    scaler = StandardScaler()
+    covariates_scaled = scaler.fit_transform(covariates.to_numpy())
+    r01_years = [2021, 2022, 2023, 2024, 2025]
+    year_fixed_effects = [f"year_{y}" for y in r01_years[1:]]
+    covariates_scaled = np.hstack(
+        [
+            covariates_scaled,
+            df_year.select(year_fixed_effects).to_numpy(),
+        ]
+    )
+    covariates = pl.DataFrame(
+        covariates_scaled,
+        schema=[*covariates.columns, *year_fixed_effects],
+    )
+    model = poisson.PartialPooledPoisson(
+        iv=covariates[:, :3].to_jax(),
+        pool=False,
+        regression_covariates=covariates[:, 3:].to_jax(),
+        exposure=df_year["pop"].to_jax(),
+        groups=df_year["state"],
+        group_fixed_effect=True,
+        spatial=False,
+        spatial_units=df_year["geoid"],
+        adjacency_matrix=adjacency.assemble_adjacency_matrix(
+            adjacency_data,
+            df_year["fips"].unique(maintain_order=True).to_list(),
+        ),
+        years=None,  # type: ignore
+    )
+    nuts_kernel = NUTS(
+        model.fit,
+        init_strategy=init_to_median(num_samples=NUM_SAMPLES),
+        target_accept_prob=TARGET_ACCEPT_PROB,
+    )
+    mcmc = MCMC(
+        nuts_kernel,
+        num_warmup=2000,
+        num_samples=2000,
+        num_chains=4,
+    )
+    mcmc.run(
+        PRNGKey(params["seed"]),
+        is_observed=jnp.ones(df_year.height),
+        cases=df_year["cases_outbreak"].to_jax(),
+    )
+    mcmc.print_summary()
+    posterior_samples = mcmc.get_samples()
+    with open(
+        os.path.join(
+            output_dir,
+            f"samples_partial_pooled_poisson_state_fixed_effect=True_pool=False_five_year=False_CAR=False_All covariates_{r01_years}.pkl",
+        ),
+        "wb",
+    ) as file:
+        pickle.dump(posterior_samples, file)
+    predictive = Predictive(model.fit, posterior_samples)
+    predictive_samples = predictive(
+        PRNGKey(params["seed"]),
+        is_observed=jnp.ones(df_year.height),
+        cases=None,
+    )
+    with open(
+        os.path.join(
+            output_dir,
+            f"predictive_partial_pooled_poisson_state_fixed_effect=True_pool=False_five_year=False_CAR=False_All covariates_{r01_years}.pkl",
+        ),
+        "wb",
+    ) as file:
+        pickle.dump(predictive_samples, file)
+    del (
+        model,
+        mcmc,
+        nuts_kernel,
+        posterior_samples,
+        predictive,
+        predictive_samples,
+    )
+    clear_caches()
+
     # run a variant of the model in the modern era where we exclude places
     # that previously had outbreaks
     df = df.sort("year")

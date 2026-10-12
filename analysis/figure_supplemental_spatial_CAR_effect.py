@@ -463,15 +463,18 @@ def map_fips_code_data(
 
         # Set ticks
         if cbar_type == "exemptions":
-            cbar.set_ticks([1.25, 4.0, 8.0, 12.5, 17.5, 50])
+            # midpoint of each bucket (the bar spaces buckets evenly and
+            # interpolates within them), so every label is centered on its
+            # color block
+            cbar.set_ticks([0.75, 3.75, 7.5, 12.5, 17.5, 60])
             cbar.set_ticklabels(
                 [
-                    "≤2.5%",
+                    "< 2.5%",
                     "2.5%-5%",
                     "5%-10%",
                     "10%-15%",
                     "15%-20%",
-                    ">20%",
+                    "≥20%",
                 ]
             )
             cbar.ax.tick_params(labelsize=24, rotation=-60, length=0)

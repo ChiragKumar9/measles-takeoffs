@@ -255,9 +255,12 @@ def map_fips_code_data(
         )
         cbar.set_label(cbar_label, rotation=0, labelpad=0, fontsize=28)
         if cbar_type == "exemptions":
-            cbar.set_ticks([1.25, 4.0, 8.0, 12.5, 17.5, 50])
+            # midpoint of each bucket (the bar spaces buckets evenly and
+            # interpolates within them), so every label is centered on its
+            # color block
+            cbar.set_ticks([0.75, 3.75, 7.5, 12.5, 17.5, 60])
             cbar.set_ticklabels(
-                ["≤2.5%", "2.5%-5%", "5%-10%", "10%-15%", "15%-20%", ">20%"]
+                ["< 2.5%", "2.5%-5%", "5%-10%", "10%-15%", "15%-20%", "≥20%"]
             )
             cbar.ax.tick_params(labelsize=24, rotation=-60, length=0)
 
@@ -488,13 +491,13 @@ def coverage_increase_nme_policy_change(df, fig, ax):
             .mean()
         )
         print(f"\n{state} (Policy year: {year}):")
-        print(f"  Policy year change: {policy_change:.2f}%")
+        print(f"  Policy year change: {policy_change:.2f} pp")
 
         # 1 year after change
         yr1_change = (
             state_df["estimated_mmr_cov_change_1yr"].drop_nulls().mean()
         )
-        print(f"  1 year after: {yr1_change:.2f}%")
+        print(f"  1 year after: {yr1_change:.2f} pp")
 
     result_df = pl.concat(all_dfs)
 
@@ -505,17 +508,17 @@ def coverage_increase_nme_policy_change(df, fig, ax):
     overall_policy_change = (
         result_df["estimated_mmr_cov_change_policy_year"].drop_nulls().mean()
     )
-    print(f"  Policy year change: {overall_policy_change:.2f}%")
+    print(f"  Policy year change: {overall_policy_change:.2f} pp")
 
     overall_yr1_change = (
         result_df["estimated_mmr_cov_change_1yr"].drop_nulls().mean()
     )
-    print(f"  1 year after: {overall_yr1_change:.2f}%")
+    print(f"  1 year after: {overall_yr1_change:.2f} pp")
 
     overall_yr2_change = (
         result_df["estimated_mmr_cov_change_2yr"].drop_nulls().mean()
     )
-    print(f"  2 years after: {overall_yr2_change:.2f}%")
+    print(f"  2 years after: {overall_yr2_change:.2f} pp")
 
     # Pre-policy NME rates
     print("\n" + "=" * 60)
@@ -560,7 +563,7 @@ def coverage_increase_nme_policy_change(df, fig, ax):
     )
     ax.set_xlabel("Pre-policy nonmedical exemption rate (%)")
     ax.set_ylabel(
-        "Change in MMR coverage after removal of\nnonmedical exemptions (%)"
+        "Change in MMR coverage after removal of\nnonmedical exemptions (pp)"
     )
     ax.set_xlim(0)
 
@@ -1475,14 +1478,14 @@ def create_intervention_effects_table(
                 pct_change_mean = jnp.mean(pct_change_samples, axis=0)  # type: ignore
                 pct_change_median = jnp.median(pct_change_samples, axis=0)  # type: ignore
                 pct_change_p025 = jnp.percentile(
-                    pct_change_samples,
+                    pct_change_samples,  # type: ignore
                     2.5,
-                    axis=0,  # type: ignore
+                    axis=0,
                 )
                 pct_change_p975 = jnp.percentile(
-                    pct_change_samples,
+                    pct_change_samples,  # type: ignore
                     97.5,
-                    axis=0,  # type: ignore
+                    axis=0,
                 )
 
                 del pct_change_samples
@@ -1516,22 +1519,22 @@ def create_intervention_effects_table(
                 )
 
                 cumulative_pct_change_mean = jnp.mean(
-                    cumulative_pct_change_samples,
-                    axis=0,  # type: ignore
+                    cumulative_pct_change_samples,  # type: ignore
+                    axis=0,
                 )
                 cumulative_pct_change_median = jnp.median(
-                    cumulative_pct_change_samples,
-                    axis=0,  # type: ignore
+                    cumulative_pct_change_samples,  # type: ignore
+                    axis=0,
                 )
                 cumulative_pct_change_p025 = jnp.percentile(
-                    cumulative_pct_change_samples,
+                    cumulative_pct_change_samples,  # type: ignore
                     2.5,
-                    axis=0,  # type: ignore
+                    axis=0,
                 )
                 cumulative_pct_change_p975 = jnp.percentile(
-                    cumulative_pct_change_samples,
+                    cumulative_pct_change_samples,  # type: ignore
                     97.5,
-                    axis=0,  # type: ignore
+                    axis=0,
                 )
 
                 # Create rows for each county
@@ -1886,13 +1889,13 @@ def create_state_intervention_effects_table(
                     )
                     cumulative_pct_change_p025 = float(
                         jnp.percentile(
-                            cumulative_pct_change_samples_state,
+                            cumulative_pct_change_samples_state,  # type: ignore
                             2.5,  # type: ignore
                         )
                     )
                     cumulative_pct_change_p975 = float(
                         jnp.percentile(
-                            cumulative_pct_change_samples_state,
+                            cumulative_pct_change_samples_state,  # type: ignore
                             97.5,  # type: ignore
                         )
                     )
