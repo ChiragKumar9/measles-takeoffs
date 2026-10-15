@@ -238,6 +238,13 @@ if __name__ == "__main__":
     )
 
     # Process imputed dataset
+    if not os.path.exists(
+        os.path.join(data_dir, "outbreaks_vaccinations_cleaned_imputed.csv")
+    ):
+        print(
+            "skipped: outbreaks_vaccinations_cleaned_imputed.csv not provided, so the imputed dataset was not assembled."
+        )
+        raise SystemExit(0)
     process_dataset(
         input_file=os.path.join(
             data_dir, "outbreaks_vaccinations_cleaned_imputed.csv"

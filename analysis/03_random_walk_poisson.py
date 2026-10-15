@@ -53,12 +53,11 @@ if __name__ == "__main__":
         and col != "year_every_two_contiguous"
     ]
 
-    exclude_16_17 = {
-        "year": [2017, 2017, 2017, 2017],
-        "county": ["Hennepin", "Crow Wing", "Ramsey", "Le Sueur"],
-        "state": ["Minnesota", "Minnesota", "Minnesota", "Minnesota"],
-    }
-    exclude_16_17 = pl.DataFrame(exclude_16_17)
+    # these happen to be the four counties in Minnesota for that year (Crow Wing, Hennepin, Le Sueur, Ramsey)
+    exclude_16_17 = df.filter(
+        (pl.col("state") == "Minnesota") & (pl.col("year") == 2017)
+    ).select("year", "county", "state")
+    assert exclude_16_17.height == 4
     exclude_16_17 = exclude_16_17.with_columns(
         year_county_state=pl.col("year").cast(pl.String)
         + pl.col("county")
@@ -93,9 +92,13 @@ if __name__ == "__main__":
 
                 else:
                     df_model = df
-                    assembled_adjacency_matrix = np.genfromtxt(
-                        os.path.join(data_dir, "county_adjacency_matrix.csv"),
-                        delimiter=",",
+                    assembled_adjacency_matrix = (
+                        adjacency.assemble_adjacency_matrix(
+                            adjacency_matrix,
+                            df_model["fips"]
+                            .unique(maintain_order=True)
+                            .to_list(),
+                        )
                     )
             else:
                 # Filter out 2025 oddities
@@ -124,12 +127,13 @@ if __name__ == "__main__":
                     )
                     additional_info = "_exclude_16_17_no_2025_oddities"
                 else:
-                    assembled_adjacency_matrix = np.genfromtxt(
-                        os.path.join(
-                            data_dir,
-                            "county_adjacency_matrix_no_2025_oddities.csv",
-                        ),
-                        delimiter=",",
+                    assembled_adjacency_matrix = (
+                        adjacency.assemble_adjacency_matrix(
+                            adjacency_matrix,
+                            df_model["fips"]
+                            .unique(maintain_order=True)
+                            .to_list(),
+                        )
                     )
                     additional_info = "_no_2025_oddities"
 

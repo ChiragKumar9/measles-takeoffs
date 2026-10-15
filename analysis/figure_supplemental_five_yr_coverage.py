@@ -217,6 +217,13 @@ def plot_5yr_performance_comparison(df, fig, ax):
     )
 
     # join this up with the year-over-year vaccination change data
+    if not os.path.exists(
+        os.path.join(data_dir, "year_over_year_change_vaccination_data.csv")
+    ):
+        print(
+            "skipped panel: year_over_year_change_vaccination_data.csv not provided."
+        )
+        return None
     vaccination_roc = pl.read_csv(
         os.path.join(data_dir, "year_over_year_change_vaccination_data.csv"),
         # read the fips codes as strings
@@ -400,6 +407,13 @@ def plot_5yr_performance_comparison_mechanistic(df, fig, ax):
         five_year_residuals=pl.col("cases_outbreak") - pl.col("five_year"),
     )
 
+    if not os.path.exists(
+        os.path.join(data_dir, "year_over_year_change_vaccination_data.csv")
+    ):
+        print(
+            "skipped panel: year_over_year_change_vaccination_data.csv not provided."
+        )
+        return None
     vaccination_roc = pl.read_csv(
         os.path.join(data_dir, "year_over_year_change_vaccination_data.csv"),
         schema_overrides={"fips": pl.String},

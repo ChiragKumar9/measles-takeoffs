@@ -18,6 +18,9 @@
 *.iso.xml
 *.cpg
 *.npy
+.secrets/
+outputs/reviewer_data/
+outputs/reviewer_data_unhashed/
 
 # Documents
 *.doc
@@ -396,6 +399,7 @@ docs/site/
 Cargo.lock
 poetry.lock
 *.lock
+!uv.lock
 
 .python-version
 

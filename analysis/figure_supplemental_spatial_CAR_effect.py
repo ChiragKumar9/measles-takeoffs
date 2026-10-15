@@ -287,6 +287,10 @@ def map_fips_code_data(
     Create a static US county map using GeoPandas
     """
     # Load the county boundaries
+    if not os.path.exists(os.path.join(data_dir, "cb_2020_us_county_20m.shp")):
+        print("skipped panel: cb_2020_us_county_20m.shp not provided.")
+        ax.set_axis_off()
+        return fig, ax
     counties = gpd.read_file(
         os.path.join(data_dir, "cb_2020_us_county_20m.shp")
     )

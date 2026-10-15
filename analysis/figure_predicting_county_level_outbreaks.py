@@ -1281,6 +1281,9 @@ def plot_county_level_variation(
     Plot within-county vaccination coverage variability for large outbreaks,
     comparing independent vs correlated multi-county outbreaks.
     """
+    if not os.path.exists(os.path.join(data_dir, "vaxrates_schools.csv")):
+        print("skipped panel: vaxrates_schools.csv not provided.")
+        return None
     school = pl.read_csv(
         os.path.join(data_dir, "vaxrates_schools.csv"),
         null_values="NA",
@@ -1680,6 +1683,9 @@ def plot_supplemental_mmr_coverage_correlation(df, fig, ax):
     ax : matplotlib.axes.Axes
         Axis for plotting
     """
+    if not os.path.exists(os.path.join(data_dir, "vaxrates_schools.csv")):
+        print("skipped panel: vaxrates_schools.csv not provided.")
+        return None
     school = pl.read_csv(
         os.path.join(data_dir, "vaxrates_schools.csv"),
         null_values="NA",
@@ -1775,6 +1781,9 @@ def plot_supplemental_sd_vs_mean(df, fig, ax):
     """
     Plot SD vs mean within-county MMR coverage (school-level data).
     """
+    if not os.path.exists(os.path.join(data_dir, "vaxrates_schools.csv")):
+        print("skipped panel: vaxrates_schools.csv not provided.")
+        return None
     school = pl.read_csv(
         os.path.join(data_dir, "vaxrates_schools.csv"),
         null_values="NA",
@@ -1874,6 +1883,9 @@ def create_regression_table(df, posterior_samples_post, adjacency_matrix_post):
     All rows use MSR inference with block permutation. Rows differ only in model specification.
     """
     # Prepare data (same as in plot_county_level_variation)
+    if not os.path.exists(os.path.join(data_dir, "vaxrates_schools.csv")):
+        print("skipped panel: vaxrates_schools.csv not provided.")
+        return pd.DataFrame()
     school = pl.read_csv(
         os.path.join(data_dir, "vaxrates_schools.csv"),
         null_values="NA",
@@ -2396,6 +2408,17 @@ if __name__ == "__main__":
         (False, True),
         (False, False),
     ]:
+        # 02_fit_hierarchical_poisson.py currently fits only state_fixed_effect=True, pool=False at CAR=False
+        if not os.path.exists(
+            os.path.join(
+                output_dir,
+                f"predictive_partial_pooled_poisson_state_fixed_effect={state_fixed_effect_r01}_pool={pool_r01}_five_year=False_CAR=False_All covariates_[2021, 2022, 2023, 2024, 2025].pkl",
+            )
+        ):
+            print(
+                f"skipped: no CAR=False fit for state_fixed_effect={state_fixed_effect_r01}, pool={pool_r01}."
+            )
+            continue
         with open(
             os.path.join(
                 output_dir,

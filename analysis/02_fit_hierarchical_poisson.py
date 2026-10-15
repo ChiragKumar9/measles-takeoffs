@@ -96,14 +96,20 @@ if __name__ == "__main__":
         ],
     }
 
-    outbreaks_in_clusters = pl.read_csv(
-        os.path.join(data_dir, "outbreaks_in_clusters.csv"),
-        schema_overrides={"fips": pl.String},
+    outbreaks_in_clusters = (
+        None  # only used when exclude_clustered is True, which is never run
     )
-    outbreaks_in_clusters = outbreaks_in_clusters.filter(pl.col("clustered"))
-    outbreaks_in_clusters = outbreaks_in_clusters.with_columns(
-        fips_year=pl.col("fips") + pl.col("year").cast(pl.String)
-    )
+    if os.path.exists(os.path.join(data_dir, "outbreaks_in_clusters.csv")):
+        outbreaks_in_clusters = pl.read_csv(
+            os.path.join(data_dir, "outbreaks_in_clusters.csv"),
+            schema_overrides={"fips": pl.String},
+        )
+        outbreaks_in_clusters = outbreaks_in_clusters.filter(
+            pl.col("clustered")
+        )
+        outbreaks_in_clusters = outbreaks_in_clusters.with_columns(
+            fips_year=pl.col("fips") + pl.col("year").cast(pl.String)
+        )
 
     for exclude_clustered in [False]:
         for me_cutoff in [None, 5.0, 10.0]:
@@ -179,6 +185,12 @@ if __name__ == "__main__":
                                                 and car
                                                 and (me_cutoff is None)
                                             ):
+                                                assert (
+                                                    outbreaks_in_clusters
+                                                    is not None
+                                                ), (
+                                                    "outbreaks_in_clusters.csv not provided"
+                                                )
                                                 additional_info += (
                                                     "_exclude_clustered"
                                                 )
@@ -909,6 +921,13 @@ if __name__ == "__main__":
     print("RUNNING MODELS ON IMPUTED DATASET")
     print("=" * 80)
 
+    if not os.path.exists(
+        os.path.join(data_dir, "analysis_dataset_imputed.csv")
+    ):
+        print(
+            "skipped: analysis_dataset_imputed.csv not provided, so the imputed-data models were not run."
+        )
+        raise SystemExit(0)
     # Load imputed dataset
     df_imputed = pl.read_csv(
         os.path.join(data_dir, "analysis_dataset_imputed.csv"),

@@ -1330,6 +1330,13 @@ def plot_increasing_spread_over_time(
 
 
 if __name__ == "__main__":
+    if not os.path.exists(
+        os.path.join(data_dir, "analysis_dataset_imputed.csv")
+    ):
+        print(
+            "skipped: analysis_dataset_imputed.csv not provided, so the imputed-data models were not run."
+        )
+        raise SystemExit(0)
     # Load imputed dataset
     df_imputed = pl.read_csv(
         os.path.join(data_dir, "analysis_dataset_imputed.csv"),
