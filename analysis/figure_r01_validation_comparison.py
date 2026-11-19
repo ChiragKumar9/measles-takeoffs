@@ -7,7 +7,13 @@ import numpy as np
 import polars as pl
 from matplotlib import rc
 from matplotlib.patches import Patch
-from sklearn.metrics import roc_curve
+from sklearn.metrics import average_precision_score, roc_auc_score, roc_curve
+
+from outbreak_size.headline_models import (
+    HEADLINE_FILE_NAME,
+    read_headline_models,
+)
+from outbreak_size.model_colors import MECHANISTIC_COLOR, STATISTICAL_COLOR
 
 fig_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "figures")
 output_dir = os.path.join(
@@ -55,9 +61,8 @@ SURVEILLANCE_MODEL = (
 COVERAGE_MODEL = "Naive coverage: prior-year MMR coverage"
 MODEL_COLORS = {
     SURVEILLANCE_MODEL: ("Surveillance", "#1baf7a"),
-    COVERAGE_MODEL: ("MMR coverage", "#eb6834"),
+    COVERAGE_MODEL: ("MMR coverage", MECHANISTIC_COLOR),
 }
-STATISTICAL_COLOR = "#2a78d6"
 
 # row-level (cluster=False) bootstrap, matching agreement_table_bootstrap's own
 # call for the All-cases ("total") condition in table_model_performance_validation.py
@@ -121,7 +126,7 @@ def pick_models(df, threshold):
             .map_elements(lambda s: stat_auprc(s)[0], return_dtype=pl.Float64)
             .alias("_auprc_point")
         )
-        .sort("_auprc_point", descending=True)
+        .sort("_auprc_point", descending=True, maintain_order=True)
     )
     stat_model = best_row["Model"][0]
     return [
@@ -145,7 +150,14 @@ ALL_CASES = "All cases (including imports)"
 OUTBREAK_CASES = "Outbreak cases"
 
 
-def plot_comparison(df, condition, models, threshold, coverage_ops=None):
+def plot_comparison(
+    df,
+    condition,
+    models,
+    threshold,
+    coverage_ops=None,
+    ylabel="Validation performance, top 20% outbreaks (%)",
+):
     """`coverage_ops`: the {"Sensitivity": (point, lo, hi), "Specificity": ...}
     dict from `sens_spec_and_flags` for the MMR-coverage model (balanced
     operating point), applied only when `condition == ALL_CASES`."""
@@ -196,7 +208,7 @@ def plot_comparison(df, condition, models, threshold, coverage_ops=None):
 
     ax.set_xticks(x_positions + group_width / 2 - bar_width / 2)
     ax.set_xticklabels(METRIC_LABELS)
-    ax.set_ylabel("Validation performance, top 20% outbreaks (%)")
+    ax.set_ylabel(ylabel)
     ax.set_ylim(0, 100)
 
     model_handles = [
@@ -321,7 +333,198 @@ def report_model_comparison_stats(df, models, threshold):
     return coverage_ops
 
 
+def any_later_label(truth_by_year, threshold):
+    """1 if the county has >= `threshold` cases in this validation year or any
+    later one: the table's multi-year label, which it uses for AUPRC only."""
+    years = [d["year"] for d in truth_by_year]
+    by_year = [dict(zip(d["cid"], d["cases"])) for d in truth_by_year]
+    return np.array(
+        [
+            int(
+                any(
+                    by_year[j].get(c, 0) >= threshold
+                    for j in range(i, len(years))
+                )
+            )
+            for i, d in enumerate(truth_by_year)
+            for c in d["cid"]
+        ]
+    )
+
+
+def table_from_pooled_dump(path, threshold):
+    """All-cases table in the layout of `table_model_agreement_and_classification_t5.csv`
+    ('point [lo, hi]' strings) relabeled at any `threshold`, from a POOLED_DUMP
+    pickle (set POOLED_DUMP=<path> when running table_model_performance_validation.py).
+    AUROC/Sensitivity/Specificity use the same-year label, AUPRC the any-later
+    label; the statistical model is the one with the highest pooled AUPRC.
+    Row-level bootstrap with draws shared across models, as in the table."""
+    with open(path, "rb") as f:
+        pooled_capture, truth_by_year, _ = pickle.load(f)
+    cid = np.concatenate([d["cid"] for d in truth_by_year])
+    cases = np.concatenate([d["cases"] for d in truth_by_year])
+    roc_label = (cases >= threshold).astype(int)
+    auprc_label = any_later_label(truth_by_year, threshold)
+
+    # scores don't depend on the label threshold the dump was captured at
+    scores = {}
+    for (name, cond, thr), entries in pooled_capture.items():
+        if cond == "total" and thr == 5:
+            assert np.array_equal(
+                np.concatenate([e["cid"] for e in entries]), cid
+            )
+            scores[name] = np.concatenate(
+                [e["score"] for e in entries]
+            ).astype(float)
+    stat_model = max(  # type: ignore
+        (n for n in scores if n.startswith("Statistical:")),
+        key=lambda n: average_precision_score(auprc_label, scores[n]),  # type: ignore
+    )
+    models = [
+        (SURVEILLANCE_MODEL, *MODEL_COLORS[SURVEILLANCE_MODEL]),
+        (COVERAGE_MODEL, *MODEL_COLORS[COVERAGE_MODEL]),
+        (stat_model, "Multivariable", STATISTICAL_COLOR),
+    ]
+
+    rng = np.random.default_rng(BOOTSTRAP_SEED)
+    draws = [rng.integers(0, len(cid), size=len(cid)) for _ in range(N_BOOT)]
+
+    def fmt(point, lo, hi):
+        return f"{point:.1f} [{lo:.1f}, {hi:.1f}]"
+
+    rows = []
+    for model_name, _label, _color in models:
+        s = scores[model_name]
+        rule = "balanced" if model_name == COVERAGE_MODEL else "closest_corner"
+        sens_spec, _ = sens_spec_and_flags(s, roc_label, rule)
+        auroc = [roc_auc_score(roc_label[i], s[i]) * 100 for i in draws]
+        auprc = [
+            average_precision_score(auprc_label[i], s[i]) * 100 for i in draws
+        ]
+        cols = metric_cols(threshold)
+        rows.append(
+            {
+                "Model": model_name,
+                "Condition": ALL_CASES,
+                cols[0]: fmt(
+                    average_precision_score(auprc_label, s) * 100,
+                    *np.percentile(
+                        np.asarray(auprc, dtype=float), [2.5, 97.5]
+                    ),
+                ),
+                cols[1]: fmt(
+                    roc_auc_score(roc_label, s) * 100,
+                    *np.percentile(
+                        np.asarray(auroc, dtype=float), [2.5, 97.5]
+                    ),
+                ),
+                cols[2]: fmt(*sens_spec["Sensitivity"]),
+                cols[3]: fmt(*sens_spec["Specificity"]),
+            }
+        )
+    return pl.DataFrame(rows), models
+
+
+MACRO_TABLE = "table_model_agreement_classification_macro_check.csv"
+
+
+def macro_table_as_strings(path, threshold):
+    """The main-table framework (per-year metrics averaged over validation
+    years; `_lower`/`_upper` are the min/max across years, not bootstrap CIs),
+    reformatted to the 'point [lo, hi]' strings `plot_comparison` parses."""
+    raw = pl.read_csv(path)
+    out = raw.select("Model", "Condition")
+    for col in metric_cols(threshold):
+        out = out.with_columns(
+            pl.format(
+                "{} [{}, {}]",
+                pl.lit(raw[col].round(1)),
+                pl.lit(raw[f"{col}_lower"].round(1)),
+                pl.lit(raw[f"{col}_upper"].round(1)),
+            ).alias(col)
+        )
+    return out
+
+
 if __name__ == "__main__":
+    # the headline model is the statistical model chosen with
+    # 06b_choose_headline_models.py (the model of 07 and of the projections)
+    HEADLINE_MODEL = read_headline_models(
+        os.path.join(output_dir, HEADLINE_FILE_NAME), fig_dir=fig_dir
+    ).statistical.name
+
+    # main-table framework (10+, per-year average) with the headline model
+    macro_df = macro_table_as_strings(os.path.join(fig_dir, MACRO_TABLE), 10)
+    # the table of the comparison holds the models it was made with (no script
+    # of the pipeline writes it): the headline model must be one of them
+    if HEADLINE_MODEL not in macro_df["Model"].to_list():
+        raise ValueError(
+            f"{MACRO_TABLE} has no scores of the headline model "
+            f"{HEADLINE_MODEL}: the comparison needs a table that has it"
+        )
+    headline_models = [
+        (SURVEILLANCE_MODEL, *MODEL_COLORS[SURVEILLANCE_MODEL]),
+        (COVERAGE_MODEL, *MODEL_COLORS[COVERAGE_MODEL]),
+        (HEADLINE_MODEL, "Multivariable", STATISTICAL_COLOR),
+    ]
+    for condition, suffix in [
+        (ALL_CASES, "all_cases"),
+        (OUTBREAK_CASES, "outbreak_cases"),
+    ]:
+        print(f"\nt=10 macro, {condition}:")
+        for model_name, label, _ in headline_models:
+            row = macro_df.filter(
+                (pl.col("Model") == model_name)
+                & (pl.col("Condition") == condition)
+            )
+            print(
+                f"  {label:<14}"
+                + "  ".join(
+                    f"{m}={row[c].item()}"
+                    for m, c in zip(METRIC_LABELS, metric_cols(10))
+                )
+            )
+        fig, ax = plot_comparison(macro_df, condition, headline_models, 10)
+        fig.savefig(
+            os.path.join(
+                fig_dir,
+                f"figure_r01_validation_comparison_{suffix}_t10_macro_headline.png",
+            ),
+            dpi=300,
+            bbox_inches="tight",
+        )
+        plt.close(fig)
+
+    # 3+ cases, All cases: AUROC same-year label, AUPRC any-later label
+    # (needs a POOLED_DUMP pickle, see `table_from_pooled_dump`)
+    if os.environ.get("POOLED_DUMP"):
+        df3, models3 = table_from_pooled_dump(os.environ["POOLED_DUMP"], 3)
+        print(f"\nt=3, {ALL_CASES}: statistical model = {models3[2][0]}")
+        for model_name, label, _ in models3:
+            row = df3.filter(pl.col("Model") == model_name)
+            print(
+                f"  {label:<14}"
+                + "  ".join(
+                    f"{m}={row[c].item()}"
+                    for m, c in zip(METRIC_LABELS, metric_cols(3))
+                )
+            )
+        fig, ax = plot_comparison(
+            df3,
+            ALL_CASES,
+            models3,
+            3,
+            ylabel="Validation performance, outbreaks (%)",
+        )
+        fig.savefig(
+            os.path.join(
+                fig_dir, "figure_r01_validation_comparison_all_cases_t3.png"
+            ),
+            dpi=300,
+            bbox_inches="tight",
+        )
+        plt.close(fig)
+
     for threshold, table_name in THRESHOLD_TABLES.items():
         df = pl.read_csv(os.path.join(fig_dir, table_name))
         models = pick_models(df, threshold)

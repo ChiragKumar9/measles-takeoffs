@@ -25,19 +25,30 @@ repos:
     - id: ruff-format
       args: ['--line-length', '79']
 #####
-# R
--   repo: https://github.com/lorenzwalthert/precommit
-    rev: v0.4.3.9009
-    hooks:
-    -   id: style-files
-    -   id: lintr
-#####
-# Java
-- repo: https://github.com/macisamuele/language-formatters-pre-commit-hooks
-  rev: v2.14.0
-  hooks:
-  - id: pretty-format-java
-    args: [--aosp,--autofix]
+# R, Java and Rust
+# This repository has no R, Java or Rust code, so these hooks stay off: their
+# environments (R packages, Java and Cargo toolchains) have to be built on the
+# CI runner, and a hook environment that fails to build stops pre-commit with
+# an unexpected error (exit code 3) instead of a hook failure. Uncomment a
+# block if that language is added.
+# -   repo: https://github.com/lorenzwalthert/precommit
+#     rev: v0.4.3.9009
+#     hooks:
+#     -   id: style-files
+#     -   id: lintr
+# - repo: https://github.com/macisamuele/language-formatters-pre-commit-hooks
+#   rev: v2.14.0
+#   hooks:
+#   - id: pretty-format-java
+#     args: [--aosp,--autofix]
+# -   repo: https://github.com/doublify/pre-commit-rust
+#     rev: v1.0
+#     hooks:
+#     -   id: fmt
+#         args: ["--verbose", "--"]
+#     -   id: clippy
+#         # Use 'all-targets' to run on all code, including tests and examples
+#         args: ["--all-targets", "--", "-D", "warnings", "-W", "clippy::pedantic", "-A", "clippy::module-name-repetitions"]
 #####
 # Julia
 # Due to lack of first-class Julia support, this needs Julia local install
@@ -54,11 +65,3 @@ repos:
     -   id: detect-secrets
         args: ['--baseline', '.secrets.baseline']
         exclude: package.lock.json
--   repo: https://github.com/doublify/pre-commit-rust
-    rev: v1.0
-    hooks:
-    -   id: fmt
-        args: ["--verbose", "--"]
-    -   id: clippy
-        # Use 'all-targets' to run on all code, including tests and examples
-        args: ["--all-targets", "--", "-D", "warnings", "-W", "clippy::pedantic", "-A", "clippy::module-name-repetitions"]

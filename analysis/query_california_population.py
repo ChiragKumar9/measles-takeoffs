@@ -58,7 +58,7 @@ def query(census, fip, y):
             fields=fields,
             **args,
         )[0]  # census queries return a list of one dict
-    except Exception as e:
+    except Exception:
         return None
 
 

@@ -25,6 +25,22 @@ def crps(y, draws):
     return mean_abs_error - 0.5 * mean_abs_pair_difference
 
 
+def crps_above_threshold(y, draws, threshold):
+    """CRPS of the cases above a threshold: every outcome and every draw
+    below the threshold counts as 0, and above it only the excess over the
+    threshold counts. A miss between two values below the threshold costs
+    nothing, and a miss above it is measured from the threshold. In the units
+    of y (cases). Lower is better.
+
+    y: [n_locations]; draws: [n_draws, n_locations] predictive draws.
+    Returns [n_locations].
+    """
+    return crps(
+        np.maximum(np.asarray(y, dtype=float) - threshold, 0),
+        np.maximum(np.asarray(draws, dtype=float) - threshold, 0),
+    )
+
+
 def weighted_interval_score(y, draws):
     """Weighted interval score (WIS, Bracher et al. 2021) of each location's
     predictive distribution, in the units of y (cases). Lower is better.

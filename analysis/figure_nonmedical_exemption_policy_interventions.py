@@ -23,6 +23,19 @@ from scipy import stats
 from shapely.geometry import MultiPolygon, Polygon
 from sklearn.linear_model import TheilSenRegressor
 
+from outbreak_size import scenario_tables
+from outbreak_size.importation import (
+    future_importation_draws,
+    scale_importation_probability,
+)
+from outbreak_size.interventions import (
+    coverage_change_fit,
+    state_coverage_changes,
+)
+from outbreak_size.samples_io import load_samples
+from outbreak_size.scenarios import VACCINATION_SCENARIO_LABELS
+from outbreak_size.validation import require_same_fips, require_width
+
 data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 output_dir = os.path.join(
     os.path.dirname(os.path.dirname(__file__)), "outputs"
@@ -32,12 +45,12 @@ fig_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "figures")
 font = {"family": "Nimbus Roman", "size": 28}
 rc("font", **font)
 
-GLOBALS_PRIOR_SD = 10
-
 with open("params.yml", "r") as f:
     params = yaml.safe_load(f)
 
-FUTURE_YEARS = [2026, 2027, 2028, 2029, 2030]
+GLOBALS_PRIOR_SD = params["validation_globals_prior_sd"]
+
+FUTURE_YEARS = [2027, 2028, 2029, 2030]
 INTERVENTIONS = [
     # "remove_bans",
     "improve_bottom_decile_5pct",
@@ -56,15 +69,6 @@ INTERVENTION_LABELS = {
     "improve_cases_previously_counties": "Counties with\n           previous outbreaks",
     "improve_bottom_decile_5pct": "Lowest coverage counties",
     "improve_top_risk_states_5pct": "Top risk states",
-}
-
-VACCINATION_SCENARIO_LABELS = {
-    "no_change": "No changes in vaccination",
-    "baseline": "Vaccination trends continue",
-    "targeted_worsening": "Vaccinations decline 2x faster",
-    "universal_worsening": "Vaccinations decline 1.5x faster",
-    "targeted_improvement": "Universal 95% coverage by 2030",
-    "universal_improvement": "1pp improvement year-over-year",
 }
 
 INTERVENTION_TABLE_LABELS = {
@@ -199,9 +203,11 @@ def map_fips_code_data(
     has_data_mask = counties_with_data["value"].notna()
     no_data_mask = counties_with_data["value"].isna()
 
-    counties_with_data[no_data_mask].plot(
-        ax=ax, color="lightgrey", linewidth=0.3, edgecolor="grey"
-    )
+    # geopandas cannot plot an empty frame (every county has a value)
+    if bool(no_data_mask.any()):
+        counties_with_data[no_data_mask].plot(
+            ax=ax, color="lightgrey", linewidth=0.3, edgecolor="grey"
+        )
 
     if cbar_type == "risk":
         norm = mcolors.Normalize(vmin=0, vmax=2300)
@@ -269,7 +275,9 @@ def map_fips_code_data(
     if point_data is not None:
         counties_with_data["centroid"] = counties_with_data.geometry.centroid
 
-    point_df = pd.DataFrame(point_data, columns=["GEOID", "point_value"])
+    point_df = pd.DataFrame(
+        point_data, columns=pd.Index(["GEOID", "point_value"])
+    )
     counties_with_points = counties_with_data.merge(
         point_df, on="GEOID", how="inner"
     )
@@ -319,38 +327,9 @@ def coverage_increase_nme_policy_change(df, fig, ax):
     all_dfs = []
     regression_df = []
     for state, year in states.items():
-        t1 = df.filter(
-            (pl.col("state") == state) & (pl.col("year") == year - 1)
-        ).select(
-            [
-                "state",
-                "year",
-                "county",
-                "nonmed_exempt_pct",
-                "estimated_mmr_cov",
-            ]
-        )
-
-        t2 = df.filter(
-            (pl.col("state") == state) & (pl.col("year") == year)
-        ).select(
-            [
-                "state",
-                "year",
-                "county",
-                "nonmed_exempt_pct",
-                "estimated_mmr_cov",
-            ]
-        )
-
-        temp = t1.join(
-            t2, on=["state", "county"], suffix="_policy_year"
-        ).with_columns(
-            estimated_mmr_cov_change_policy_year=pl.col(
-                "estimated_mmr_cov_policy_year"
-            )
-            - pl.col("estimated_mmr_cov"),
-        )
+        # each county's coverage change after the ban (the same function
+        # that 10_nme_policy_scenarios.py uses for the ban interventions)
+        temp = state_coverage_changes(df, state, year)
 
         temp_regression = temp[
             ["nonmed_exempt_pct", "estimated_mmr_cov_change_policy_year"]
@@ -381,25 +360,6 @@ def coverage_increase_nme_policy_change(df, fig, ax):
         )
         regression_df.append(temp_regression)
 
-        t3 = df.filter(
-            (pl.col("state") == state) & (pl.col("year") == year + 1)
-        ).select(
-            [
-                "state",
-                "year",
-                "county",
-                "nonmed_exempt_pct",
-                "estimated_mmr_cov",
-            ]
-        )
-
-        temp = temp.join(
-            t3, on=["state", "county"], suffix="_1yr"
-        ).with_columns(
-            estimated_mmr_cov_change_1yr=pl.col("estimated_mmr_cov_1yr")
-            - pl.col("estimated_mmr_cov"),
-        )
-
         temp_regression = temp[
             ["nonmed_exempt_pct", "estimated_mmr_cov_change_1yr"]
         ].drop_nulls()
@@ -426,25 +386,6 @@ def coverage_increase_nme_policy_change(df, fig, ax):
             N=pl.lit(temp_regression.height),
         )
         regression_df.append(temp_regression)
-
-        t4 = df.filter(
-            (pl.col("state") == state) & (pl.col("year") == year + 2)
-        ).select(
-            [
-                "state",
-                "year",
-                "county",
-                "nonmed_exempt_pct",
-                "estimated_mmr_cov",
-            ]
-        )
-
-        temp = temp.join(
-            t4, on=["state", "county"], suffix="_2yr"
-        ).with_columns(
-            estimated_mmr_cov_change_2yr=pl.col("estimated_mmr_cov_2yr")
-            - pl.col("estimated_mmr_cov"),
-        )
 
         if state != "Connecticut":
             temp_regression = temp[
@@ -535,7 +476,7 @@ def coverage_increase_nme_policy_change(df, fig, ax):
 
     # Overall pre-policy NME rate across all counties
     overall_pre_policy_nme = result_df["nonmed_exempt_pct"].drop_nulls().mean()
-    print(f"\nAcross all counties in states with policies:")
+    print("\nAcross all counties in states with policies:")
     print(f"  Average pre-policy NME rate: {overall_pre_policy_nme:.2f}%")
 
     state_colors = {
@@ -571,11 +512,10 @@ def coverage_increase_nme_policy_change(df, fig, ax):
         temp_regression = result_df[
             ["nonmed_exempt_pct", f"estimated_mmr_cov_change_{year_mode}"]
         ].drop_nulls()
-        estimator = stats.theilslopes(
-            temp_regression[
-                f"estimated_mmr_cov_change_{year_mode}"
-            ].to_numpy(),
-            temp_regression["nonmed_exempt_pct"].to_numpy(),
+        # the pooled line; 10_nme_policy_scenarios.py fits the "1yr" one
+        # with the same function to set the coverage gain of a ban
+        estimator = coverage_change_fit(
+            result_df, f"estimated_mmr_cov_change_{year_mode}"
         )
         temp_regression = pl.DataFrame().with_columns(
             State=pl.lit("All states"),
@@ -721,16 +661,8 @@ def coverage_increase_nme_policy_change(df, fig, ax):
 
 def load_importation_samples_future(output_dir):
     future_base = pl.read_csv(
-        os.path.join(output_dir, "projection_dataset_2026.csv"),
+        os.path.join(output_dir, "projection_dataset_baseline_2027.csv"),
         schema_overrides={"fips": pl.String},
-    ).filter(pl.col("type") == "projection")
-
-    reference = pl.read_csv(
-        os.path.join(output_dir, "projection_dataset_baseline_2026.csv"),
-        schema_overrides={"fips": pl.String},
-    )
-    future_base = future_base.join(
-        reference.select("fips"), on="fips", how="inner"
     )
 
     import_df = pl.read_csv(
@@ -754,40 +686,10 @@ def load_importation_samples_future(output_dir):
         importation_probability_samples=pl.Series(imp_raw),
         expected_importations_samples=pl.Series(count_raw),
     )
-    import_df = import_df.sort("type").unique(
-        subset=["state", "county", "year", "fips"], keep="last"
-    )
-    import_df = import_df.sort("year", descending=True).unique(
-        subset=["fips"], keep="first"
-    )
-
-    future_base = future_base.join(
-        import_df.select(
-            [
-                "fips",
-                "importation_probability_samples",
-                "expected_importations_samples",
-            ]
-        ),
-        on="fips",
-        how="left",
-    )
-    assert future_base["importation_probability_samples"].null_count() == 0, (
-        "Some future counties missing importation probability samples"
-    )
-    assert future_base["expected_importations_samples"].null_count() == 0, (
-        "Some future counties missing importation count samples"
-    )
-
-    importation_samples_future = jnp.array(
-        np.vstack(future_base["importation_probability_samples"].to_numpy())  # type: ignore
-    ).T
-    importation_count_samples_future = jnp.array(
-        np.vstack(future_base["expected_importations_samples"].to_numpy())  # type: ignore
-    ).T
+    probability, counts = future_importation_draws(import_df, future_base)
     return (
-        importation_samples_future,
-        importation_count_samples_future,
+        jnp.array(probability),
+        jnp.array(counts),
         future_base["fips"].to_list(),
     )
 
@@ -796,15 +698,17 @@ def plot_intervention_effects(
     interventions,
     intervention_labels,
     future_years,
-    baseline_samples_by_year,
-    intervention_data,
+    load_baseline,
+    load_intervention,
     importation_samples,
     importation_count_samples,
     baseline_fips,
-    scale,
     fig,
     ax,
 ):
+    # the draws are loaded one at a time (load_baseline(year) and
+    # load_intervention(intervention, year)): the ones of all the interventions
+    # and years together are several GB
     violin_width = 0.12
     pair_gap = 0.35
 
@@ -839,20 +743,14 @@ def plot_intervention_effects(
         color = INTERVENTION_COLORS[intervention]
 
         # Build county index mappings from first year (consistent across years)
-        first_pkg = intervention_data[intervention][future_years[0]]
+        first_pkg = load_intervention(intervention, future_years[0])
         first_fips_list = first_pkg["fips"]
-        first_int_applied = first_pkg["intervention_applied"]
+        del first_pkg
 
         proj_fips_to_idx = {f: j for j, f in enumerate(first_fips_list)}
         common_fips = [f for f in baseline_fips if f in proj_fips_to_idx]
         baseline_col_idx = jnp.array([fips_to_idx[f] for f in common_fips])
         proj_col_idx = jnp.array([proj_fips_to_idx[f] for f in common_fips])
-
-        int_fips = [f for f, a in zip(first_fips_list, first_int_applied) if a]
-        int_fips_set = set(int_fips)
-        int_in_common_mask = jnp.array(
-            [f in int_fips_set for f in common_fips], dtype=bool
-        )
 
         imp = importation_samples
         imp_count = importation_count_samples
@@ -861,32 +759,26 @@ def plot_intervention_effects(
         cumulative_baseline_by_county = None
 
         for y_idx, year in enumerate(future_years):
-            pkg = intervention_data[intervention][year]
+            pkg = load_intervention(intervention, year)
+            require_same_fips(
+                pkg["fips"], first_fips_list, f"{intervention} {year}"
+            )
             pred = pkg["predictions"]
 
             # --- Total: (n_samples, n_common_counties) ---
             b_county = (
-                baseline_samples_by_year[year][:, baseline_col_idx]
+                load_baseline(year)[:, baseline_col_idx]
                 * imp[:, baseline_col_idx]
                 + imp_count[:, baseline_col_idx]
-            ) / scale
+            )
             i_county = (
                 pred[:, proj_col_idx] * imp[:, baseline_col_idx]
                 + imp_count[:, baseline_col_idx]
-            ) / scale
-
-            if intervention not in REMOVE_INTERVENTIONS:
-                i_county = jnp.where(
-                    True,  # int_in_common_mask,
-                    jnp.minimum(i_county, b_county),
-                    i_county,
-                )
-            elif intervention in REMOVE_INTERVENTIONS:
-                i_county = jnp.where(
-                    True,  # int_in_common_mask,
-                    jnp.maximum(i_county, b_county),
-                    i_county,
-                )
+            )
+            # NOTE: no intervention bound here (INTERVENTION BOUND in
+            # SCENARIO BOUNDS at the top of analysis/figure_validation_and_
+            # risk_projections.py): i_county used to be capped at b_county
+            # with jnp.minimum
 
             cumulative_baseline_by_county = (
                 b_county
@@ -995,15 +887,17 @@ def plot_intervention_effects(
                 ),
                 schema_overrides={"fips": pl.String},
             )
-            base_2026 = pl.read_csv(
-                os.path.join(output_dir, "projection_dataset_2026.csv"),
+            base_values = pl.read_csv(
+                os.path.join(
+                    output_dir, "projection_dataset_baseline_2027.csv"
+                ),
                 schema_overrides={"fips": pl.String},
-            ).filter(pl.col("type") == "projection")
+            )
 
             # Join to get baseline coverage
             coverage_comparison = (
                 int_base.join(
-                    base_2026.select(
+                    base_values.select(
                         [
                             "fips",
                             pl.col("estimated_mmr_cov").alias("baseline_cov"),
@@ -1108,12 +1002,11 @@ def create_supplemental_nme_ban_interventions_figure(
     future_years,
     vaccination_scenarios,
     vaccination_scenario_labels,
-    all_scenario_baseline_samples,
-    all_scenario_intervention_data,
+    load_baseline,
+    load_intervention,
     importation_samples,
     importation_count_samples,
     baseline_fips,
-    scale,
     output_path,
 ):
     """
@@ -1167,63 +1060,7 @@ def create_supplemental_nme_ban_interventions_figure(
                 ha="right",
             )
 
-    # First pass: collect all y-values to set shared y-axis limits
-    all_y_values = []
-
-    for idx, scenario in enumerate(vaccination_scenarios):
-        baseline_samples_by_year = all_scenario_baseline_samples[scenario]
-        intervention_data = all_scenario_intervention_data[scenario]
-
-        fips_to_idx = {f: i for i, f in enumerate(baseline_fips)}
-
-        for intervention in interventions:
-            first_pkg = intervention_data[intervention][future_years[0]]
-            first_fips_list = first_pkg["fips"]
-            proj_fips_to_idx = {f: j for j, f in enumerate(first_fips_list)}
-            common_fips = [f for f in baseline_fips if f in proj_fips_to_idx]
-            baseline_col_idx = jnp.array([fips_to_idx[f] for f in common_fips])
-            proj_col_idx = jnp.array(
-                [proj_fips_to_idx[f] for f in common_fips]
-            )
-
-            cumulative_total_by_county = None
-            cumulative_baseline_by_county = None
-
-            for year in future_years:
-                pkg = intervention_data[intervention][year]
-                pred = pkg["predictions"]
-
-                b_county = (
-                    baseline_samples_by_year[year][:, baseline_col_idx]
-                    * importation_samples[:, baseline_col_idx]
-                    + importation_count_samples[:, baseline_col_idx]
-                ) / scale
-                i_county = (
-                    pred[:, proj_col_idx]
-                    * importation_samples[:, baseline_col_idx]
-                    + importation_count_samples[:, baseline_col_idx]
-                ) / scale
-
-                i_county = jnp.minimum(i_county, b_county)
-
-                cumulative_baseline_by_county = (
-                    b_county
-                    if cumulative_baseline_by_county is None
-                    else cumulative_baseline_by_county + b_county
-                )
-                cumulative_total_by_county = (
-                    i_county
-                    if cumulative_total_by_county is None
-                    else cumulative_total_by_county + i_county
-                )
-
-                cumulative_diffs = jnp.sum(
-                    cumulative_total_by_county - cumulative_baseline_by_county,
-                    axis=1,
-                )
-                all_y_values.extend(cumulative_diffs)
-
-    # Second pass: plot with shared y-limits and modified legend handling
+    # Plot each scenario, with a single shared legend added below
     for idx, scenario in enumerate(vaccination_scenarios):
         row = idx // 2
         col = idx % 2
@@ -1235,12 +1072,13 @@ def create_supplemental_nme_ban_interventions_figure(
             interventions=interventions,
             intervention_labels=intervention_labels,
             future_years=future_years,
-            baseline_samples_by_year=all_scenario_baseline_samples[scenario],
-            intervention_data=all_scenario_intervention_data[scenario],
+            load_baseline=lambda year: load_baseline(scenario, year),
+            load_intervention=lambda intervention, year: load_intervention(
+                intervention, scenario, year
+            ),
             importation_samples=importation_samples,
             importation_count_samples=importation_count_samples,
             baseline_fips=baseline_fips,
-            scale=scale,
             fig=fig,
             ax=ax,
         )
@@ -1331,6 +1169,47 @@ def create_supplemental_nme_ban_interventions_figure(
     )
 
 
+def _draw_loaders(output_dir, baseline_fips):
+    """The loaders of the baseline draws of a scenario and year (one column
+    per county of `baseline_fips`) and of an intervention's draws (its fips and
+    predictions), from the files in `output_dir`."""
+
+    def load_baseline(vac_scenario, year):
+        return require_width(
+            load_samples(
+                os.path.join(
+                    output_dir,
+                    f"risk_projections_{vac_scenario}_{year}_globals_prior_sd={GLOBALS_PRIOR_SD}.npz",
+                )
+            ),
+            len(baseline_fips),
+            "baseline draws",
+        )
+
+    def load_intervention(intervention, vac_scenario, year):
+        return load_samples(
+            os.path.join(
+                output_dir,
+                f"risk_projections_{intervention}_{vac_scenario}_{year}.npz",
+            )
+        )
+
+    return load_baseline, load_intervention
+
+
+def _locations(output_dir, columns):
+    """The state, county and population of each county, from the 2027
+    projection dataset."""
+    return (
+        pl.read_csv(
+            os.path.join(output_dir, "projection_dataset_baseline_2027.csv"),
+            schema_overrides={"fips": pl.String},
+        )
+        .select(columns)
+        .unique()
+    )
+
+
 def create_intervention_effects_table(
     all_interventions,
     vaccination_scenarios,
@@ -1339,306 +1218,33 @@ def create_intervention_effects_table(
     importation_samples,
     importation_count_samples,
     baseline_fips,
-    scale,
     output_path,
 ):
     """
     Create a supplemental table with % change in outbreak size by county
-    for each intervention, vaccination scenario, and year.
-
-    Returns one row per county-year-scenario-intervention combination.
-    RAM-efficient: loads pickle files one at a time.
+    for each intervention, vaccination scenario, and year (one row per
+    county-year-scenario-intervention combination), and save it.
+    RAM-efficient: loads the files one at a time.
     """
-    fips_to_idx = {f: i for i, f in enumerate(baseline_fips)}
-    imp = importation_samples
-    imp_count = importation_count_samples
-
-    # Load state, county names, and population from projection dataset
-    fips_to_location = {}
-    location_df = (
-        pl.read_csv(
-            os.path.join(output_dir, "projection_dataset_2026.csv"),
-            schema_overrides={"fips": pl.String},
-        )
-        .select(["fips", "state", "county", "pop"])
-        .unique()
+    load_baseline, load_intervention = _draw_loaders(output_dir, baseline_fips)
+    results_df = scenario_tables.county_intervention_effects(
+        all_interventions,
+        vaccination_scenarios,
+        future_years,
+        load_baseline,
+        load_intervention,
+        _locations(output_dir, ["fips", "state", "county", "pop"]),
+        importation_samples,
+        importation_count_samples,
+        baseline_fips,
+        VACCINATION_SCENARIO_LABELS,
+        INTERVENTION_TABLE_LABELS,
     )
-
-    for row in location_df.iter_rows(named=True):
-        fips_to_location[row["fips"]] = {
-            "state": row["state"],
-            "county": row["county"],
-            "pop": row["pop"],
-        }
-
-    all_rows = []
-
-    # Loop through all combinations
-    for vac_scenario in vaccination_scenarios:
-        print(f"Processing vaccination scenario: {vac_scenario}")
-
-        for intervention in all_interventions:
-            print(f"  Processing intervention: {intervention}")
-
-            # Track cumulative cases across years for each county
-            cumulative_baseline_by_county = None
-            cumulative_intervention_by_county = None
-
-            # Get FIPS mapping from first year
-            first_year = future_years[0]
-
-            # Load intervention data for first year to get FIPS list
-            with open(
-                os.path.join(
-                    output_dir,
-                    f"risk_projections_{intervention}_{vac_scenario}_{first_year}.pkl",
-                ),
-                "rb",
-            ) as f:
-                first_pkg = pickle.load(f)
-
-            first_fips_list = first_pkg["fips"]
-            proj_fips_to_idx = {f: j for j, f in enumerate(first_fips_list)}
-
-            # Find common counties
-            common_fips = [f for f in baseline_fips if f in proj_fips_to_idx]
-            baseline_col_idx = jnp.array([fips_to_idx[f] for f in common_fips])
-            proj_col_idx = jnp.array(
-                [proj_fips_to_idx[f] for f in common_fips]
-            )
-
-            # Get population for common counties
-            common_pop = jnp.array(
-                [fips_to_location[f]["pop"] for f in common_fips]
-            )
-
-            del first_pkg  # Free memory
-
-            for year in future_years:
-                # Load baseline samples for this year and scenario
-                with open(
-                    os.path.join(
-                        output_dir,
-                        f"risk_projections_{vac_scenario}_{year}_globals_prior_sd={GLOBALS_PRIOR_SD}.pkl",
-                    ),
-                    "rb",
-                ) as f:
-                    baseline_samples = pickle.load(f)
-
-                # Load intervention samples for this year, scenario, and intervention
-                with open(
-                    os.path.join(
-                        output_dir,
-                        f"risk_projections_{intervention}_{vac_scenario}_{year}.pkl",
-                    ),
-                    "rb",
-                ) as f:
-                    intervention_pkg = pickle.load(f)
-
-                pred = intervention_pkg["predictions"]
-
-                # Calculate cases for this year
-                # Baseline: (n_samples, n_common_counties)
-                b_county = (
-                    baseline_samples[:, baseline_col_idx]
-                    * imp[:, baseline_col_idx]
-                    + imp_count[:, baseline_col_idx]
-                ) / scale
-
-                # Intervention: (n_samples, n_common_counties)
-                i_county = (
-                    pred[:, proj_col_idx] * imp[:, baseline_col_idx]
-                    + imp_count[:, baseline_col_idx]
-                ) / scale
-
-                # Apply constraint: intervention cannot make things worse
-                i_county = jnp.minimum(i_county, b_county)
-
-                # Free memory
-                del baseline_samples, intervention_pkg, pred
-
-                # --- SINGLE-YEAR risk percentiles ---
-                # Count-based rank: shape (n_samples, n_common_counties) -> (n_common_counties,)
-                intervention_count_rank = mean_percentile_rank(
-                    np.array(i_county)
-                )
-
-                # Incidence-based rank: cases / population
-                i_county_incidence = i_county / common_pop.reshape(1, -1)
-                intervention_incidence_rank = mean_percentile_rank(
-                    np.array(i_county_incidence)
-                )
-
-                # --- SINGLE-YEAR percent change (intervention vs baseline for this year only) ---
-                # Shape: (n_samples, n_common_counties)
-                pct_change_samples = jnp.where(
-                    b_county > 0, ((i_county - b_county) / b_county) * 100, 0.0
-                )
-
-                pct_change_mean = jnp.mean(pct_change_samples, axis=0)  # type: ignore
-                pct_change_median = jnp.median(pct_change_samples, axis=0)  # type: ignore
-                pct_change_p025 = jnp.percentile(
-                    pct_change_samples,  # type: ignore
-                    2.5,
-                    axis=0,
-                )
-                pct_change_p975 = jnp.percentile(
-                    pct_change_samples,  # type: ignore
-                    97.5,
-                    axis=0,
-                )
-
-                del pct_change_samples
-
-                # --- CUMULATIVE percent change ---
-                # Accumulate across years
-                if cumulative_baseline_by_county is None:
-                    cumulative_baseline_by_county = b_county
-                    cumulative_intervention_by_county = i_county
-                else:
-                    cumulative_baseline_by_county = (
-                        cumulative_baseline_by_county + b_county
-                    )
-                    cumulative_intervention_by_county = (
-                        cumulative_intervention_by_county + i_county  # type: ignore
-                    )
-
-                # Calculate cumulative percent change for EACH SAMPLE
-                # Shape: (n_samples, n_common_counties)
-                cumulative_pct_change_samples = jnp.where(
-                    cumulative_baseline_by_county > 0,
-                    (
-                        (
-                            cumulative_intervention_by_county
-                            - cumulative_baseline_by_county
-                        )
-                        / cumulative_baseline_by_county
-                    )
-                    * 100,
-                    0.0,
-                )
-
-                cumulative_pct_change_mean = jnp.mean(
-                    cumulative_pct_change_samples,  # type: ignore
-                    axis=0,
-                )
-                cumulative_pct_change_median = jnp.median(
-                    cumulative_pct_change_samples,  # type: ignore
-                    axis=0,
-                )
-                cumulative_pct_change_p025 = jnp.percentile(
-                    cumulative_pct_change_samples,  # type: ignore
-                    2.5,
-                    axis=0,
-                )
-                cumulative_pct_change_p975 = jnp.percentile(
-                    cumulative_pct_change_samples,  # type: ignore
-                    97.5,
-                    axis=0,
-                )
-
-                # Create rows for each county
-                for i, fips in enumerate(common_fips):
-                    location = fips_to_location.get(
-                        fips,
-                        {"state": "Unknown", "county": "Unknown", "pop": 0},
-                    )
-                    all_rows.append(
-                        {
-                            "state": location["state"],
-                            "county": location["county"],
-                            "fips": fips,
-                            "year": year,
-                            "vaccination_scenario": VACCINATION_SCENARIO_LABELS[
-                                vac_scenario
-                            ],
-                            "intervention": INTERVENTION_TABLE_LABELS[
-                                intervention
-                            ],  # Changed
-                            "intervention_count_risk_percentile": float(
-                                intervention_count_rank[i]
-                            ),
-                            "intervention_incidence_risk_percentile": float(
-                                intervention_incidence_rank[i]
-                            ),
-                            "pct_change_mean": float(pct_change_mean[i]),
-                            "pct_change_median": float(pct_change_median[i]),
-                            "pct_change_p025": float(pct_change_p025[i]),
-                            "pct_change_p975": float(pct_change_p975[i]),
-                            "cumulative_pct_change_mean": float(
-                                cumulative_pct_change_mean[i]
-                            ),
-                            "cumulative_pct_change_median": float(
-                                cumulative_pct_change_median[i]
-                            ),
-                            "cumulative_pct_change_p025": float(
-                                cumulative_pct_change_p025[i]
-                            ),
-                            "cumulative_pct_change_p975": float(
-                                cumulative_pct_change_p975[i]
-                            ),
-                        }
-                    )
-
-                # Free memory after processing this year
-                del b_county, i_county, cumulative_pct_change_samples
-                del (
-                    i_county_incidence,
-                    intervention_count_rank,
-                    intervention_incidence_rank,
-                )
-
-            # Free cumulative arrays before moving to next intervention
-            del (
-                cumulative_baseline_by_county,
-                cumulative_intervention_by_county,
-            )
-
-    # Convert to DataFrame and save
-    results_df = pl.DataFrame(all_rows)
-
-    # Sort for easier reading
-    results_df = results_df.sort(
-        ["vaccination_scenario", "intervention", "year", "state", "county"]
-    )
-
     results_df.write_csv(output_path)
     print(f"\nIntervention effects table saved to {output_path}")
     print(f"Total rows: {len(results_df)}")
 
     return results_df
-
-
-def mean_percentile_rank(samples_2d: np.ndarray) -> np.ndarray:
-    """
-    For each posterior draw, rank units, shift to 0-based, convert to percentiles,
-    then average percentiles across draws.
-
-    Parameters
-    ----------
-    samples_2d : np.ndarray, shape (n_draws, n_units)
-
-    Returns
-    -------
-    np.ndarray, shape (n_units,), values in [0, 100]
-    """
-    from scipy.stats import rankdata
-
-    percentile_method = "average"
-
-    # rank each draw across units; shape stays (n_draws, n_units)
-    ranked = np.apply_along_axis(
-        lambda row: rankdata(row, method=percentile_method),
-        axis=1,
-        arr=samples_2d,
-    )
-    # shift to 0-based so the lowest unit gets exactly 0
-    ranked = ranked - 1
-    # divide each draw by that draw's max rank → percentiles in [0, 1]
-    max_per_draw = ranked.max(axis=1, keepdims=True)  # shape (n_draws, 1)
-    percentiles = ranked / max_per_draw  # shape (n_draws, n_units)
-    # average across draws, scale to [0, 100]
-    return percentiles.mean(axis=0) * 100
 
 
 def create_state_intervention_effects_table(
@@ -1649,303 +1255,28 @@ def create_state_intervention_effects_table(
     importation_samples,
     importation_count_samples,
     baseline_fips,
-    scale,
     output_path,
 ):
     """
-    Create state-level intervention effects table.
+    Create state-level intervention effects table and save it.
 
     RAM-efficient: processes one scenario-intervention-year at a time,
     aggregates counties to states, then discards samples.
     """
-    fips_to_idx = {f: i for i, f in enumerate(baseline_fips)}
-    imp = importation_samples
-    imp_count = importation_count_samples
-
-    # Load state mapping and population
-    location_df = (
-        pl.read_csv(
-            os.path.join(output_dir, "projection_dataset_2026.csv"),
-            schema_overrides={"fips": pl.String},
-        )
-        .select(["fips", "state", "pop"])
-        .unique()
+    load_baseline, load_intervention = _draw_loaders(output_dir, baseline_fips)
+    results_df = scenario_tables.state_intervention_effects(
+        all_interventions,
+        vaccination_scenarios,
+        future_years,
+        load_baseline,
+        load_intervention,
+        _locations(output_dir, ["fips", "state", "pop"]),
+        importation_samples,
+        importation_count_samples,
+        baseline_fips,
+        VACCINATION_SCENARIO_LABELS,
+        INTERVENTION_TABLE_LABELS,
     )
-
-    fips_to_state = dict(zip(location_df["fips"], location_df["state"]))
-
-    # Calculate state populations
-    state_pop = location_df.group_by("state").agg(
-        pl.col("pop").sum().alias("state_pop")
-    )
-    state_to_pop = dict(zip(state_pop["state"], state_pop["state_pop"]))
-
-    all_rows = []
-
-    # Loop through all combinations
-    for vac_scenario in vaccination_scenarios:
-        print(f"Processing vaccination scenario: {vac_scenario}")
-
-        for intervention in all_interventions:
-            print(f"  Processing intervention: {intervention}")
-
-            # Track cumulative cases by STATE across years
-            cumulative_baseline_by_state = {}
-            cumulative_intervention_by_state = {}
-
-            # Get FIPS mapping from first year
-            first_year = future_years[0]
-
-            with open(
-                os.path.join(
-                    output_dir,
-                    f"risk_projections_{intervention}_{vac_scenario}_{first_year}.pkl",
-                ),
-                "rb",
-            ) as f:
-                first_pkg = pickle.load(f)
-
-            first_fips_list = first_pkg["fips"]
-            proj_fips_to_idx = {f: j for j, f in enumerate(first_fips_list)}
-
-            # Find common counties
-            common_fips = [f for f in baseline_fips if f in proj_fips_to_idx]
-            baseline_col_idx = jnp.array([fips_to_idx[f] for f in common_fips])
-            proj_col_idx = jnp.array(
-                [proj_fips_to_idx[f] for f in common_fips]
-            )
-
-            # Create mapping from common_fips to states
-            fips_states = [
-                fips_to_state.get(f, "Unknown") for f in common_fips
-            ]
-            unique_states = list(set(fips_states))
-
-            # Pre-compute which column indices belong to which state
-            state_to_col_indices = {}
-            for state in unique_states:
-                state_to_col_indices[state] = jnp.array(
-                    [i for i, s in enumerate(fips_states) if s == state]
-                )
-
-            del first_pkg
-
-            for year in future_years:
-                # Load baseline samples for this year and scenario
-                with open(
-                    os.path.join(
-                        output_dir,
-                        f"risk_projections_{vac_scenario}_{year}_globals_prior_sd={GLOBALS_PRIOR_SD}.pkl",
-                    ),
-                    "rb",
-                ) as f:
-                    baseline_samples = pickle.load(f)
-
-                # Load intervention samples for this year, scenario, and intervention
-                with open(
-                    os.path.join(
-                        output_dir,
-                        f"risk_projections_{intervention}_{vac_scenario}_{year}.pkl",
-                    ),
-                    "rb",
-                ) as f:
-                    intervention_pkg = pickle.load(f)
-
-                pred = intervention_pkg["predictions"]
-
-                # Calculate cases for this year (county level)
-                # Shape: (n_samples, n_common_counties)
-                b_county = (
-                    baseline_samples[:, baseline_col_idx]
-                    * imp[:, baseline_col_idx]
-                    + imp_count[:, baseline_col_idx]
-                ) / scale
-
-                i_county = (
-                    pred[:, proj_col_idx] * imp[:, baseline_col_idx]
-                    + imp_count[:, baseline_col_idx]
-                ) / scale
-
-                # Apply constraint
-                i_county = jnp.minimum(i_county, b_county)
-
-                # Free county-level data immediately
-                del baseline_samples, intervention_pkg, pred
-
-                # Aggregate to state level for this year
-                b_state_year = {}
-                i_state_year = {}
-
-                for state in unique_states:
-                    col_indices = state_to_col_indices[state]
-                    # Sum across counties in this state for each sample
-                    # Shape: (n_samples,)
-                    b_state_year[state] = jnp.sum(
-                        b_county[:, col_indices], axis=1
-                    )
-                    i_state_year[state] = jnp.sum(
-                        i_county[:, col_indices], axis=1
-                    )
-
-                # Free county arrays
-                del b_county, i_county
-
-                # --- SINGLE-YEAR risk percentiles at state level ---
-                # Stack all states' samples for this year
-                # Shape: (n_samples, n_states)
-                i_state_year_array = jnp.stack(
-                    [i_state_year[state] for state in unique_states], axis=1
-                )
-
-                # Count-based rank
-                intervention_count_rank_states = mean_percentile_rank(
-                    np.array(i_state_year_array)
-                )
-
-                # Incidence-based rank: cases / state population
-                state_pops = jnp.array(
-                    [state_to_pop[state] for state in unique_states]
-                )
-                i_state_year_incidence = (
-                    i_state_year_array / state_pops.reshape(1, -1)
-                )
-                intervention_incidence_rank_states = mean_percentile_rank(
-                    np.array(i_state_year_incidence)
-                )
-
-                # Accumulate across years at state level
-                if not cumulative_baseline_by_state:
-                    cumulative_baseline_by_state = b_state_year
-                    cumulative_intervention_by_state = i_state_year
-                else:
-                    for state in unique_states:
-                        cumulative_baseline_by_state[state] = (
-                            cumulative_baseline_by_state[state]
-                            + b_state_year[state]
-                        )
-                        cumulative_intervention_by_state[state] = (
-                            cumulative_intervention_by_state[state]
-                            + i_state_year[state]
-                        )
-
-                # Calculate percent changes at STATE level for each sample
-                for idx, state in enumerate(unique_states):
-                    baseline_samples_state = b_state_year[state]
-                    intervention_samples_state = i_state_year[state]
-
-                    # --- SINGLE-YEAR percent change (intervention vs baseline for this year only) ---
-                    # Shape: (n_samples,)
-                    pct_change_samples_state = jnp.where(
-                        baseline_samples_state > 0,
-                        (
-                            (
-                                intervention_samples_state
-                                - baseline_samples_state
-                            )
-                            / baseline_samples_state
-                        )
-                        * 100,
-                        0.0,
-                    )
-
-                    pct_change_mean = float(jnp.mean(pct_change_samples_state))  # type: ignore
-                    pct_change_median = float(
-                        jnp.median(pct_change_samples_state)  # type: ignore
-                    )
-                    pct_change_p025 = float(
-                        jnp.percentile(pct_change_samples_state, 2.5)  # type: ignore
-                    )
-                    pct_change_p975 = float(
-                        jnp.percentile(pct_change_samples_state, 97.5)  # type: ignore
-                    )
-
-                    # --- CUMULATIVE percent change ---
-                    cumulative_baseline_samples_state = (
-                        cumulative_baseline_by_state[state]
-                    )
-                    cumulative_intervention_samples_state = (
-                        cumulative_intervention_by_state[state]
-                    )
-
-                    # Shape: (n_samples,)
-                    cumulative_pct_change_samples_state = jnp.where(
-                        cumulative_baseline_samples_state > 0,
-                        (
-                            (
-                                cumulative_intervention_samples_state
-                                - cumulative_baseline_samples_state
-                            )
-                            / cumulative_baseline_samples_state
-                        )
-                        * 100,
-                        0.0,
-                    )
-
-                    cumulative_pct_change_mean = float(
-                        jnp.mean(cumulative_pct_change_samples_state)  # type: ignore
-                    )
-                    cumulative_pct_change_median = float(
-                        jnp.median(cumulative_pct_change_samples_state)  # type: ignore
-                    )
-                    cumulative_pct_change_p025 = float(
-                        jnp.percentile(
-                            cumulative_pct_change_samples_state,  # type: ignore
-                            2.5,  # type: ignore
-                        )
-                    )
-                    cumulative_pct_change_p975 = float(
-                        jnp.percentile(
-                            cumulative_pct_change_samples_state,  # type: ignore
-                            97.5,  # type: ignore
-                        )
-                    )
-
-                    all_rows.append(
-                        {
-                            "state": state,
-                            "year": year,
-                            "vaccination_scenario": VACCINATION_SCENARIO_LABELS[
-                                vac_scenario
-                            ],
-                            "intervention": INTERVENTION_TABLE_LABELS[
-                                intervention
-                            ],  # Changed
-                            "intervention_count_risk_percentile": float(
-                                intervention_count_rank_states[idx]
-                            ),
-                            "intervention_incidence_risk_percentile": float(
-                                intervention_incidence_rank_states[idx]
-                            ),
-                            "pct_change_mean": pct_change_mean,
-                            "pct_change_median": pct_change_median,
-                            "pct_change_p025": pct_change_p025,
-                            "pct_change_p975": pct_change_p975,
-                            "cumulative_pct_change_mean": cumulative_pct_change_mean,
-                            "cumulative_pct_change_median": cumulative_pct_change_median,
-                            "cumulative_pct_change_p025": cumulative_pct_change_p025,
-                            "cumulative_pct_change_p975": cumulative_pct_change_p975,
-                        }
-                    )
-
-                # Free year-level state data
-                del b_state_year, i_state_year
-                del i_state_year_array, i_state_year_incidence
-                del (
-                    intervention_count_rank_states,
-                    intervention_incidence_rank_states,
-                )
-
-            # Free cumulative state arrays before moving to next intervention
-            del cumulative_baseline_by_state, cumulative_intervention_by_state
-
-    # Convert to DataFrame and save
-    results_df = pl.DataFrame(all_rows)
-
-    # Sort for easier reading
-    results_df = results_df.sort(
-        ["vaccination_scenario", "intervention", "year", "state"]
-    )
-
     results_df.write_csv(output_path)
     print(f"\nState-level intervention effects table saved to {output_path}")
     print(f"Total rows: {len(results_df)}")
@@ -1961,244 +1292,27 @@ def create_nationwide_summary_table(
     importation_samples,
     importation_count_samples,
     baseline_fips,
-    scale,
     output_path,
 ):
     """
-    Create nationwide summary table with total cases across all counties.
-
-    Returns one row per (vaccination_scenario, intervention, year) combination
-    with mean, median, and credible intervals for both single-year and cumulative
-    nationwide cases.
+    Create nationwide summary table with total cases across all counties and
+    save it: one row per (vaccination_scenario, intervention, year)
+    combination with mean, median, and credible intervals for both single-year
+    and cumulative nationwide cases.
     """
-    fips_to_idx = {f: i for i, f in enumerate(baseline_fips)}
-    imp = importation_samples
-    imp_count = importation_count_samples
-
-    all_rows = []
-
-    # First, process baseline scenarios (no intervention)
-    for vac_scenario in vaccination_scenarios:
-        print(f"Processing baseline for vaccination scenario: {vac_scenario}")
-
-        cumulative_baseline_nationwide = None
-
-        for year in future_years:
-            # Load baseline samples for this year and scenario
-            with open(
-                os.path.join(
-                    output_dir,
-                    f"risk_projections_{vac_scenario}_{year}_globals_prior_sd={GLOBALS_PRIOR_SD}.pkl",
-                ),
-                "rb",
-            ) as f:
-                baseline_samples = pickle.load(f)
-
-            # Calculate cases for this year across all counties
-            # Shape: (n_samples, n_counties)
-            b_nationwide = (baseline_samples * imp + imp_count) / scale
-
-            # Sum across all counties for each sample
-            # Shape: (n_samples,)
-            b_nationwide_total = jnp.sum(b_nationwide, axis=1)
-
-            del baseline_samples, b_nationwide
-
-            # Calculate single-year summary statistics
-            single_year_mean = float(jnp.mean(b_nationwide_total))
-            single_year_median = float(jnp.median(b_nationwide_total))
-            single_year_p025 = float(jnp.percentile(b_nationwide_total, 2.5))
-            single_year_p975 = float(jnp.percentile(b_nationwide_total, 97.5))
-
-            # Accumulate across years
-            if cumulative_baseline_nationwide is None:
-                cumulative_baseline_nationwide = b_nationwide_total
-            else:
-                cumulative_baseline_nationwide = (
-                    cumulative_baseline_nationwide + b_nationwide_total
-                )
-
-            # Calculate cumulative summary statistics
-            cumulative_mean = float(jnp.mean(cumulative_baseline_nationwide))
-            cumulative_median = float(
-                jnp.median(cumulative_baseline_nationwide)
-            )
-            cumulative_p025 = float(
-                jnp.percentile(cumulative_baseline_nationwide, 2.5)
-            )
-            cumulative_p975 = float(
-                jnp.percentile(cumulative_baseline_nationwide, 97.5)
-            )
-
-            # Append the results for this year
-            all_rows.append(
-                {
-                    "vaccination_scenario": VACCINATION_SCENARIO_LABELS[
-                        vac_scenario
-                    ],
-                    "intervention": "baseline",
-                    "year": year,
-                    "single_year_cases_mean": single_year_mean,
-                    "single_year_cases_median": single_year_median,
-                    "single_year_cases_p025": single_year_p025,
-                    "single_year_cases_p975": single_year_p975,
-                    "cumulative_cases_mean": cumulative_mean,
-                    "cumulative_cases_median": cumulative_median,
-                    "cumulative_cases_p025": cumulative_p025,
-                    "cumulative_cases_p975": cumulative_p975,
-                }
-            )
-
-            del b_nationwide_total
-
-        del cumulative_baseline_nationwide
-
-    # Now process interventions
-    for vac_scenario in vaccination_scenarios:
-        print(
-            f"Processing interventions for vaccination scenario: {vac_scenario}"
-        )
-
-        for intervention in all_interventions:
-            print(f"  Processing intervention: {intervention}")
-
-            cumulative_intervention_nationwide = None
-
-            # Get FIPS mapping from first year
-            first_year = future_years[0]
-
-            with open(
-                os.path.join(
-                    output_dir,
-                    f"risk_projections_{intervention}_{vac_scenario}_{first_year}.pkl",
-                ),
-                "rb",
-            ) as f:
-                first_pkg = pickle.load(f)
-
-            first_fips_list = first_pkg["fips"]
-            proj_fips_to_idx = {f: j for j, f in enumerate(first_fips_list)}
-
-            # Find common counties
-            common_fips = [f for f in baseline_fips if f in proj_fips_to_idx]
-            baseline_col_idx = jnp.array([fips_to_idx[f] for f in common_fips])
-            proj_col_idx = jnp.array(
-                [proj_fips_to_idx[f] for f in common_fips]
-            )
-
-            del first_pkg
-
-            for year in future_years:
-                # Load baseline for constraint
-                with open(
-                    os.path.join(
-                        output_dir,
-                        f"risk_projections_{vac_scenario}_{year}_globals_prior_sd={GLOBALS_PRIOR_SD}.pkl",
-                    ),
-                    "rb",
-                ) as f:
-                    baseline_samples = pickle.load(f)
-
-                # Load intervention samples
-                with open(
-                    os.path.join(
-                        output_dir,
-                        f"risk_projections_{intervention}_{vac_scenario}_{year}.pkl",
-                    ),
-                    "rb",
-                ) as f:
-                    intervention_pkg = pickle.load(f)
-
-                pred = intervention_pkg["predictions"]
-
-                # Calculate baseline cases for constraint
-                b_county = (
-                    baseline_samples[:, baseline_col_idx]
-                    * imp[:, baseline_col_idx]
-                    + imp_count[:, baseline_col_idx]
-                ) / scale
-
-                # Calculate intervention cases
-                i_county = (
-                    pred[:, proj_col_idx] * imp[:, baseline_col_idx]
-                    + imp_count[:, baseline_col_idx]
-                ) / scale
-
-                # Apply constraint: intervention cannot make things worse
-                i_county = jnp.minimum(i_county, b_county)
-
-                del baseline_samples, intervention_pkg, pred, b_county
-
-                # Sum across all counties for each sample
-                # Shape: (n_samples,)
-                i_nationwide_total = jnp.sum(i_county, axis=1)
-
-                del i_county
-
-                # Calculate single-year summary statistics
-                single_year_mean = float(jnp.mean(i_nationwide_total))
-                single_year_median = float(jnp.median(i_nationwide_total))
-                single_year_p025 = float(
-                    jnp.percentile(i_nationwide_total, 2.5)
-                )
-                single_year_p975 = float(
-                    jnp.percentile(i_nationwide_total, 97.5)
-                )
-
-                # Accumulate across years
-                if cumulative_intervention_nationwide is None:
-                    cumulative_intervention_nationwide = i_nationwide_total
-                else:
-                    cumulative_intervention_nationwide = (
-                        cumulative_intervention_nationwide + i_nationwide_total
-                    )
-
-                # Calculate cumulative summary statistics
-                cumulative_mean = float(
-                    jnp.mean(cumulative_intervention_nationwide)
-                )
-                cumulative_median = float(
-                    jnp.median(cumulative_intervention_nationwide)
-                )
-                cumulative_p025 = float(
-                    jnp.percentile(cumulative_intervention_nationwide, 2.5)
-                )
-                cumulative_p975 = float(
-                    jnp.percentile(cumulative_intervention_nationwide, 97.5)
-                )
-                # Append the results for this year
-                all_rows.append(
-                    {
-                        "vaccination_scenario": VACCINATION_SCENARIO_LABELS[
-                            vac_scenario
-                        ],
-                        "intervention": INTERVENTION_TABLE_LABELS[
-                            intervention
-                        ],  # Changed
-                        "year": year,
-                        "single_year_cases_mean": single_year_mean,
-                        "single_year_cases_median": single_year_median,
-                        "single_year_cases_p025": single_year_p025,
-                        "single_year_cases_p975": single_year_p975,
-                        "cumulative_cases_mean": cumulative_mean,
-                        "cumulative_cases_median": cumulative_median,
-                        "cumulative_cases_p025": cumulative_p025,
-                        "cumulative_cases_p975": cumulative_p975,
-                    }
-                )
-
-                del i_nationwide_total
-
-            del cumulative_intervention_nationwide
-
-    # Convert to DataFrame and save
-    results_df = pl.DataFrame(all_rows)
-
-    # Sort for easier reading
-    results_df = results_df.sort(
-        ["vaccination_scenario", "intervention", "year"]
+    load_baseline, load_intervention = _draw_loaders(output_dir, baseline_fips)
+    results_df = scenario_tables.nationwide_summary(
+        all_interventions,
+        vaccination_scenarios,
+        future_years,
+        load_baseline,
+        load_intervention,
+        importation_samples,
+        importation_count_samples,
+        baseline_fips,
+        VACCINATION_SCENARIO_LABELS,
+        INTERVENTION_TABLE_LABELS,
     )
-
     results_df.write_csv(output_path)
     print(f"\nNationwide summary table saved to {output_path}")
     print(f"Total rows: {len(results_df)}")
@@ -2245,25 +1359,26 @@ if __name__ == "__main__":
         ha="right",
     )
 
-    # load the NME data for the map — using the assembled projection results
-    # which has the latest NME values per county
+    # load the NME data for the map: the latest observed value of each county
+    # (a county with no value of its own gets its state's), not the value
+    # brought forward to 2026 that the model uses
     df = pl.read_csv(
-        os.path.join(output_dir, "projection_dataset_2026.csv"),
+        os.path.join(data_dir, "2026_vaccination_data.csv"),
         schema_overrides={"fips": pl.String},
-    )
+    ).filter(pl.col("fips").str.len_chars() == 5)
 
-    print(df["nonmed_exempt_pct"].describe())
+    print(df["nonmed_exempt_pct_observed"].describe())
     print(
         df.filter(
             ~pl.col("state").is_in(
                 ["California", "Connecticut", "Maine", "New York"]
             )
-        )["nonmed_exempt_pct"].describe()
+        )["nonmed_exempt_pct_observed"].describe()
     )
 
     map_fips_code_data(
         df["fips"],
-        df["nonmed_exempt_pct"],
+        df["nonmed_exempt_pct_observed"],
         fig,
         ax_a,
         cbar_label="Nonmedical exemption rate (%)",
@@ -2284,6 +1399,7 @@ if __name__ == "__main__":
         va="top",
         ha="right",
     )
+    # the state values the imputation filled in are left out of the ban estimate
     vac_df = pl.read_csv(
         os.path.join(data_dir, "processed_vaccinations_data.csv"),
         schema_overrides={
@@ -2291,7 +1407,7 @@ if __name__ == "__main__":
             "estimated_mmr_cov": pl.Float64,
             "nonmed_exempt_pct": pl.Float64,
         },
-    )
+    ).filter(~pl.col("_is_imputed"))
     regression_df = coverage_increase_nme_policy_change(
         vac_df,
         fig,
@@ -2307,38 +1423,25 @@ if __name__ == "__main__":
     # -------------------------------------------------------------------------
     # Load shared data for subplot c
     # -------------------------------------------------------------------------
-    with open(os.path.join(output_dir, "scale_2025.pkl"), "rb") as f:
-        scale_2025 = pickle.load(f)
-
     (
-        importation_samples_future,
-        importation_count_samples_future,
+        importation_probability,
+        importation_counts,
         baseline_fips,
     ) = load_importation_samples_future(output_dir)
+    # conditioned on the level of 2025 once, here: every figure and table below
+    # uses these two arrays
+    with open(os.path.join(output_dir, "import_scaler_2025.pkl"), "rb") as f:
+        import_scaler_2025 = pickle.load(f)
+    importation_samples_scaled = scale_importation_probability(
+        importation_probability, import_scaler_2025
+    )
+    importation_count_samples_scaled = importation_counts * import_scaler_2025
+    del importation_probability, importation_counts
 
-    baseline_samples_by_year = {}
-    for year in FUTURE_YEARS:
-        with open(
-            os.path.join(
-                output_dir,
-                f"risk_projections_baseline_{year}_globals_prior_sd={GLOBALS_PRIOR_SD}.pkl",
-            ),
-            "rb",
-        ) as f:
-            baseline_samples_by_year[year] = pickle.load(f)
-
-    intervention_data = {}
-    for intervention in INTERVENTIONS:
-        intervention_data[intervention] = {}
-        for year in FUTURE_YEARS:
-            with open(
-                os.path.join(
-                    output_dir,
-                    f"risk_projections_{intervention}_baseline_{year}.pkl",
-                ),
-                "rb",
-            ) as f:
-                intervention_data[intervention][year] = pickle.load(f)
+    # the draws are loaded one at a time where they are used (several GB
+    # together): the baseline of a scenario and year, and the draws of an
+    # intervention
+    load_baseline, load_intervention = _draw_loaders(output_dir, baseline_fips)
 
     # -------------------------------------------------------------------------
     # Subplot c: intervention effects (now spanning full width)
@@ -2354,29 +1457,17 @@ if __name__ == "__main__":
         ha="right",
     )
 
-    with open(
-        os.path.join(
-            output_dir,
-            "import_scaler_2025.pkl",
-        ),
-        "rb",
-    ) as f:
-        import_scaler_2025 = pickle.load(f)
-
     plot_intervention_effects(
         interventions=INTERVENTIONS,
         intervention_labels=INTERVENTION_LABELS,
         future_years=FUTURE_YEARS,
-        baseline_samples_by_year=baseline_samples_by_year,
-        intervention_data=intervention_data,
-        importation_samples=jnp.minimum(
-            importation_samples_future * import_scaler_2025, 1
+        load_baseline=lambda year: load_baseline("baseline", year),
+        load_intervention=lambda intervention, year: load_intervention(
+            intervention, "baseline", year
         ),
-        importation_count_samples=(
-            importation_count_samples_future * import_scaler_2025
-        ),
+        importation_samples=importation_samples_scaled,
+        importation_count_samples=importation_count_samples_scaled,
         baseline_fips=baseline_fips,
-        scale=scale_2025,
         fig=fig,
         ax=ax_c,
     )
@@ -2407,72 +1498,15 @@ if __name__ == "__main__":
         "no_change",
     ]
 
-    # Load baseline samples for each vaccination scenario
-    all_scenario_baseline_samples = {}
-    for vac_scenario in vaccination_scenarios_to_plot:
-        all_scenario_baseline_samples[vac_scenario] = {}
-        for year in FUTURE_YEARS:
-            with open(
-                os.path.join(
-                    output_dir,
-                    f"risk_projections_{vac_scenario}_{year}_globals_prior_sd={GLOBALS_PRIOR_SD}.pkl",
-                ),
-                "rb",
-            ) as f:
-                all_scenario_baseline_samples[vac_scenario][year] = (
-                    pickle.load(f)
-                )
-
-    # Load ALL intervention data for each vaccination scenario
-    all_interventions = [
-        "ban_top_risk_states",
-        "ban_top_nme_states",
-        "ban_top_risk_counties",
-        # "improve_cases_previously_counties",
-        # "improve_bottom_decile_5pct",
-        # "improve_bottom_decile_10pct",
-        # "improve_top_risk_states_5pct",
-        # "improve_top_risk_states_10pct",
-        # "improve_top_risk_counties_5pct",
-        # "improve_top_risk_counties_10pct",
-    ]
-
-    all_scenario_intervention_data = {}
-    for vac_scenario in vaccination_scenarios_to_plot:
-        all_scenario_intervention_data[vac_scenario] = {}
-        for intervention in all_interventions:
-            all_scenario_intervention_data[vac_scenario][intervention] = {}
-            for year in FUTURE_YEARS:
-                try:
-                    with open(
-                        os.path.join(
-                            output_dir,
-                            f"risk_projections_{intervention}_{vac_scenario}_{year}.pkl",
-                        ),
-                        "rb",
-                    ) as f:
-                        all_scenario_intervention_data[vac_scenario][
-                            intervention
-                        ][year] = pickle.load(f)
-                except FileNotFoundError:
-                    print(
-                        f"Warning: Could not find data for {intervention} in {vac_scenario} {year}"
-                    )
-
     create_supplemental_nme_ban_interventions_figure(
         future_years=FUTURE_YEARS,
         vaccination_scenarios=vaccination_scenarios_to_plot,
         vaccination_scenario_labels=VACCINATION_SCENARIO_LABELS,
-        all_scenario_baseline_samples=all_scenario_baseline_samples,
-        all_scenario_intervention_data=all_scenario_intervention_data,
-        importation_samples=jnp.minimum(
-            importation_samples_future * import_scaler_2025, 1
-        ),
-        importation_count_samples=(
-            importation_count_samples_future * import_scaler_2025
-        ),
+        load_baseline=load_baseline,
+        load_intervention=load_intervention,
+        importation_samples=importation_samples_scaled,
+        importation_count_samples=importation_count_samples_scaled,
         baseline_fips=baseline_fips,
-        scale=scale_2025,
         output_path=os.path.join(
             fig_dir,
             "figure_supplemental_nme_ban_interventions",
@@ -2498,17 +1532,12 @@ if __name__ == "__main__":
         vaccination_scenarios=[*vaccination_scenarios_to_plot, "baseline"],
         future_years=FUTURE_YEARS,
         output_dir=output_dir,  # Changed: pass output_dir instead of loaded data
-        importation_samples=jnp.minimum(
-            importation_samples_future * import_scaler_2025, 1
-        ),
-        importation_count_samples=(
-            importation_count_samples_future * import_scaler_2025
-        ),
+        importation_samples=importation_samples_scaled,
+        importation_count_samples=importation_count_samples_scaled,
         baseline_fips=baseline_fips,
-        scale=scale_2025,
         output_path=os.path.join(
             fig_dir,
-            "supplemental_data_s6a_intervention_effects_by_county.csv",
+            "supplemental_data_s5a_intervention_effects_by_county.csv",
         ),
     )
 
@@ -2517,17 +1546,12 @@ if __name__ == "__main__":
         vaccination_scenarios=[*vaccination_scenarios_to_plot, "baseline"],
         future_years=FUTURE_YEARS,
         output_dir=output_dir,
-        importation_samples=jnp.minimum(
-            importation_samples_future * import_scaler_2025, 1
-        ),
-        importation_count_samples=(
-            importation_count_samples_future * import_scaler_2025
-        ),
+        importation_samples=importation_samples_scaled,
+        importation_count_samples=importation_count_samples_scaled,
         baseline_fips=baseline_fips,
-        scale=scale_2025,
         output_path=os.path.join(
             fig_dir,
-            "supplemental_data_s6b_intervention_effects_by_state.csv",
+            "supplemental_data_s5b_intervention_effects_by_state.csv",
         ),
     )
 
@@ -2537,16 +1561,11 @@ if __name__ == "__main__":
         vaccination_scenarios=[*vaccination_scenarios_to_plot, "baseline"],
         future_years=FUTURE_YEARS,
         output_dir=output_dir,
-        importation_samples=jnp.minimum(
-            importation_samples_future * import_scaler_2025, 1
-        ),
-        importation_count_samples=(
-            importation_count_samples_future * import_scaler_2025
-        ),
+        importation_samples=importation_samples_scaled,
+        importation_count_samples=importation_count_samples_scaled,
         baseline_fips=baseline_fips,
-        scale=scale_2025,
         output_path=os.path.join(
             fig_dir,
-            "supplemental_data_s5_nationwide_vaccine_scenarios_interventions_summary.csv",
+            "supplemental_data_s4_nationwide_vaccine_scenarios_interventions_summary.csv",
         ),
     )

@@ -6,12 +6,16 @@ import numpy as np
 import polars as pl
 import yaml
 from matplotlib import rc
-from scipy.stats import gamma
 from sklearn.metrics import (
     average_precision_score,
     precision_recall_curve,
     roc_auc_score,
     roc_curve,
+)
+
+from outbreak_size.importation import (
+    IMPORT_CONDITIONING_VALIDATION_YEAR,
+    probability_at_least_one_import,
 )
 
 data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
@@ -75,6 +79,8 @@ def plot_imports_over_time(df, fig, ax):
 
 
 def plot_state_std_imports(df, fig, ax):
+    # one value per state and year (the 2025 data has a row for each place)
+    df = df.group_by(["state", "year"]).agg(pl.sum("imported"))
     df_all_years = df.group_by("state").agg(
         std=pl.std("imported"),
     )
@@ -228,13 +234,26 @@ if __name__ == "__main__":
         )
     )
 
-    # concatenate 2025 import data
+    # concatenate 2025 import data: the file and filters of
+    # 08_importation_model.py (year typo corrected, rows with a case count, no
+    # South Carolina), so that panels a and b and the scaler below count the
+    # imports the importation model used
     df_2025 = pl.read_csv(
-        os.path.join(data_dir, "analysis_dataset.csv"),
+        os.path.join(data_dir, "2025CasesImports QCed clean.csv"),
         schema_overrides={"fips": pl.String},
     )
-    df_2025 = df_2025.filter(pl.col("year") == 2025).select(
-        ["state", "year", "imported"]
+    df_2025 = df_2025.with_columns(
+        year=pl.when(pl.col("year") == 2925)
+        .then(2025)
+        .otherwise(pl.col("year"))
+    )
+    df_2025 = (
+        df_2025.filter(
+            pl.col("Lauren Case").is_not_null()
+            & (pl.col("state") != "South Carolina")
+        )
+        .filter(pl.col("year") == 2025)
+        .select(["state", "year", "imported"])
     )
 
     df = pl.concat([df, df_2025], how="diagonal_relaxed")
@@ -281,8 +300,12 @@ if __name__ == "__main__":
 
     # we want to plot empirical import probability against recorded number
     # of imports for the counties that have known import numbers
+    # every county-year with known imports (08), also the counties that are
+    # not in the analysis or projection data, with the pre-2021 posterior times
+    # the county's share of its state
     counties_with_known_imports = pl.read_csv(
-        os.path.join(output_dir, "counties_with_known_imports.csv"),
+        os.path.join(output_dir, "import_validation_county_years.csv"),
+        schema_overrides={"fips": pl.String, "place": pl.String},
     )
     import_df = pl.read_csv(
         os.path.join(output_dir, "empirical_importation_probability.csv"),
@@ -292,19 +315,34 @@ if __name__ == "__main__":
     import_df = import_df.with_columns(
         mu=pl.col("posterior_alpha") / pl.col("posterior_beta")
     )
-    count_imports = import_df.filter(pl.col("type") == "projection")
-    count_imports = count_imports.sort(by="year", descending=True)
-    count_imports = count_imports.group_by(
-        ["state", "county"], maintain_order=True
-    ).agg(
-        # for each county, take the most recent projection of import counts as the "count" of imports for that county
-        pl.first("importation_probability_mean"),
-        pl.first("importation_probability_median"),
-        pl.first("importation_probability_lower"),
-        pl.first("importation_probability_upper"),
-        pl.first("mu"),
-        pl.first("posterior_alpha"),
-        pl.first("posterior_beta"),
+    # South Carolina is left out of the observed imports above (08 uses its
+    # own South Carolina data), so it is left out of the expected imports too
+    # The expected annual imports are those of the posterior that serves the
+    # projections: the projection rows of one validation year (the posterior
+    # of all years of data, through 2025), one row per county. (This used to
+    # sort the projection rows of every validation year by the year of their
+    # vaccination data and take the first of each county; rows of equal year
+    # have no defined order, so a county could get the posterior of an earlier
+    # validation year, which uses fewer years of data.)
+    count_imports = import_df.filter(
+        (pl.col("type") == "projection")
+        & (pl.col("validation_year") == IMPORT_CONDITIONING_VALIDATION_YEAR)
+        & (pl.col("state") != "South Carolina")
+    ).select(
+        "fips",
+        "importation_probability_mean",
+        "importation_probability_median",
+        "importation_probability_lower",
+        "importation_probability_upper",
+        "mu",
+        "posterior_alpha",
+        "posterior_beta",
+    )
+    # by fips: county names are not unique within a state (e.g. Delaware's
+    # "State" or Alaska's regions)
+    assert not count_imports["fips"].is_duplicated().any(), (
+        "a county has two projection rows of the validation year "
+        f"{IMPORT_CONDITIONING_VALIDATION_YEAR}"
     )
     # sum
     print(count_imports.sum())
@@ -334,7 +372,17 @@ if __name__ == "__main__":
         f"97.5th percentile national imports: {np.percentile(national_totals, 97.5)}"
     )
 
-    print((df_2025["imported"].sum() / count_imports.sum()["mu"])[0])
+    # the scaler conditions the imports of the projections on the level of
+    # 2025: the imports of 2025 over the expected annual imports of the
+    # posterior of the projections
+    observed_imports_2025 = df_2025["imported"].sum()
+    expected_annual_imports = count_imports["mu"].sum()
+    import_scaler_2025 = observed_imports_2025 / expected_annual_imports
+    print(
+        f"imports of 2025: {observed_imports_2025}; expected annual imports "
+        f"of the posterior: {expected_annual_imports:.3f}; scaler: "
+        f"{import_scaler_2025:.4f}"
+    )
     with open(
         os.path.join(
             output_dir,
@@ -342,55 +390,37 @@ if __name__ == "__main__":
         ),
         "wb",
     ) as f:
-        pickle.dump(
-            (df_2025["imported"].sum() / count_imports.sum()["mu"])[0], f
-        )
-    counties_with_known_imports = counties_with_known_imports.join(
-        import_df, on=["year", "state", "county"], how="left"
-    )
-
+        pickle.dump(float(import_scaler_2025), f)
+    # the probabilities below use the posterior from the years before 2021, so
+    # only years from 2021 on are out-of-sample
     counties_with_known_imports = counties_with_known_imports.filter(
-        pl.col("posterior_alpha_pre_2021").is_not_null()
-        & pl.col("posterior_beta_pre_2021").is_not_null()
-        & pl.col("posterior_alpha_pre_2021_log").is_not_null()
+        pl.col("year") >= 2021
     )
-    # filter the year to be either the latest year for that county or at least
-    # be 2020
+    # the probability of at least one import in a year, as 08 distributes the
+    # state's rate to the county (see probability_at_least_one_import)
     counties_with_known_imports = counties_with_known_imports.with_columns(
-        latest_year=pl.col("year").max().over(["state", "county"])
-    )
-    counties_with_known_imports = counties_with_known_imports.filter(
-        (pl.col("year") == pl.col("latest_year")) | (pl.col("year") >= 2020)
-    )
-    counties_with_known_imports = counties_with_known_imports.with_columns(
-        # recall that gamma-poisson mixture is a negative binomial
-        # so P(X >= 1) can be calculated using a neg binomial PMF
         probability_at_least_one_import_log=pl.struct(
-            ["posterior_alpha_pre_2021_log", "posterior_beta_pre_2021"]
+            [
+                "posterior_alpha_pre_2021_log",
+                "posterior_beta_pre_2021",
+                "share_log",
+            ]
         ).map_elements(
-            lambda x: 1
-            - (
-                x["posterior_beta_pre_2021"]
-                / (
-                    x["posterior_alpha_pre_2021_log"]
-                    + x["posterior_beta_pre_2021"]
-                )
-            )
-            ** x["posterior_alpha_pre_2021_log"],
+            lambda x: probability_at_least_one_import(
+                x["posterior_alpha_pre_2021_log"],
+                x["posterior_beta_pre_2021"],
+                x["share_log"],
+            ),
             return_dtype=pl.Float64,
         ),
         probability_at_least_one_import=pl.struct(
-            ["posterior_alpha_pre_2021", "posterior_beta_pre_2021"]
+            ["posterior_alpha_pre_2021", "posterior_beta_pre_2021", "share"]
         ).map_elements(
-            lambda x: 1
-            - (
-                x["posterior_beta_pre_2021"]
-                / (
-                    x["posterior_alpha_pre_2021"]
-                    + x["posterior_beta_pre_2021"]
-                )
-            )
-            ** x["posterior_alpha_pre_2021"],
+            lambda x: probability_at_least_one_import(
+                x["posterior_alpha_pre_2021"],
+                x["posterior_beta_pre_2021"],
+                x["share"],
+            ),
             return_dtype=pl.Float64,
         ),
     )

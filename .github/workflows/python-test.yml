@@ -1,12 +1,12 @@
 name: Python Test
 
+# Runs on every push (any branch) and on every pull request
 on:
   push:
   pull_request:
-    branches: [main]
 
 jobs:
-  python-install-test:
+  pytest:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -17,14 +17,7 @@ jobs:
         with:
           enable-cache: true
 
-      - name: setup python
-        uses: actions/setup-python@v5
-        with:
-          python-version-file: "pyproject.toml"
-
-      - name: install the project
-        run: uv sync --group test
-
-      - name: run poetry tests
-        run: |
-          uv run pytest
+      # Only the `test` dependency group (pytest, numpy, polars, addfips), not
+      # the whole project: the tests use no data files and no model code.
+      - name: run the tests
+        run: uv run --locked --only-group test pytest -q

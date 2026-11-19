@@ -1,0 +1,157 @@
+import numpy as np
+import polars as pl
+import pytest
+
+from outbreak_size.county_scores import CONDITIONS
+from outbreak_size.model_selection import (
+    LARGEST_GAP_COLUMN,
+    MEAN_AUROC_COLUMN,
+    MEAN_GAP_COLUMN,
+    best_of_pool,
+    consistency_table,
+    rank_models,
+)
+
+YEARS = (2021, 2022, 2023, 2024, 2025)
+# AUROC for 5+ cases of the cases including imports, by model and year
+AUROC5 = {
+    "Statistical: A": [0.9, 0.6, 0.5, 0.7, 0.75],
+    "Statistical: B": [0.8, 0.9, 0.6, 0.6, 0.65],
+    "Statistical: C": [0.7, 0.7, 0.9, 0.8, 0.85],
+    "Mechanistic: M1": [0.5, 0.3, 0.2, 0.4, 0.45],
+    "Mechanistic: M2": [0.6, 0.2, 0.3, 0.5, 0.35],
+    "Mechanistic: M3": [0.4, 0.1, 0.1, 0.2, 0.25],
+    "Vaccine coverage rank order": [0.1, 0.1, 0.1, 0.1, 0.1],
+    "Population size rank order": [0.3, 0.3, 0.3, 0.3, 0.3],
+}
+POOLS = {
+    "Statistical": ["Statistical: A", "Statistical: B", "Statistical: C"],
+    "Mechanistic": ["Mechanistic: M1", "Mechanistic: M2", "Mechanistic: M3"],
+}
+PASS_FORWARD = {"Statistical": 1, "Mechanistic": 2}
+COMPARATORS = {
+    "Vaccine coverage ranking": "Vaccine coverage rank order",
+    "Population size ranking": "Population size rank order",
+}
+
+
+def toy_table(auroc5=AUROC5, auprc5=None):
+    """A table of scores with the columns the selection reads. The other
+    scores are fixed functions of the AUROC for 5+ cases (the AUPRC for 5+
+    cases a tenth of it, the AUROC for 10+ a point lower, the AUPRC for 10+ a
+    twentieth), and the outbreak cases score half a point higher."""
+    rows = []
+    for model, values in auroc5.items():
+        for year, au5 in zip(YEARS, values):
+            ap5 = au5 / 10 if auprc5 is None else auprc5[model][year - 2021]
+            for condition, shift in zip(CONDITIONS, (0.0, 0.5)):
+                rows.append(
+                    {
+                        "Model": model,
+                        "Evaluation year": str(year),
+                        "Condition": condition,
+                        "AUROC, 5+ (%)": au5 + shift,
+                        "AUPRC, 5+ (%)": ap5 + shift,
+                        "AUROC, 10+ (%)": au5 - 1 + shift,
+                        "AUPRC, 10+ (%)": au5 / 20 + shift,
+                    }
+                )
+    return pl.from_dicts(rows)
+
+
+def test_ranks_share_a_rank_when_every_key_ties_and_break_ties_by_the_next():
+    keys = {
+        "a": (0.9, 0.1),
+        "b": (0.9, 0.2),  # the same first key as a, a better second key
+        "c": (0.8, 0.5),
+        "d": (0.8, 0.5),  # the same as c on every key
+        "e": (-np.inf, 0.9),  # a missing first score ranks last
+    }
+    assert rank_models(keys) == {"b": 1, "a": 2, "c": 3, "d": 3, "e": 5}
+
+
+def test_consistency_of_every_model_with_the_best_of_its_pool():
+    out = consistency_table(toy_table(), POOLS, PASS_FORWARD, COMPARATORS)
+    stat = out.filter(pl.col("Pool") == "Statistical")
+    # best AUROC of the pool by year: 0.9 (A), 0.9 (B), 0.9 (C), 0.8 (C), 0.85 (C)
+    # gaps: A 0, 0.3, 0.4, 0.1, 0.1; B 0.1, 0, 0.3, 0.2, 0.2; C 0.2, 0.2, 0, 0, 0
+    # the summary is over 2022-2025: the mean gaps are A 0.225, B 0.175 and
+    # C 0.05, sorted by them
+    assert stat["Model"].to_list() == [
+        "Statistical: C",
+        "Statistical: B",
+        "Statistical: A",
+    ]
+    a = stat.filter(pl.col("Model") == "Statistical: A")
+    assert a[MEAN_GAP_COLUMN].item() == pytest.approx(0.225)
+    assert a[LARGEST_GAP_COLUMN].item() == pytest.approx(0.4)
+    assert a[MEAN_AUROC_COLUMN].item() == pytest.approx(0.6375)
+    # 2021 is in the per-year columns but not in the summary
+    assert a["Gap from the best of the pool, 2021"].item() == pytest.approx(0)
+    assert [a[f"Selection rank, {y}"].item() for y in YEARS] == [1, 3, 3, 2, 2]
+    # one place passed forward, over the 5 years: A is first only in 2021
+    assert a["Years passed forward (of 5)"].item() == 1
+    # the flags per year: A (ranks 1, 3, 3, 2, 2) was passed forward from 2021 only
+    assert a["Passed forward from 2021"].item() is True
+    assert a["Passed forward from 2022"].item() is False
+    assert a["Passed forward from 2025 (not scored later)"].item() is False
+    # the mechanistic pool passes two: M3 is always last, so M1 is in the top two every year
+    m1_flags = out.filter(pl.col("Model") == "Mechanistic: M1")
+    assert m1_flags["Passed forward from 2023"].item() is True
+    # comparators have no flags
+    assert (
+        out.filter(pl.col("Model") == "Population size rank order")[
+            "Passed forward from 2021"
+        ].item()
+        is None
+    )
+    c = stat.filter(pl.col("Model") == "Statistical: C")
+    assert c["Years passed forward (of 5)"].item() == 3
+    # the mechanistic pool passes two forward
+    m1 = out.filter(pl.col("Model") == "Mechanistic: M1")
+    assert m1["Years passed forward (of 5)"].item() == 5
+    # the comparators have their AUROC only
+    pop = out.filter(pl.col("Model") == "Population size rank order")
+    assert pop[MEAN_AUROC_COLUMN].item() == pytest.approx(0.3)
+    assert pop[MEAN_GAP_COLUMN].item() is None
+
+
+# --- the best model of a pool ---------------------------------------------------
+
+
+def test_the_best_of_a_pool_depends_on_the_years_the_gap_is_taken_over():
+    # X is the best in 2021 only; Y is the best in every later year
+    auroc = {
+        "Statistical: X": [0.9, 0.5, 0.5, 0.5, 0.5],
+        "Statistical: Y": [0.45, 0.6, 0.6, 0.6, 0.6],
+    }
+    pools = {"Statistical": list(auroc)}
+    s3 = consistency_table(toy_table(auroc), pools, {"Statistical": 1}, {})
+    # mean gap over 2021-2025: X 0.08, Y 0.09; over 2022-2025: X 0.1, Y 0
+    assert best_of_pool(s3, "Statistical", YEARS) == "Statistical: X"
+    assert best_of_pool(s3, "Statistical", YEARS[1:]) == "Statistical: Y"
+
+
+def test_two_models_with_the_same_mean_gap_are_an_error():
+    auroc = {"Statistical: X": [0.9] * 5, "Statistical: Y": [0.9] * 5}
+    s3 = consistency_table(
+        toy_table(auroc), {"Statistical": list(auroc)}, {"Statistical": 1}, {}
+    )
+    with pytest.raises(ValueError, match="tie"):
+        best_of_pool(s3, "Statistical", YEARS)
+
+
+def test_the_models_passed_forward_include_every_tie_at_the_last_place():
+    # c and d tie on every score; with 3 to pass forward, d comes along (4 passed forward)
+    auroc = {
+        "Statistical: A": [0.9] * 5,
+        "Statistical: B": [0.8] * 5,
+        "Statistical: C": [0.7] * 5,
+        "Statistical: D": [0.7] * 5,
+        "Statistical: E": [0.6] * 5,
+    }
+    pools = {"Statistical": list(auroc)}
+    table = toy_table(auroc)
+    for n, expected in ((3, 4), (2, 2), (4, 4), (5, 5)):
+        out = consistency_table(table, pools, {"Statistical": n}, {})
+        assert int(out["Passed forward from 2021"].sum()) == expected, n

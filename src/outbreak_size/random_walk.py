@@ -4,6 +4,10 @@ import numpyro
 import numpyro.distributions as dist
 import polars as pl
 import scipy as sp
+from numpyro.handlers import reparam
+
+from outbreak_size.car_noncentered import CARNonCentered
+from outbreak_size.poisson import LIKELIHOODS
 
 
 class PartialPooledPoisson:
@@ -24,7 +28,17 @@ class PartialPooledPoisson:
         spatial_correlation=dist.Beta(2, 2),
         spatial_sigma=dist.HalfNormal(0.25),
         drift_scale=0.25,
+        pop_exponent=dist.Normal(0.5, 0.5),
+        likelihood="poisson",
+        concentration=dist.Exponential(0.1),
+        non_centered_car=False,
     ):
+        if likelihood not in LIKELIHOODS:
+            raise ValueError(
+                f"likelihood must be one of {LIKELIHOODS}, not {likelihood!r}"
+            )
+        self.likelihood = likelihood
+        self.concentration = concentration
         if time_and_group_varying is not None:
             self.time_and_group_varying = time_and_group_varying
             self.num_time_and_group_varying = time_and_group_varying.shape[1]
@@ -85,9 +99,20 @@ class PartialPooledPoisson:
 
         self.betas = priors
         self.baseline = baseline
+        self.pop_exponent = pop_exponent
         self.spatial_correlation = spatial_correlation
         self.spatial_sigma = spatial_sigma
         self.drift_scale = drift_scale
+        # `non_centered_car`: the sampler works on white noise that is turned
+        # into the CAR field (same prior, same model, better geometry for the
+        # correlation; see car_noncentered.py)
+        if non_centered_car:
+            self.fit = reparam(  # type: ignore
+                self.fit,
+                config={
+                    "raw_spatial_effect": CARNonCentered(self.adjacency_matrix)
+                },
+            )
 
     def fit(self, cases=None):
         baseline_rate = numpyro.sample("baseline_rate", self.baseline)
@@ -306,9 +331,18 @@ class PartialPooledPoisson:
         else:
             time_and_group_varying_effect = 0.0
 
+        # the expected size of a county scales as its population ** pop_exponent
+        # (an exponent of 1 makes it proportional to the population); the
+        # baseline is the log rate of a county of the median population
+        pop_exponent = numpyro.sample("pop_exponent", self.pop_exponent)
+        log_reference = jnp.log(jnp.median(self.population))
+        log_population = log_reference + pop_exponent * (
+            jnp.log(self.population) - log_reference
+        )
+
         mu = (
             baseline_rate
-            + jnp.log(self.population)  # offset by population
+            + log_population
             + covariate_effect
             + group_varying_only_effect
             + time_varying_only_effect
@@ -355,9 +389,27 @@ class PartialPooledPoisson:
         mu = mu + jnp.finfo(jnp.float64).eps
         numpyro.deterministic("mu", mu)
 
-        with numpyro.plate("observations", size=self.num_observations):
-            numpyro.sample(
-                "cases",
-                dist.Poisson(mu),  # type: ignore
-                obs=cases,
+        if self.likelihood == "negative_binomial":
+            concentration = numpyro.sample(
+                "nb_concentration", self.concentration
             )
+            outbreak_size = dist.NegativeBinomial2(mu, concentration)  # type: ignore
+        else:
+            outbreak_size = dist.Poisson(mu)  # type: ignore
+
+        with numpyro.plate("observations", size=self.num_observations):
+            if cases is None and self.likelihood == "negative_binomial":
+                # a county cannot have more cases than people: the predicted
+                # cases are the draws capped at the population (the raw
+                # draws stay available as cases_uncapped)
+                uncapped = jnp.asarray(
+                    numpyro.sample("cases_uncapped", outbreak_size)
+                )
+                numpyro.deterministic(
+                    "cases",
+                    jnp.minimum(
+                        uncapped, self.population.astype(uncapped.dtype)
+                    ),
+                )
+            else:
+                numpyro.sample("cases", outbreak_size, obs=cases)

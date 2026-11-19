@@ -1,4 +1,8 @@
 #####
+# Local scratch space for tests, caches and redirected outputs
+scratchpad/
+
+#####
 # Exclude many data and output file types by default
 
 # Data
@@ -21,6 +25,9 @@
 .secrets/
 outputs/reviewer_data/
 outputs/reviewer_data_unhashed/
+outputs/census_cache.sqlite
+*.npz
+*.rds
 
 # Documents
 *.doc

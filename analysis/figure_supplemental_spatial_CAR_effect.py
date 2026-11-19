@@ -1,5 +1,8 @@
 import os
-import pickle
+
+from numpyro import enable_x64
+
+enable_x64()
 
 import geopandas as gpd
 import jax.numpy as jnp
@@ -8,13 +11,21 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import polars as pl
+import yaml
 from matplotlib import rc
 from scipy import stats
-from scipy.__config__ import show
 from shapely.geometry import MultiPolygon, Polygon
-from tqdm.auto import tqdm
 
 from outbreak_size import adjacency
+from outbreak_size.adjacency import state_adjacency_matrix
+from outbreak_size.coverage_effect import (
+    effect_label,
+    model_scale_column,
+    percent_change_per_pp,
+)
+from outbreak_size.msr import spearman_msr_blocked
+from outbreak_size.state_outbreaks import weighted_mean_population
+from outbreak_size.waic import log_likelihood
 
 data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 output_dir = os.path.join(
@@ -25,190 +36,15 @@ fig_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "figures")
 font = {"family": "Nimbus Roman", "size": 28}
 rc("font", **font)
 
+# read analysis params yaml
+with open("params.yml", "r") as f:
+    params = yaml.safe_load(f)
+# the scale of the vaccination covariates of the fits (see params.yml)
+COVARIATE_SCALE = params["covariate_scale"]
+MMR_EFFECTIVENESS = params.get("mmr_effectiveness")
 
-def calculate_moran_eigenvectors_adjacency(
-    adjacency_matrix, n_vectors="positive"
-):
-    """
-    Calculate Moran's eigenvector maps from adjacency matrix
-
-    Parameters:
-    -----------
-    adjacency_matrix : array-like, shape (n, n)
-        Binary adjacency matrix (1 = neighbors, 0 = not neighbors)
-    n_vectors : int or 'positive'
-        Number of eigenvectors to retain
-
-    Returns:
-    --------
-    eigenvectors : array, shape (n, n_vectors)
-    eigenvalues : array, shape (n_vectors,)
-    """
-    W = np.asarray(adjacency_matrix, dtype=float)
-    n = W.shape[0]
-
-    # Row-standardize
-    row_sums = W.sum(axis=1)
-    row_sums[row_sums == 0] = 1  # Avoid division by zero
-    W = W / row_sums[:, np.newaxis]
-
-    # Center the matrix
-    I = np.eye(n)
-    ones = np.ones((n, 1))
-    H = I - (ones @ ones.T) / n
-
-    # Double-centered spatial weights
-    M = H @ W @ H
-
-    # Eigendecomposition
-    eigenvalues, eigenvectors = np.linalg.eigh(M)
-
-    # Sort descending
-    idx = eigenvalues.argsort()[::-1]
-    eigenvalues = eigenvalues[idx]
-    eigenvectors = eigenvectors[:, idx]
-
-    # Keep positive eigenvalues
-    if n_vectors == "positive":
-        n_vectors = np.sum(eigenvalues > 1e-10)
-
-    return eigenvectors[:, :n_vectors], eigenvalues[:n_vectors]
-
-
-def spearman_msr_blocked(
-    x, y, adjacency_matrix, county_indices, n_permutations=99999, seed=108
-):
-    """
-    MSR with block permutation for repeated measures (time series per county)
-
-    Permutes entire counties together, preserving within-county temporal structure.
-    Handles unbalanced panels (different # of observations per county).
-
-    Parameters:
-    -----------
-    x, y : array-like
-        Data vectors (length = total observations across all counties/times)
-    adjacency_matrix : array, shape (n_counties, n_counties)
-        County-level adjacency matrix
-    county_indices : array-like
-        County identifier for each observation (0-indexed)
-        Example: [0, 0, 0, 1, 1, 2, 2, 2, ...] means first 3 obs are county 0, etc.
-    n_permutations : int
-        Number of permutations
-    seed : int, optional
-        Random seed
-
-    Returns:
-    --------
-    rho_obs : float
-        Observed correlation
-    p_value : float
-        MSR p-value
-    rho_null : array
-        Null distribution
-    """
-    if seed is not None:
-        np.random.seed(seed)
-
-    x = np.asarray(x, dtype=float)
-    y = np.asarray(y, dtype=float)
-    county_indices = np.asarray(county_indices)
-
-    # Validation
-    if len(x) != len(y) or len(x) != len(county_indices):
-        raise ValueError(
-            f"x ({len(x)}), y ({len(y)}), and county_indices ({len(county_indices)}) "
-            f"must have same length"
-        )
-
-    # Get unique counties and validate
-    unique_counties = np.unique(county_indices)
-    n_counties = len(unique_counties)
-
-    if n_counties != adjacency_matrix.shape[0]:
-        raise ValueError(
-            f"Number of unique counties ({n_counties}) doesn't match "
-            f"adjacency matrix size ({adjacency_matrix.shape[0]})"
-        )
-
-    # Check that county_indices are 0-indexed and contiguous
-    if not np.array_equal(unique_counties, np.arange(n_counties)):
-        raise ValueError(
-            f"county_indices must be 0-indexed integers from 0 to {n_counties - 1}. "
-            f"Got: {unique_counties}"
-        )
-
-    # Observed correlation
-    rho_obs, _ = stats.spearmanr(x, y)
-
-    # Get eigenvectors at county level
-    eigenvectors, eigenvalues = calculate_moran_eigenvectors_adjacency(
-        adjacency_matrix
-    )
-
-    # Pre-compute masks for each county (for efficiency)
-    county_masks = [county_indices == i for i in range(n_counties)]
-    county_obs_counts = [np.sum(mask) for mask in county_masks]
-
-    # Check for issues
-    if any(count == 0 for count in county_obs_counts):
-        raise ValueError(
-            "Some counties in adjacency matrix have no observations in data"
-        )
-
-    # Permutations
-    rho_null = np.zeros(n_permutations)
-
-    for perm_i in tqdm(range(n_permutations)):
-        # Generate county-level spatial permutation
-        coeffs = np.random.randn(eigenvectors.shape[1])
-        scores = eigenvectors @ coeffs
-        county_perm = np.argsort(
-            scores
-        )  # New county assignment for each original county
-
-        # Build permuted y by swapping county blocks
-        y_perm = np.zeros_like(y)
-
-        for original_county_idx in range(n_counties):
-            # This original county's observations should get values from new_county
-            new_county_idx = county_perm[original_county_idx]
-
-            # Get observations from both counties
-            original_mask = county_masks[original_county_idx]
-            new_mask = county_masks[new_county_idx]
-
-            original_obs = y[original_mask]
-            new_obs = y[new_mask]
-
-            # Handle different lengths
-            n_original = len(original_obs)
-            n_new = len(new_obs)
-
-            if n_original == n_new:
-                # Same length: direct assignment
-                y_perm[original_mask] = new_obs
-            elif n_original < n_new:
-                # Fewer observations in original: sample from new
-                sampled_indices = np.random.choice(
-                    n_new, size=n_original, replace=False
-                )
-                y_perm[original_mask] = new_obs[sampled_indices]
-            else:
-                # More observations in original: sample with replacement from new
-                sampled_indices = np.random.choice(
-                    n_new, size=n_original, replace=True
-                )
-                y_perm[original_mask] = new_obs[sampled_indices]
-
-        # Calculate correlation for this permutation
-        rho_null[perm_i], _ = stats.spearmanr(x, y_perm)  # type: ignore
-
-    # P-value
-    n_extreme = np.sum(np.abs(rho_null) >= np.abs(rho_obs))  # type: ignore
-    p_value = (n_extreme + 1) / (n_permutations + 1)
-
-    return rho_obs, p_value, rho_null
+# the Beta draws below are seeded so the figure is reproducible
+rng = np.random.default_rng(params["seed"])
 
 
 def setup_plot(nrows, ncols):
@@ -398,9 +234,11 @@ def map_fips_code_data(
     has_data_mask = counties_with_data["value"].notna()
     no_data_mask = counties_with_data["value"].isna()
 
-    counties_with_data[no_data_mask].plot(
-        ax=ax, color="lightgrey", linewidth=0.3, edgecolor="grey"
-    )
+    # geopandas cannot plot an empty frame (every county may have a value)
+    if bool(no_data_mask.any()):
+        counties_with_data[no_data_mask].plot(
+            ax=ax, color="lightgrey", linewidth=0.3, edgecolor="grey"
+        )
 
     # Create normalization for colorbar
     if cbar_type == "risk":
@@ -495,7 +333,9 @@ def map_fips_code_data(
         counties_with_data["centroid"] = counties_with_data.geometry.centroid
 
     # Create a DataFrame with point information
-    point_df = pd.DataFrame(point_data, columns=["GEOID", "point_value"])
+    point_df = pd.DataFrame(
+        point_data, columns=pd.Index(["GEOID", "point_value"])
+    )
     counties_with_points = counties_with_data.merge(
         point_df, on="GEOID", how="inner"
     )
@@ -546,8 +386,8 @@ def map_fips_code_data(
 
 
 import numpy as np
-import polars as pl
-from scipy import stats
+
+from outbreak_size.samples_io import load_samples
 
 
 def extract_vaccine_effect(samples, df):
@@ -583,8 +423,12 @@ def extract_vaccine_effect(samples, df):
         + iv_global[:, 0][:, None]
     )
 
-    # Z-score the coverage values (like you do before model fitting)
-    vaccine_coverage = df["estimated_mmr_cov"].to_numpy()
+    # Z-score the coverage values on the scale of the fit (like you do before
+    # model fitting)
+    vaccine_coverage = model_scale_column(
+        df, "estimated_mmr_cov", COVARIATE_SCALE, MMR_EFFECTIVENESS
+    )
+    assert len(vaccine_coverage) == df.height
     vaccine_coverage_zscore = (
         vaccine_coverage - np.mean(vaccine_coverage)
     ) / np.std(vaccine_coverage)
@@ -612,8 +456,17 @@ def plot_vaccine_vs_spatial(samples, df, adjacency, fig, ax):
         samples, df
     )  # (n_samples, n_states)
 
-    # Get coverage SD for conversion from z-score to raw scale
-    sigma_coverage = np.std(df["estimated_mmr_cov"].to_numpy())
+    # % change per 1pp of coverage of each state's coefficient, averaged over
+    # the same county-years (all of df) for every state, so that the states
+    # differ by their coefficient and not by the coverage of their counties
+    effects_pct = percent_change_per_pp(
+        vaccine_coef_by_group,
+        df,
+        "estimated_mmr_cov",
+        df,
+        COVARIATE_SCALE,
+        MMR_EFFECTIVENESS,
+    )
 
     # Map state names to state indices
     unique_states = df["state"].unique(maintain_order=True)
@@ -626,10 +479,7 @@ def plot_vaccine_vs_spatial(samples, df, adjacency, fig, ax):
 
     for state in unique_states:
         state_idx = state_to_idx[state]
-        beta_vax_state = vaccine_coef_by_group[:, state_idx]
-
-        # Marginal effect: % change per 1pp coverage increase
-        marginal_effect = (np.exp(beta_vax_state / sigma_coverage) - 1) * 100
+        marginal_effect = effects_pct[:, state_idx]
 
         state_vaccine_effects_median[state] = np.median(marginal_effect)
         state_vaccine_effects_lower[state] = np.percentile(
@@ -650,9 +500,13 @@ def plot_vaccine_vs_spatial(samples, df, adjacency, fig, ax):
 
     # Get which counties had cases in which years, and their populations
     county_year_with_cases = {}  # (fips, year) -> population
+    county_year_cases = {}  # (fips, year) -> observed cases
     for row in df.iter_rows(named=True):
         if row["cases_outbreak"] > 0:
             county_year_with_cases[(row["fips"], row["year"])] = row["pop"]
+            county_year_cases[(row["fips"], row["year"])] = row[
+                "cases_outbreak"
+            ]
 
     # Get mu (predicted outbreak size) for weighting
     mu = samples["mu"]  # (n_samples, n_obs)
@@ -666,6 +520,10 @@ def plot_vaccine_vs_spatial(samples, df, adjacency, fig, ax):
     # Calculate average population implicated and whether neighbors had outbreaks
     state_avg_population = {}
     state_has_neighbor_outbreak = {}
+    state_x_missing = {}
+    # the same with the outbreaks weighted by their observed cases
+    state_avg_population_observed = {}
+    state_x_missing_observed = {}
 
     for state in unique_states:
         # Get all counties in this state
@@ -674,6 +532,7 @@ def plot_vaccine_vs_spatial(samples, df, adjacency, fig, ax):
         ]
 
         weighted_populations = []
+        observed_populations = []
         has_neighbor_outbreak = False
 
         for fips in state_fips:
@@ -699,10 +558,12 @@ def plot_vaccine_vs_spatial(samples, df, adjacency, fig, ax):
                 # Count neighbors + focal county with cases, sum total population and outbreak size
                 total_population = 0
                 total_outbreak_size = 0
+                total_observed_cases = 0
 
                 # Add focal county
                 if (fips, year) in county_year_with_cases:
                     total_population += county_year_with_cases[(fips, year)]
+                    total_observed_cases += county_year_cases[(fips, year)]
                     if (fips, year) in obs_to_mu:
                         total_outbreak_size += obs_to_mu[(fips, year)]
 
@@ -713,13 +574,17 @@ def plot_vaccine_vs_spatial(samples, df, adjacency, fig, ax):
                         total_population += county_year_with_cases[
                             (neighbor_fips, year)
                         ]
+                        total_observed_cases += county_year_cases[
+                            (neighbor_fips, year)
+                        ]
                         if (neighbor_fips, year) in obs_to_mu:
                             neighbor_outbreak_size = obs_to_mu[
                                 (neighbor_fips, year)
                             ]
                             total_outbreak_size += neighbor_outbreak_size
-                            # Check if neighbor had outbreak (≥3 cases)
-                            if neighbor_outbreak_size >= 3:
+                            # Check if neighbor had an outbreak (≥3 observed
+                            # cases, not ≥3 predicted)
+                            if county_year_cases[(neighbor_fips, year)] >= 3:
                                 has_neighbor_outbreak = True
 
                 # Record this outbreak
@@ -727,22 +592,24 @@ def plot_vaccine_vs_spatial(samples, df, adjacency, fig, ax):
                     weighted_populations.append(
                         (total_population, total_outbreak_size)
                     )
+                if total_population > 0 and total_observed_cases > 0:
+                    observed_populations.append(
+                        (total_population, total_observed_cases)
+                    )
 
-        # Calculate weighted average
-        if len(weighted_populations) > 0:
-            total_weight = sum(w for _, w in weighted_populations)
-            if total_weight > 0:
-                state_avg_population[state] = (
-                    sum(pop * w for pop, w in weighted_populations)
-                    / total_weight
-                )
-            else:
-                state_avg_population[state] = np.mean(
-                    [pop for pop, _ in weighted_populations]
-                )
-        else:
-            state_avg_population[state] = 0
-
+        # Calculate weighted average. A state with no outbreak to average
+        # over has no x: it is set to 0 here (the sensitivity analysis below
+        # also leaves such states out)
+        mean_population = weighted_mean_population(weighted_populations)
+        state_x_missing[state] = mean_population is None
+        state_avg_population[state] = (
+            0 if mean_population is None else mean_population
+        )
+        mean_observed = weighted_mean_population(observed_populations)
+        state_x_missing_observed[state] = mean_observed is None
+        state_avg_population_observed[state] = (
+            0 if mean_observed is None else mean_observed
+        )
         state_has_neighbor_outbreak[state] = has_neighbor_outbreak
 
     # Create lists for plotting
@@ -760,6 +627,13 @@ def plot_vaccine_vs_spatial(samples, df, adjacency, fig, ax):
     )
     has_neighbor = np.array(
         [state_has_neighbor_outbreak[state] for state in unique_states]
+    )
+    x_missing = np.array([state_x_missing[state] for state in unique_states])
+    x_values_observed = np.array(
+        [state_avg_population_observed[state] for state in unique_states]
+    )
+    x_missing_observed = np.array(
+        [state_x_missing_observed[state] for state in unique_states]
     )
 
     # Calculate error bar lengths
@@ -891,6 +765,70 @@ def plot_vaccine_vs_spatial(samples, df, adjacency, fig, ax):
     )
     print(f"All: rho={rho_all:.4f}, p={p_all:.4f}")
 
+    # Sensitivity of the tests above to the state graph and to the states
+    # whose x is undefined. The graph above joins two states only where
+    # counties that had outbreaks border each other; the real graph joins
+    # states whose counties border, whatever happened in them.
+    print("\n=== Sensitivity: state graph and states without x ===")
+    print(
+        "States with no outbreak to average over (x undefined): "
+        f"{[st for st, gone in zip(unique_states, x_missing) if gone]} "
+        "(predicted size), "
+        f"{[st for st, gone in zip(unique_states, x_missing_observed) if gone]}"
+        " (observed cases)"
+    )
+    county_adjacency_data = pl.read_csv(
+        os.path.join(data_dir, "county_adjacencies.txt"),
+        separator="|",
+        schema_overrides={
+            "County GEOID": pl.String,
+            "Neighbor GEOID": pl.String,
+        },
+    )
+    real_state_adjacency = state_adjacency_matrix(
+        county_adjacency_data,
+        [
+            df.filter(pl.col("state") == state)["fips"][0][:2]
+            for state in unique_states
+        ],
+    )
+    everyone = np.ones(n_states, dtype=bool)
+    for x_name, x_used, x_gone in [
+        ("x weighted by predicted outbreak size", x_values, x_missing),
+        (
+            "x weighted by observed cases",
+            x_values_observed,
+            x_missing_observed,
+        ),
+    ]:
+        for graph_name, graph in [
+            ("figure's graph", state_adjacency),
+            ("real state borders", real_state_adjacency),
+        ]:
+            for subset_name, subset in [
+                ("all states", everyone),
+                ("states with x", ~x_gone),
+            ]:
+                for group_name, group in [
+                    ("has neighbor", has_neighbor),
+                    ("no neighbor", ~has_neighbor),
+                    ("all", everyone),
+                ]:
+                    keep = subset & group
+                    rho_s, p_s, _ = spearman_msr_blocked(
+                        x_used[keep],
+                        y_values[keep],
+                        graph[np.ix_(keep, keep)],
+                        np.arange(keep.sum()),
+                        n_permutations=9999,
+                    )
+                    n_borders = int(graph[np.ix_(keep, keep)].sum() / 2)
+                    print(
+                        f"  {x_name}, {graph_name}, {subset_name}, "
+                        f"{group_name}: n={keep.sum()}, {n_borders} borders, "
+                        f"rho={rho_s:.3f}, p={p_s:.4f}"
+                    )
+
     # what about theil slopes
     print("\n=== Theil slopes ===")
     print(stats.theilslopes(y_values[has_neighbor], x_values[has_neighbor]))
@@ -923,7 +861,7 @@ def plot_vaccine_vs_spatial(samples, df, adjacency, fig, ax):
 
     # Labels
     ax.set_xlabel("At risk population (including neighboring counties)")
-    ax.set_ylabel("% change in incidence per\n1pp MMR coverage increase")
+    ax.set_ylabel(effect_label())
 
     return fig, ax
 
@@ -1043,7 +981,7 @@ def plot_car_variance_across_years(
     conserved_mask = np.array([fips in conserved_fips for fips in car_fips])
 
     print(f"\n{'=' * 70}")
-    print(f"CAR TEMPORAL VARIANCE ANALYSIS")
+    print("CAR TEMPORAL VARIANCE ANALYSIS")
     print(f"{'=' * 70}")
     print(f"Total CAR counties: {len(car_fips)}")
     print(
@@ -1074,7 +1012,7 @@ def plot_car_variance_across_years(
     longitudinal_variances = None
     if show_longitudinal_variance:
         print(f"\n{'=' * 70}")
-        print(f"LONGITUDINAL VARIANCE (Counties observed in >1 bucket)")
+        print("LONGITUDINAL VARIANCE (Counties observed in >1 bucket)")
         print(f"{'=' * 70}")
 
         # For each CAR county, determine which buckets it appears in
@@ -1136,14 +1074,14 @@ def plot_car_variance_across_years(
                 else:
                     longitudinal_variances[sample_idx] = 0.0
 
-            print(f"\nLongitudinal SD (within-county temporal variation):")
+            print("\nLongitudinal SD (within-county temporal variation):")
             print(f"  2.5%:  {np.percentile(longitudinal_variances, 2.5):.4f}")
             print(f"  50%:   {np.median(longitudinal_variances):.4f}")
             print(
                 f"  97.5%: {np.percentile(longitudinal_variances, 97.5):.4f}"
             )
 
-            print(f"\nComparison to aggregate temporal SD:")
+            print("\nComparison to aggregate temporal SD:")
             print(
                 f"  Aggregate temporal SD: {np.median(variance_across_years):.4f}"
             )
@@ -1154,22 +1092,22 @@ def plot_car_variance_across_years(
                 variance_across_years
             )
             print(f"  Ratio (Longitudinal / Aggregate): {ratio:.3f}")
-            print(f"\nInterpretation:")
+            print("\nInterpretation:")
             print(
-                f"  Aggregate = variance of bucket-level means across all counties"
+                "  Aggregate = variance of bucket-level means across all counties"
             )
-            print(f"  Longitudinal = average within-county variance over time")
+            print("  Longitudinal = average within-county variance over time")
             print(
-                f"  Ratio < 1: Individual counties vary less than population average"
+                "  Ratio < 1: Individual counties vary less than population average"
             )
             print(
-                f"  Ratio > 1: Individual counties vary more than population average"
+                "  Ratio > 1: Individual counties vary more than population average"
             )
         else:
             print("No counties observed in >1 bucket")
 
     print(f"\n{'=' * 70}")
-    print(f"TEMPORAL STANDARD DEVIATION (Primary Result)")
+    print("TEMPORAL STANDARD DEVIATION (Primary Result)")
     print(f"{'=' * 70}")
     print(f"2.5%:  {np.percentile(variance_across_years, 2.5):.4f}")
     print(f"50%:   {np.median(variance_across_years):.4f}")
@@ -1177,7 +1115,7 @@ def plot_car_variance_across_years(
 
     # ===== COMPARISON 1: Within-bucket spatial variance =====
     print(f"\n{'=' * 70}")
-    print(f"COMPARISON 1: Temporal SD vs Spatial SD")
+    print("COMPARISON 1: Temporal SD vs Spatial SD")
     print(f"{'=' * 70}")
 
     within_bucket_sd = np.zeros((n_samples, n_buckets))
@@ -1194,20 +1132,20 @@ def plot_car_variance_across_years(
     avg_within_bucket_sd = within_bucket_sd.mean(axis=1)
     ratio_temporal_to_spatial = variance_across_years / avg_within_bucket_sd
 
-    print(f"Average within-bucket spatial SD:")
+    print("Average within-bucket spatial SD:")
     print(f"  2.5%:  {np.percentile(avg_within_bucket_sd, 2.5):.4f}")
     print(f"  50%:   {np.median(avg_within_bucket_sd):.4f}")
     print(f"  97.5%: {np.percentile(avg_within_bucket_sd, 97.5):.4f}")
-    print(f"\nRatio (Temporal SD / Spatial SD):")
+    print("\nRatio (Temporal SD / Spatial SD):")
     print(f"  2.5%:  {np.percentile(ratio_temporal_to_spatial, 2.5):.4f}")
     print(f"  50%:   {np.median(ratio_temporal_to_spatial):.4f}")
     print(f"  97.5%: {np.percentile(ratio_temporal_to_spatial, 97.5):.4f}")
-    print(f"\nInterpretation: Ratio < 1 means space matters more than time")
-    print(f"                Ratio > 1 means time matters more than space")
+    print("\nInterpretation: Ratio < 1 means space matters more than time")
+    print("                Ratio > 1 means time matters more than space")
 
     # ===== COMPARISON 2: Variance decomposition (conserved counties only) =====
     print(f"\n{'=' * 70}")
-    print(f"COMPARISON 2: Variance Decomposition (Conserved Counties)")
+    print("COMPARISON 2: Variance Decomposition (Conserved Counties)")
     print(f"{'=' * 70}")
 
     if conserved_mask.sum() > 0:
@@ -1221,35 +1159,35 @@ def plot_car_variance_across_years(
             within_bucket_vars = np.var(conserved_effects, axis=1)
             within_var[i] = np.mean(within_bucket_vars)
 
-        print(f"Temporal variance (between buckets):")
+        print("Temporal variance (between buckets):")
         print(f"  2.5%:  {np.percentile(between_var, 2.5):.4f}")
         print(f"  50%:   {np.median(between_var):.4f}")
         print(f"  97.5%: {np.percentile(between_var, 97.5):.4f}")
 
-        print(f"\nSpatial variance (within buckets, averaged):")
+        print("\nSpatial variance (within buckets, averaged):")
         print(f"  2.5%:  {np.percentile(within_var, 2.5):.4f}")
         print(f"  50%:   {np.median(within_var):.4f}")
         print(f"  97.5%: {np.percentile(within_var, 97.5):.4f}")
 
         ratio = between_var / within_var
-        print(f"\nRatio (temporal / spatial):")
+        print("\nRatio (temporal / spatial):")
         print(f"  2.5%:  {np.percentile(ratio, 2.5):.4f}")
         print(f"  50%:   {np.median(ratio):.4f}")
         print(f"  97.5%: {np.percentile(ratio, 97.5):.4f}")
-        print(f"\nInterpretation: Ratio < 1 means spatial variation dominates")
-        print(f"                Ratio > 1 means temporal variation dominates")
+        print("\nInterpretation: Ratio < 1 means spatial variation dominates")
+        print("                Ratio > 1 means temporal variation dominates")
     else:
         print("No conserved counties - cannot compute decomposition")
 
     # ===== COMPARISON 4: Compare to spatial_sigma =====
     print(f"\n{'=' * 70}")
-    print(f"COMPARISON 4: Temporal SD vs spatial_sigma")
+    print("COMPARISON 4: Temporal SD vs spatial_sigma")
     print(f"{'=' * 70}")
 
     # spatial_sigma now has shape (n_samples, n_year_buckets)
     # ===== COMPARISON 4: Compare to spatial_sigma =====
     print(f"\n{'=' * 70}")
-    print(f"COMPARISON 4: Temporal SD vs spatial_sigma")
+    print("COMPARISON 4: Temporal SD vs spatial_sigma")
     print(f"{'=' * 70}")
 
     # spatial_sigma now has shape (n_samples, n_year_buckets)
@@ -1261,26 +1199,26 @@ def plot_car_variance_across_years(
 
     ratio_to_sigma = variance_across_years / avg_spatial_sigma
 
-    print(f"Average spatial_sigma across buckets:")
+    print("Average spatial_sigma across buckets:")
     print(f"  2.5%:  {np.percentile(avg_spatial_sigma, 2.5):.4f}")
     print(f"  50%:   {np.median(avg_spatial_sigma):.4f}")
     print(f"  97.5%: {np.percentile(avg_spatial_sigma, 97.5):.4f}")
 
-    print(f"\nTemporal SD of spatial_sigma (across buckets):")
+    print("\nTemporal SD of spatial_sigma (across buckets):")
     print(f"  2.5%:  {np.percentile(spatial_sigma_temporal_sd, 2.5):.4f}")
     print(f"  50%:   {np.median(spatial_sigma_temporal_sd):.4f}")
     print(f"  97.5%: {np.percentile(spatial_sigma_temporal_sd, 97.5):.4f}")
 
-    print(f"\nRatio (Temporal SD / avg spatial_sigma):")
+    print("\nRatio (Temporal SD / avg spatial_sigma):")
     print(f"  2.5%:  {np.percentile(ratio_to_sigma, 2.5):.4f}")
     print(f"  50%:   {np.median(ratio_to_sigma):.4f}")
     print(f"  97.5%: {np.percentile(ratio_to_sigma, 97.5):.4f}")
-    print(f"\nInterpretation: Ratio << 1 means temporal changes are small")
-    print(f"                relative to baseline spatial effect magnitude")
+    print("\nInterpretation: Ratio << 1 means temporal changes are small")
+    print("                relative to baseline spatial effect magnitude")
 
     # ===== COMPARISON 5: Coefficient of variation =====
     print(f"\n{'=' * 70}")
-    print(f"COMPARISON 5: Coefficient of Variation")
+    print("COMPARISON 5: Coefficient of Variation")
     print(f"{'=' * 70}")
 
     # Mean absolute CAR effect across all buckets/counties
@@ -1295,23 +1233,23 @@ def plot_car_variance_across_years(
 
     cv = variance_across_years / mean_abs_effect
 
-    print(f"Mean absolute CAR effect:")
+    print("Mean absolute CAR effect:")
     print(f"  2.5%:  {np.percentile(mean_abs_effect, 2.5):.4f}")
     print(f"  50%:   {np.median(mean_abs_effect):.4f}")
     print(f"  97.5%: {np.percentile(mean_abs_effect, 97.5):.4f}")
-    print(f"\nCoefficient of variation (Temporal SD / Mean |effect|):")
+    print("\nCoefficient of variation (Temporal SD / Mean |effect|):")
     print(f"  2.5%:  {np.percentile(cv, 2.5):.2%}")
     print(f"  50%:   {np.median(cv):.2%}")
     print(f"  97.5%: {np.percentile(cv, 97.5):.2%}")
 
     # ===== WAIC CALCULATION =====
     print(f"\n{'=' * 70}")
-    print(f"WAIC CALCULATION")
+    print("WAIC CALCULATION")
     print(f"{'=' * 70}")
 
     # Check if we have the necessary samples for WAIC
     if "mu" in samples:
-        from scipy.special import gammaln, logsumexp
+        from scipy.special import logsumexp
 
         # mu has shape (n_samples, n_observations)
         mu = np.array(samples["mu"])
@@ -1331,15 +1269,14 @@ def plot_car_variance_across_years(
             print(f"Number of mu values < 1e-10: {np.sum(mu < 1e-10)}")
             print(f"Number of mu values == 0: {np.sum(mu == 0)}")
 
-            # Calculate log pointwise predictive density for Poisson likelihood
+            # Calculate log pointwise predictive density: Poisson, or negative
+            # binomial if the model has a concentration
             epsilon = 1e-10
-            mu_safe = np.maximum(mu, epsilon)
-
-            log_lik = np.zeros((mu.shape[0], len(observed_cases)))
-            for i in range(len(observed_cases)):
-                y = observed_cases[i]
-                mu_i = mu_safe[:, i]
-                log_lik[:, i] = y * np.log(mu_i) - mu_i - gammaln(y + 1)
+            log_lik = log_likelihood(
+                observed_cases,
+                np.maximum(mu, epsilon),
+                samples.get("nb_concentration"),
+            )
 
             print(
                 f"log_lik range: [{np.min(log_lik):.2f}, {np.max(log_lik):.2f}]"
@@ -1441,642 +1378,47 @@ def plot_car_variance_across_years(
     return fig, ax, waic_dict
 
 
-def plot_increasing_spread_over_time(
-    df,
-    adjacency_matrix_pre,
-    adjacency_matrix_post,
-    posterior_samples_pre,
-    posterior_samples_post,
-    fig,
-    ax,
-    year_bins=None,
-    aggregation_method="average",
-):
+def map_spatial_effect_p_values(samples, df, adjacency_data, fig, ax):
     """
-        Plot proportion of measles cases in counties with neighboring outbreaks over time as grouped bar chart.
-
-        Outbreak defined as >= 3 cases. For each county with an outbreak, checks if at least one
-        neighbor also has an outbreak, then sums cases in those counties.
-        Shows two bars for different significance requirements:
-        - Midnightblue: No significance requirement
-        - Grey: County or at least one outbreak neighbor has significant spatial effect at 5% level
-
-        Parameters:
-        -----------
-        df : polars.DataFrame
-            Analysis dataset with columns: year, fips, county, state, cases_outbreak
-        adjacency_matrix_pre : numpy.ndarray
-            Adjacency matrix for counties in 2011-2020 period
-        adjacency_matrix_post : numpy.ndarray
-            Adjacency matrix for counties in 2021-2025 period
-        posterior_samples_pre : dict
-            Posterior samples for 2011-2020 period containing raw_spatial_effect and spatial_sigma
-        posterior_samples_post : dict
-            Posterior samples for 2021-2025 period containing raw_spatial_effect and spatial_sigma
-        fig : matplotlib.figure.Figure
-            Figure object
-        ax : matplotlib.axes.Axes
-            Axis for plotting
-        year_bins : list of tuples, optional
-    Custom year bins as [(start1, end1), (start2, end2), ...].
-            Years are inclusive and will be labeled as "start-end".
-            If None, uses individual years.
-            Example: [(2011, 2015), (2016, 2020), (2021, 2025)]
-        aggregation_method : str, optional
-            Method for aggregating across years in a bin:
-            - "average": Average of yearly percentages (each year weighted equally)
-            - "sum": Sum counts across years then calculate percentage (years with more cases weighted more)
+    Map the p-value of the spatial effect of each county of a period (the
+    two-sided share of its posterior on the other side of 0) for the counties
+    with a neighbor, which are the ones the spatial model has an effect for.
+    `df` has the county-years of the period and `adjacency_data` is the table of
+    county adjacencies. Returns the adjacency matrix of the period.
     """
-
-    def get_significant_spatial_counties(
-        posterior_samples, adjacency_matrix, all_fips, significance_threshold
-    ):
-        """
-        Helper function to determine which counties have significant spatial effects.
-
-        Returns a dictionary mapping FIPS codes to boolean (significant or not).
-        Only includes counties that have neighbors (matching the spatial model structure).
-        """
-        raw_spatial_effect = posterior_samples["raw_spatial_effect"]
-        spatial_sigma = posterior_samples["spatial_sigma"]
-        spatial_effect = raw_spatial_effect * spatial_sigma[:, None]
-
-        # Get counties with neighbors (matching plot_spatial_importance logic)
-        has_a_neighbor = adjacency_matrix.sum(axis=0) > 0
-        counties_with_neighbors = np.array(all_fips)[has_a_neighbor]
-
-        # Verify dimensions match
-        assert len(counties_with_neighbors) == spatial_effect.shape[1], (
-            f"Counties with neighbors ({len(counties_with_neighbors)}) doesn't match spatial effects ({spatial_effect.shape[1]})"
-        )
-
-        # Calculate significance for each county with neighbors
-        significant_spatial_dict = {}
-
-        for county_idx, county_fips in enumerate(counties_with_neighbors):
-            county_samples = spatial_effect[:, county_idx]
-
-            # Calculate proportion on each side of zero
-            prop_positive = np.mean(county_samples > 0)
-            prop_negative = np.mean(county_samples < 0)
-
-            # Significant if at least significance_threshold of mass is on one side
-            if (
-                prop_positive >= significance_threshold
-                or prop_negative >= significance_threshold
-            ):
-                significant_spatial_dict[county_fips] = True
-            else:
-                significant_spatial_dict[county_fips] = False
-
-        return significant_spatial_dict
-
-    def count_cases_with_neighbors(
-        year_df,
-        adjacency_matrix,
-        significant_spatial_dict,
-        all_fips,
-        require_significance=False,
-    ):
-        """
-        Count cases in outbreak counties with at least one neighboring outbreak.
-
-        Parameters:
-        -----------
-        year_df : polars.DataFrame
-            Data for a single year
-        adjacency_matrix : numpy.ndarray
-            Adjacency matrix for all counties in the period
-        significant_spatial_dict : dict
-            Dictionary mapping FIPS codes to whether they have significant spatial effects
-            Can be None if require_significance is False
-        all_fips : list
-            All FIPS codes in the period (matching adjacency matrix order)
-        require_significance : bool
-            If True, only count if the county OR at least one outbreak neighbor has significant spatial effect
-
-        Returns:
-        --------
-        tuple : (cases_with_outbreak_neighbors, total_cases)
-        """
-        fips_to_idx = {fips: idx for idx, fips in enumerate(all_fips)}
-
-        # Get counties with outbreaks this year (cases >= 3)
-        outbreak_df = year_df.filter(
-            (pl.col("cases_outbreak") >= 3) & (pl.col("fips").is_in(all_fips))
-        )
-
-        outbreak_fips_list = outbreak_df["fips"].to_list()
-        outbreak_fips_set = set(outbreak_fips_list)
-
-        # Create a dictionary mapping FIPS to cases
-        fips_to_cases = dict(
-            zip(
-                outbreak_df["fips"].to_list(),
-                outbreak_df["cases_outbreak"].to_list(),
-            )
-        )
-
-        if len(outbreak_fips_list) == 0:
-            return 0, 0
-
-        cases_with_outbreak_neighbors = 0
-        total_cases = sum(fips_to_cases.values())
-
-        # For each outbreak county, check if it has outbreak neighbors
-        for county_fips in outbreak_fips_list:
-            idx = fips_to_idx[county_fips]
-
-            # Get neighbors of this county
-            neighbors_mask = adjacency_matrix[idx] > 0
-            neighbor_indices = np.where(neighbors_mask)[0]
-
-            # Find outbreak neighbors
-            outbreak_neighbors = []
-            for neighbor_idx in neighbor_indices:
-                neighbor_fips = all_fips[neighbor_idx]
-                if neighbor_fips in outbreak_fips_set:
-                    outbreak_neighbors.append(neighbor_fips)
-
-            # Check if this county has at least one outbreak neighbor
-            if len(outbreak_neighbors) > 0:
-                # If significance is required, check if county or any outbreak neighbor is significant
-                if (
-                    require_significance
-                    and significant_spatial_dict is not None
-                ):
-                    # Check if the county itself is significant
-                    county_is_significant = (
-                        county_fips in significant_spatial_dict
-                        and significant_spatial_dict[county_fips]
-                    )
-
-                    # Check if any outbreak neighbor is significant
-                    neighbor_is_significant = any(
-                        neighbor_fips in significant_spatial_dict
-                        and significant_spatial_dict[neighbor_fips]
-                        for neighbor_fips in outbreak_neighbors
-                    )
-
-                    # Count cases if either the county or a neighbor is significant
-                    if county_is_significant or neighbor_is_significant:
-                        cases_with_outbreak_neighbors += fips_to_cases[
-                            county_fips
-                        ]
-                else:
-                    # No significance requirement
-                    cases_with_outbreak_neighbors += fips_to_cases[county_fips]
-
-        return cases_with_outbreak_neighbors, total_cases
-
-    # Get FIPS lists for each period (ALL counties in the period, matching adjacency matrices)
-    all_fips_pre = (
-        df.filter(pl.col("year") < 2021)["fips"]
-        .unique(maintain_order=True)
-        .to_list()
+    raw_spatial_effect = samples["raw_spatial_effect"]
+    p_values = 2 * np.minimum(
+        np.mean(raw_spatial_effect > 0, axis=0),
+        np.mean(raw_spatial_effect < 0, axis=0),
     )
-    all_fips_post = (
-        df.filter(pl.col("year") >= 2021)["fips"]
-        .unique(maintain_order=True)
-        .to_list()
+    all_fips = df["fips"].unique(maintain_order=True).to_list()
+    adjacency_matrix = adjacency.assemble_adjacency_matrix(
+        adjacency_data, all_fips
     )
-
-    # Define significance thresholds and corresponding colors/labels
-    thresholds_and_styles = [
-        (None, "#8b8c89", "All"),
-        (0.95, "#274c77", "Neighboring county\ncases are correlated"),
-    ]
-
-    # Set up year bins
-    all_years = sorted(df["year"].unique().to_list())
-
-    if year_bins is None:
-        # Default: individual years
-        bins = [(year, year) for year in all_years]
-    else:
-        bins = year_bins
-
-    # Create labels for bins
-    bin_labels = []
-    for start_year, end_year in bins:
-        if start_year == end_year:
-            bin_labels.append(str(start_year))
-        else:
-            bin_labels.append(f"{start_year}-{end_year}")
-
-    # Calculate counts for each bin and threshold
-    data_by_bin = []
-    error_bars_by_bin = []  # Store (lower_error, upper_error) for each bin
-
-    for start_year, end_year in bins:
-        bin_percentages = []
-        bin_errors = []
-
-        for threshold, color, threshold_label in thresholds_and_styles:
-            # Get significant spatial effects for both time periods (if needed)
-            if threshold is not None:
-                significant_spatial_pre = get_significant_spatial_counties(
-                    posterior_samples_pre,
-                    adjacency_matrix_pre,
-                    all_fips_pre,
-                    threshold,
-                )
-                significant_spatial_post = get_significant_spatial_counties(
-                    posterior_samples_post,
-                    adjacency_matrix_post,
-                    all_fips_post,
-                    threshold,
-                )
-                require_significance = True
-            else:
-                significant_spatial_pre = None
-                significant_spatial_post = None
-                require_significance = False
-
-            if aggregation_method == "average":
-                # Collect data for each year in the bin
-                year_data = []  # List of (clustered_cases, total_cases) tuples
-
-                for year in range(start_year, end_year + 1):
-                    if year not in all_years:
-                        continue
-
-                    year_df = df.filter(pl.col("year") == year)
-
-                    if year < 2021:
-                        cases_with_neighbors, total_cases = (
-                            count_cases_with_neighbors(
-                                year_df,
-                                adjacency_matrix_pre,
-                                significant_spatial_pre,
-                                all_fips_pre,
-                                require_significance,
-                            )
-                        )
-                    else:
-                        cases_with_neighbors, total_cases = (
-                            count_cases_with_neighbors(
-                                year_df,
-                                adjacency_matrix_post,
-                                significant_spatial_post,
-                                all_fips_post,
-                                require_significance,
-                            )
-                        )
-
-                    # Only include years with cases
-                    if total_cases > 0:
-                        year_data.append((cases_with_neighbors, total_cases))
-
-                # Calculate average percentage and uncertainty using Beta distributions
-                if len(year_data) > 0:
-                    n_samples = 10000
-                    average_samples = []
-
-                    for _ in range(n_samples):
-                        yearly_proportions = []
-                        for clustered, total in year_data:
-                            isolated = total - clustered
-                            alpha = clustered + 1
-                            beta_param = isolated + 1
-                            # Draw one sample from this year's Beta distribution
-                            p_sample = stats.beta.rvs(alpha, beta_param)
-                            yearly_proportions.append(p_sample)
-
-                        # Average the proportions for this sample
-                        avg_proportion = np.mean(yearly_proportions)
-                        average_samples.append(
-                            avg_proportion * 100
-                        )  # Convert to percentage
-
-                    # Get credible intervals
-                    lower = np.percentile(average_samples, 2.5)
-                    upper = np.percentile(average_samples, 97.5)
-                    median = np.percentile(average_samples, 50)
-
-                    avg_percentage = median
-                    lower_error = median - lower
-                    upper_error = upper - median
-                else:
-                    avg_percentage = 0
-                    lower_error = 0
-                    upper_error = 0
-
-                bin_percentages.append(avg_percentage)
-                bin_errors.append((lower_error, upper_error))
-
-            elif aggregation_method == "sum":
-                # Sum counts across all years, then calculate percentage
-                total_cases_with_neighbors = 0
-                total_cases_all = 0
-
-                for year in range(start_year, end_year + 1):
-                    if year not in all_years:
-                        continue
-
-                    year_df = df.filter(pl.col("year") == year)
-
-                    if year < 2021:
-                        cases_with_neighbors, total_cases = (
-                            count_cases_with_neighbors(
-                                year_df,
-                                adjacency_matrix_pre,
-                                significant_spatial_pre,
-                                all_fips_pre,
-                                require_significance,
-                            )
-                        )
-                    else:
-                        cases_with_neighbors, total_cases = (
-                            count_cases_with_neighbors(
-                                year_df,
-                                adjacency_matrix_post,
-                                significant_spatial_post,
-                                all_fips_post,
-                                require_significance,
-                            )
-                        )
-
-                    total_cases_with_neighbors += cases_with_neighbors
-                    total_cases_all += total_cases
-
-                # Calculate percentage and uncertainty using Beta distribution
-                if total_cases_all > 0:
-                    isolated = total_cases_all - total_cases_with_neighbors
-                    alpha = total_cases_with_neighbors + 1
-                    beta_param = isolated + 1
-
-                    # Draw samples from Beta distribution
-                    n_samples = 10000
-                    samples = (
-                        stats.beta.rvs(alpha, beta_param, size=n_samples) * 100
-                    )
-
-                    lower = np.percentile(samples, 2.5)
-                    upper = np.percentile(samples, 97.5)
-                    median = np.percentile(samples, 50)
-
-                    percentage = median
-                    lower_error = median - lower
-                    upper_error = upper - median
-                else:
-                    percentage = 0
-                    lower_error = 0
-                    upper_error = 0
-
-                bin_percentages.append(percentage)
-                bin_errors.append((lower_error, upper_error))
-
-            else:
-                raise ValueError(
-                    f"Unknown aggregation_method: {aggregation_method}"
-                )
-
-        data_by_bin.append(bin_percentages)
-        error_bars_by_bin.append(bin_errors)
-
-    # Create grouped bar chart
-    n_bins = len(bins)
-    n_bars_per_group = len(thresholds_and_styles)
-
-    # Bar width and positions
-    bar_width = 0.4
-    group_width = bar_width * n_bars_per_group
-    group_spacing = 0.3  # Space between groups
-    total_group_width = group_width + group_spacing
-
-    x_positions = np.arange(n_bins) * total_group_width  # type: ignore
-
-    # Plot bars for each threshold
-    for bar_idx, (threshold, color, threshold_label) in enumerate(
-        thresholds_and_styles
-    ):
-        percentages = [bin_data[bar_idx] for bin_data in data_by_bin]
-        errors = [bin_errors[bar_idx] for bin_errors in error_bars_by_bin]
-
-        # Extract lower and upper errors
-        lower_errors = [e[0] for e in errors]
-        upper_errors = [e[1] for e in errors]
-
-        x_pos = x_positions + bar_idx * bar_width
-
-        ax.bar(
-            x_pos,
-            percentages,
-            width=bar_width,
-            color=color,
-            label=threshold_label,
-            alpha=0.8,
-            yerr=[lower_errors, upper_errors],
-            capsize=5,
-            error_kw={"elinewidth": 1.5, "ecolor": "black", "alpha": 0.8},
-        )
-        # print out what we're plotting so we can read
-        # the statistics out
-        for i in range(n_bins):
-            print(
-                f"Bin {bin_labels[i]}, Threshold '{threshold_label}': "
-                f"{percentages[i]:.2f}% (95% CI: {percentages[i] - lower_errors[i]:.2f}% - {percentages[i] + upper_errors[i]:.2f}%)"
-            )
-
-    # Set x-axis labels centered under each group of 2 bars
-    # ax.set_xticks(x_positions + group_width / 2 - bar_width / 2)
-    ax.set_xticks(x_positions)
-    ax.set_xticklabels(bin_labels, rotation=-45, ha="left")
-
-    ax.set_yticks([0, 20, 40, 60, 80])
-    ax.set_ylabel("Cases in multi-county outbreaks (%)")
-    ax.set_ylim(bottom=0)
-    ax.legend(
-        loc=(0.01, 0.7),
-        edgecolor="black",
-        title="Multi-county outbreaks:       ",
+    has_a_neighbor = adjacency_matrix.sum(axis=0) > 0
+    counties_with_neighbors = np.array(all_fips)[has_a_neighbor]
+    assert len(counties_with_neighbors) == len(p_values), (
+        f"{len(counties_with_neighbors)} counties with a neighbor, "
+        f"{len(p_values)} spatial effects"
     )
-
-    # Calculate ratio: Predictive relationship / All for both 2011-2024 and 2025
-    print("\n" + "=" * 70)
-    print("RATIO ANALYSIS: Predictive relationship / All")
-    print("=" * 70)
-
-    # Function to calculate statistics for a time period
-    def calculate_period_stats(year_range, period_name):
-        """Calculate statistics for a given time period"""
-        # Collect data for both thresholds
-        data_by_threshold = {}
-
-        for threshold, _, threshold_label in thresholds_and_styles:
-            # Get significant spatial effects for both time periods (if needed)
-            if threshold is not None:
-                significant_spatial_pre = get_significant_spatial_counties(
-                    posterior_samples_pre,
-                    adjacency_matrix_pre,
-                    all_fips_pre,
-                    threshold,
-                )
-                significant_spatial_post = get_significant_spatial_counties(
-                    posterior_samples_post,
-                    adjacency_matrix_post,
-                    all_fips_post,
-                    threshold,
-                )
-                require_significance = True
-            else:
-                significant_spatial_pre = None
-                significant_spatial_post = None
-                require_significance = False
-
-            # Collect data for each year in the range
-            year_data = []
-
-            for year in year_range:
-                if year not in all_years:
-                    continue
-
-                year_df = df.filter(pl.col("year") == year)
-
-                if year < 2021:
-                    cases_with_neighbors, total_cases = (
-                        count_cases_with_neighbors(
-                            year_df,
-                            adjacency_matrix_pre,
-                            significant_spatial_pre,
-                            all_fips_pre,
-                            require_significance,
-                        )
-                    )
-                else:
-                    cases_with_neighbors, total_cases = (
-                        count_cases_with_neighbors(
-                            year_df,
-                            adjacency_matrix_post,
-                            significant_spatial_post,
-                            all_fips_post,
-                            require_significance,
-                        )
-                    )
-
-                # Only include years with cases
-                if total_cases > 0:
-                    year_data.append((cases_with_neighbors, total_cases))
-
-            data_by_threshold[threshold_label] = year_data
-
-        # Check if we have data for both thresholds
-        if (
-            len(data_by_threshold["All"]) == 0
-            or len(
-                data_by_threshold["Neighboring county\ncases are correlated"]
-            )
-            == 0
-        ):
-            print(f"\n{period_name}: Insufficient data")
-            return None
-
-        # Calculate statistics with proper uncertainty propagation
-        n_samples = 10000
-        ratio_samples = []
-        all_samples = []
-        pred_samples = []
-
-        for _ in range(n_samples):
-            # Sample from "All" threshold
-            all_yearly_proportions = []
-            for clustered, total in data_by_threshold["All"]:
-                isolated = total - clustered
-                alpha = clustered + 1
-                beta_param = isolated + 1
-                p_sample = stats.beta.rvs(alpha, beta_param)
-                all_yearly_proportions.append(p_sample)
-            avg_all = np.mean(all_yearly_proportions)
-            all_samples.append(avg_all * 100)
-
-            # Sample from "Predictive relationship" threshold
-            pred_yearly_proportions = []
-            for clustered, total in data_by_threshold[
-                "Neighboring county\ncases are correlated"
-            ]:
-                isolated = total - clustered
-                alpha = clustered + 1
-                beta_param = isolated + 1
-                p_sample = stats.beta.rvs(alpha, beta_param)
-                pred_yearly_proportions.append(p_sample)
-            avg_pred = np.mean(pred_yearly_proportions)
-            pred_samples.append(avg_pred * 100)
-
-            # Calculate ratio (avoid division by zero)
-            if avg_all > 0:
-                ratio = avg_pred / avg_all
-                ratio_samples.append(ratio)
-
-        # Get credible intervals
-        all_median = np.percentile(all_samples, 50)
-        all_lower = np.percentile(all_samples, 2.5)
-        all_upper = np.percentile(all_samples, 97.5)
-
-        pred_median = np.percentile(pred_samples, 50)
-        pred_lower = np.percentile(pred_samples, 2.5)
-        pred_upper = np.percentile(pred_samples, 97.5)
-
-        ratio_median = np.percentile(ratio_samples, 50)
-        ratio_lower = np.percentile(ratio_samples, 2.5)
-        ratio_upper = np.percentile(ratio_samples, 97.5)
-
-        # Print results
-        print(f"\n{period_name}:")
-        print(f"  All multi-county outbreaks:")
-        print(
-            f"    {all_median:.2f}% (95% CI: {all_lower:.2f}% - {all_upper:.2f}%)"
-        )
-        print(f"  Predictive relationship between neighbors:")
-        print(
-            f"    {pred_median:.2f}% (95% CI: {pred_lower:.2f}% - {pred_upper:.2f}%)"
-        )
-        print(f"  Ratio (Predictive / All):")
-        print(
-            f"    {ratio_median:.3f} (95% CI: {ratio_lower:.3f} - {ratio_upper:.3f})"
-        )
-        print(
-            f"    → {100 * ratio_median:.1f}% of multi-county outbreaks show predictive spatial relationships"
-        )
-        print(
-            f"  Based on {len(data_by_threshold['All'])} years with outbreak cases"
-        )
-
-        return {
-            "all_median": all_median,
-            "all_lower": all_lower,
-            "all_upper": all_upper,
-            "pred_median": pred_median,
-            "pred_lower": pred_lower,
-            "pred_upper": pred_upper,
-            "ratio_median": ratio_median,
-            "ratio_lower": ratio_lower,
-            "ratio_upper": ratio_upper,
-            "ratio_samples": ratio_samples,
-            "all_samples": all_samples,
-            "pred_samples": pred_samples,
-        }
-
-    # Calculate for 2011-2024
-    calculate_period_stats(range(2011, 2025), "2011-2024")
-
-    # Calculate for 2025
-    calculate_period_stats([2025], "2025")
-
-    print("=" * 70 + "\n")
-
-    return fig, ax
+    map_fips_code_data(
+        counties_with_neighbors.tolist(),
+        p_values,
+        fig,
+        ax,
+        cbar_label="Spatial effect p-value",
+        cbar_type="probability",
+    )
+    return adjacency_matrix
 
 
 if __name__ == "__main__":
-    with open(
+    posterior_samples = load_samples(
         os.path.join(
             output_dir,
-            "samples_partial_pooled_poisson_state_fixed_effect=True_pool=True_five_year=False_CAR=True_All covariates_[2021, 2022, 2023, 2024, 2025].pkl",
-        ),
-        "rb",
-    ) as file:
-        posterior_samples = pickle.load(file)
+            "samples_partial_pooled_poisson_state_fixed_effect=True_pool=True_five_year=False_CAR=True_All covariates_[2021, 2022, 2023, 2024, 2025].npz",
+        )
+    )
 
     fig, ax = setup_plot(3, 2)  # type: ignore
 
@@ -2097,14 +1439,12 @@ if __name__ == "__main__":
         ax[0, 0],  # type: ignore
     )
 
-    with open(
+    posterior_samples_pre = load_samples(
         os.path.join(
             output_dir,
-            "samples_partial_pooled_poisson_state_fixed_effect=True_pool=True_five_year=False_CAR=True_All covariates_[2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020].pkl",
-        ),
-        "rb",
-    ) as file:
-        posterior_samples_pre = pickle.load(file)
+            "samples_partial_pooled_poisson_state_fixed_effect=True_pool=True_five_year=False_CAR=True_All covariates_[2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020].npz",
+        )
+    )
 
     ax[0, 1].text(  # type: ignore
         -0.25,
@@ -2123,6 +1463,34 @@ if __name__ == "__main__":
         ax[0, 1],  # type: ignore
     )
 
+    # the change in the spatial correlation from 2011-2020 to 2021-2025: every
+    # draw of the 2021-2025 fit minus the same-numbered draw of the 2011-2020
+    # fit (independent fits, so the draws are unrelated: the correlation of the
+    # paired draws is printed as a check)
+    correlation_pre = (
+        2 * np.asarray(posterior_samples_pre["spatial_correlation"]) - 1
+    )
+    correlation_post = (
+        2 * np.asarray(posterior_samples["spatial_correlation"]) - 1
+    )
+    for label, draws in [
+        ("2011-2020", correlation_pre),
+        ("2021-2025", correlation_post),
+    ]:
+        low, median, high = np.percentile(draws, [2.5, 50, 97.5])
+        print(
+            f"Spatial correlation {label}: {median:.3f} "
+            f"[{low:.3f}, {high:.3f}]"
+        )
+    change = correlation_post - correlation_pre
+    low, median, high = np.percentile(change, [2.5, 50, 97.5])
+    print(
+        "Change in the spatial correlation, 2021-2025 minus 2011-2020: "
+        f"{median:.3f} [{low:.3f}, {high:.3f}], P(change > 0) = "
+        f"{np.mean(change > 0):.3f} (correlation of the paired draws "
+        f"{np.corrcoef(correlation_post, correlation_pre)[0, 1]:.3f})"
+    )
+
     ax[1, 0].text(  # type: ignore
         -0.25,
         1.08,
@@ -2134,16 +1502,7 @@ if __name__ == "__main__":
         ha="right",
     )
 
-    # we have to link each sample's inferred spatial effect to the corresponding county
-    # calculate p values
-    raw_spatial_effect = posterior_samples["raw_spatial_effect"]
-    # calculate the p-value for each spatial effect
-    p_values = 2 * np.minimum(
-        np.mean(raw_spatial_effect > 0, axis=0),
-        np.mean(raw_spatial_effect < 0, axis=0),
-    )
-
-    adjacency_matrix = pl.read_csv(
+    adjacency_data = pl.read_csv(
         os.path.join(data_dir, "county_adjacencies.txt"),
         separator="|",
         schema_overrides={
@@ -2158,37 +1517,39 @@ if __name__ == "__main__":
         schema_overrides={"fips": pl.String},
     )
 
-    df = df.filter(pl.col("year") >= 2021)
-
-    adjacency_matrix = adjacency.assemble_adjacency_matrix(
-        adjacency_matrix,
-        df["fips"].unique(maintain_order=True).to_list(),
-    )
-
-    # figure out who has a neighbor
-    has_a_neighor = adjacency_matrix.sum(axis=0) > 0
-    counties_with_neighbors = (
-        df["fips"].unique(maintain_order=True).to_numpy()[has_a_neighor]
-    )
-    df = df.filter(pl.col("fips").is_in(counties_with_neighbors))
-    df = df.select(pl.col("fips").unique(maintain_order=True))
-
-    df = df.with_columns(p_values=pl.Series(p_values))
-
-    map_fips_code_data(
-        df["fips"].to_list(),
-        df["p_values"].to_numpy(),
+    # the adjacency matrix of 2021-2025 is used by the next panels too
+    adjacency_matrix = map_spatial_effect_p_values(
+        posterior_samples,
+        df.filter(pl.col("year") >= 2021),
+        adjacency_data,
         fig,
         ax[1, 0],  # type: ignore
-        cbar_label="Spatial effect p-value",
-        cbar_type="probability",
     )
 
+    # the same map for 2011-2020
     ax[1, 1].text(  # type: ignore
         -0.25,
         1.08,
         "d",
         transform=ax[1, 1].transAxes,  # type: ignore
+        fontsize=24,
+        fontweight="bold",
+        va="top",
+        ha="right",
+    )
+    map_spatial_effect_p_values(
+        posterior_samples_pre,
+        df.filter(pl.col("year") < 2021),
+        adjacency_data,
+        fig,
+        ax[1, 1],  # type: ignore
+    )
+
+    ax[2, 0].text(  # type: ignore
+        -0.25,
+        1.08,
+        "e",
+        transform=ax[2, 0].transAxes,  # type: ignore
         fontsize=24,
         fontweight="bold",
         va="top",
@@ -2208,14 +1569,14 @@ if __name__ == "__main__":
         df,
         adjacency_matrix,
         fig,
-        ax[1, 1],  # type: ignore
+        ax[2, 0],  # type: ignore
     )
 
-    ax[2, 0].text(  # type: ignore
+    ax[2, 1].text(  # type: ignore
         -0.25,
         1.08,
-        "e",
-        transform=ax[2, 0].transAxes,  # type: ignore
+        "f",
+        transform=ax[2, 1].transAxes,  # type: ignore
         fontsize=24,
         fontweight="bold",
         va="top",
@@ -2226,24 +1587,21 @@ if __name__ == "__main__":
     # In your main plotting code:
 
     # Load year-specific CAR model (with buckets)
-    with open(
+    year_specific_samples = load_samples(
         os.path.join(
             output_dir,
-            "samples_partial_pooled_poisson_state_fixed_effect=True_pool=True_five_year=True_CAR=True_All covariates_2021_2025_CAR_by_two_year_bucket.pkl",
-        ),
-        "rb",
-    ) as file:
-        year_specific_samples = pickle.load(file)
+            "samples_partial_pooled_poisson_state_fixed_effect=True_pool=True_five_year=False_CAR=True_All covariates_2021_2025_CAR_by_two_year_bucket.npz",
+        )
+    )
 
-    # Load standard CAR model (without buckets)
-    with open(
+    # Load standard CAR model (without buckets), fit on the same one-year
+    # covariates as the year-specific fit above
+    standard_samples = load_samples(
         os.path.join(
             output_dir,
-            "samples_partial_pooled_poisson_state_fixed_effect=True_pool=True_five_year=True_CAR=True_All covariates_[2021, 2022, 2023, 2024, 2025].pkl",
-        ),
-        "rb",
-    ) as file:
-        standard_samples = pickle.load(file)
+            "samples_partial_pooled_poisson_state_fixed_effect=True_pool=True_five_year=False_CAR=True_All covariates_[2021, 2022, 2023, 2024, 2025].npz",
+        )
+    )
 
     # Prepare data
     df = pl.read_csv(
@@ -2295,37 +1653,33 @@ if __name__ == "__main__":
         adjacency_matrix_year_specific,
         two_year_bucket_map,
         fig,
-        ax[2, 0],  # type: ignore
+        ax[2, 1],  # type: ignore
     )
 
     # For standard model, you'd need a simplified version that doesn't expect buckets
     # Or calculate WAIC separately:
     print(f"\n{'=' * 70}")
-    print(f"MODEL COMPARISON")
+    print("MODEL COMPARISON")
     print(f"{'=' * 70}")
 
     # Calculate WAIC for standard model
     if "mu" in standard_samples:
-        from scipy.special import gammaln, logsumexp
+        from scipy.special import logsumexp
 
         mu_standard = np.array(standard_samples["mu"])
         observed_cases_standard = df_standard["cases_outbreak"].to_numpy()
 
-        print(f"\nStandard model diagnostics:")
+        print("\nStandard model diagnostics:")
         print(
             f"mu range: [{np.min(mu_standard):.6f}, {np.max(mu_standard):.6f}]"
         )
 
         epsilon = 1e-10
-        mu_safe_standard = np.maximum(mu_standard, epsilon)
-
-        log_lik_standard = np.zeros(
-            (mu_standard.shape[0], len(observed_cases_standard))
+        log_lik_standard = log_likelihood(
+            observed_cases_standard,
+            np.maximum(mu_standard, epsilon),
+            standard_samples.get("nb_concentration"),
         )
-        for i in range(len(observed_cases_standard)):
-            y = observed_cases_standard[i]
-            mu_i = mu_safe_standard[:, i]
-            log_lik_standard[:, i] = y * np.log(mu_i) - mu_i - gammaln(y + 1)
 
         # Use logsumexp for stability
         lppd_pointwise_standard = np.zeros(len(observed_cases_standard))
@@ -2338,13 +1692,13 @@ if __name__ == "__main__":
         p_waic_standard = np.sum(np.var(log_lik_standard, axis=0))
         waic_standard = -2 * (lppd_standard - p_waic_standard)
 
-        print(f"\nStandard CAR model (no time buckets):")
+        print("\nStandard CAR model (no time buckets):")
         print(f"  WAIC: {waic_standard:.2f}")
         print(f"  p_WAIC: {p_waic_standard:.2f}")
         print(f"  lppd: {lppd_standard:.2f}")
 
         if waic_bucket is not None:
-            print(f"\nYear-specific CAR model (two-year buckets):")
+            print("\nYear-specific CAR model (two-year buckets):")
             print(f"  WAIC: {waic_bucket['waic']:.2f}")
             print(f"  p_WAIC: {waic_bucket['p_waic']:.2f}")
             print(f"  lppd: {waic_bucket['lppd']:.2f}")
@@ -2354,56 +1708,12 @@ if __name__ == "__main__":
             ):
                 diff = waic_standard - waic_bucket["waic"]
                 print(f"\nDifference (Standard - Buckets): {diff:.2f}")
-                print(f"  Negative = buckets model is better")
-                print(f"  Positive = standard model is better")
-                print(f"  |diff| > 10 suggests strong evidence")
-                print(f"  |diff| > 4 suggests moderate evidence")
+                print("  Negative = standard model is better (lower WAIC)")
+                print("  Positive = buckets model is better (lower WAIC)")
+                print("  |diff| > 10 suggests strong evidence")
+                print("  |diff| > 4 suggests moderate evidence")
             else:
                 print("\nWARNING: Cannot compare due to infinite WAIC values")
-
-    # make adjacency matrix
-    # read adjacency data
-    adjacency_matrix = pl.read_csv(
-        os.path.join(data_dir, "county_adjacencies.txt"),
-        separator="|",
-        schema_overrides={
-            "County GEOID": pl.String,
-            "Neighbor GEOID": pl.String,
-        },
-    )
-    adjacency_matrix_observed = adjacency.assemble_adjacency_matrix(
-        adjacency_matrix,
-        df.filter(pl.col("year") >= 2021)["fips"]
-        .unique(maintain_order=True)
-        .to_list(),
-    )
-    adjacency_matrix_observed_pre = adjacency.assemble_adjacency_matrix(
-        adjacency_matrix,
-        df.filter(pl.col("year") < 2021)["fips"]
-        .unique(maintain_order=True)
-        .to_list(),
-    )
-
-    ax[2, 1].text(  # type: ignore
-        -0.25,
-        1.08,
-        "f",
-        transform=ax[2, 1].transAxes,  # type: ignore
-        fontsize=24,
-        fontweight="bold",
-        va="top",
-        ha="right",
-    )
-    plot_increasing_spread_over_time(
-        df,
-        adjacency_matrix_observed_pre,
-        adjacency_matrix_observed,
-        posterior_samples_pre,
-        posterior_samples,
-        fig,
-        ax[2, 1],  # type: ignore
-        year_bins=[(2011, 2015), (2016, 2020), (2021, 2024), (2025, 2025)],
-    )
 
     fig.tight_layout()
 

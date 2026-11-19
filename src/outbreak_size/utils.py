@@ -1,5 +1,11 @@
+import hashlib
+import inspect
+import json
 import os
+import sqlite3
+import time
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # The bit of logic below this is to fix an error caused by the Census changing its API
 # requirement on 12 May 2026. The Census package did not properly pass the API key to all
@@ -72,71 +78,11 @@ Client.tables = _patched_tables
 Client.fields = _patched_fields
 
 
-def browse_df(df, page_size=10, auto_exit=False):
-    """Browse dataframe page by page"""
-    total_rows = df.height
-    total_pages = (total_rows + page_size - 1) // page_size
-
-    current_page = 0
-
-    while True:
-        start_idx = current_page * page_size
-        end_idx = min(start_idx + page_size, total_rows)
-
-        print(f"\n--- Page {current_page + 1} of {total_pages} ---")
-        print(f"Showing rows {start_idx + 1} to {end_idx} of {total_rows}")
-        print(df.slice(start_idx, page_size))
-
-        if current_page == total_pages - 1:
-            print("\n[Last page reached]")
-            if auto_exit:
-                break
-
-        command = (
-            input(
-                "\nEnter 'n' for next, 'p' for previous, 'q' to quit, or row number: "
-            )
-            .strip()
-            .lower()
-        )
-
-        if command == "q":
-            break
-        elif command == "n" and current_page < total_pages - 1:
-            current_page += 1
-        elif command == "p" and current_page > 0:
-            current_page -= 1
-        elif command.isdigit():
-            row_num = int(command) - 1
-            if 0 <= row_num < total_rows:
-                page = row_num // page_size
-                current_page = page
-        else:
-            print("Invalid command. Please try again.")
-
-
-def census_variables(year: int = 2023, survey: str = "acs5") -> pl.DataFrame:
-    url = f"https://api.census.gov/data/{year}/acs/{survey}/variables.json"
-    response = requests.get(url)
-    data = response.json()
-
-    # Convert to searchable DataFrame
-    variables_df = pl.DataFrame(
-        [
-            {
-                "code": code,
-                "label": info.get("label", ""),
-                "concept": info.get("concept", ""),
-            }
-            for code, info in data["variables"].items()
-            if code not in ["for", "in", "ucgid"]
-        ]
-    )
-
-    return variables_df
-
-
+@lru_cache(maxsize=1)
 def fips_land_sizes() -> pl.DataFrame:
+    # Downloaded once per run, not once per CensusQuery (00 makes one for the
+    # counties and one for each region, 05 one for each year); a failed
+    # download is not kept. Callers only derive new frames from the result.
     # Download and process in memory
     url = "https://www2.census.gov/geo/docs/maps-data/data/gazetteer/2020_Gazetteer/2020_Gaz_counties_national.zip"
     response = requests.get(url)
@@ -152,9 +98,63 @@ def fips_land_sizes() -> pl.DataFrame:
     return df
 
 
+# where the answers of the Census are kept between runs (outputs/ is where the
+# results of the code go; delete the file to ask the Census again)
+CENSUS_CACHE_PATH = os.path.join(
+    os.path.dirname(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    ),
+    "outputs",
+    "census_cache.sqlite",
+)
+
+# how many requests to the Census are in flight at once (the scripts that ask
+# for the populations of many counties pass this to CensusQuery)
+CENSUS_WORKERS = 8
+
+
+class CensusCache:
+    """
+    The answers of the Census to `query`, kept in a SQLite file so that a
+    later request for the same county and year (in this run or the next one)
+    is not sent again, and a run that stops (a lost connection) can be started
+    again and goes on from the answers it already has. An answer is saved
+    when it arrives; a failed query saves nothing.
+    """
+
+    def __init__(self, path: str):
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        self.db = sqlite3.connect(path)
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS answers "
+            "(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        self.db.commit()
+
+    def get(self, key: str):
+        row = self.db.execute(
+            "SELECT value FROM answers WHERE key = ?", (key,)
+        ).fetchone()
+        return None if row is None else json.loads(row[0])
+
+    def put(self, key: str, value) -> None:
+        self.db.execute(
+            "INSERT OR REPLACE INTO answers (key, value) VALUES (?, ?)",
+            (key, json.dumps(value)),
+        )
+        self.db.commit()
+
+
 class CensusQuery:
-    def __init__(self, key: str):
+    def __init__(
+        self, key: str, cache_path: str | None = None, workers: int = 1
+    ):
+        assert workers >= 1, "workers must be at least 1"
         self.census = Census(key)
+        # the answers of the Census, kept between runs (None: ask every time)
+        self.cache = None if cache_path is None else CensusCache(cache_path)
+        # how many requests are in flight at once
+        self.workers = workers
         self.land_size = None
         # sourced from here
         # https://www.minneapolisfed.org/about-us/monetary-policy/inflation-calculator/consumer-price-index-1913-
@@ -176,7 +176,6 @@ class CensusQuery:
             2023: 0.041,
             2024: 0.029,
         }
-        self.within_county_mobility = None
 
     def query_5_9_pop(self, year: list[int], fips: list[str]) -> pl.DataFrame:
         """Get population of children aged 5-9 and their school type for given
@@ -185,19 +184,27 @@ class CensusQuery:
         assert len(fips) == len(year), (
             "FIPS and year lists must be the same length."
         )
-        pop_data = list()
-        # query census for each fips/year combo
-        for fip, y in tqdm(zip(fips, year), total=len(fips)):
-            pop_data.append(query(self.census, fip, y))
+        if self.cache is None and self.workers == 1:
+            # query census for each fips/year combo, one after the other
+            pop_data = list()
+            for fip, y in tqdm(zip(fips, year), total=len(fips)):
+                pop_data.append(query(self.census, fip, y))
+        else:
+            pop_data = fetch_answers(
+                self.census, self.cache, fips, year, workers=self.workers
+            )
         pop_df = [pl.DataFrame(pop_datum) for pop_datum in pop_data]
         # make a median household income column for inflation adjusting below
         pop_df = [
             df.with_columns(median_household_income=pl.col("B19019_001E"))
             for df in pop_df
         ]
-        # inflation adjust median household income to 2024 dollars
-        for idx, y in enumerate(year):
-            for yy in range(y + 1, 2024 + 1):
+        # inflation adjust median household income to the dollars of the
+        # latest ACS year, from the year the estimates are really of
+        # (_census_year: a county whose estimates stop earlier, such as
+        # Connecticut's, is inflated from that year)
+        for idx, (fip, y) in enumerate(zip(fips, year)):
+            for yy in range(_census_year(fip, y) + 1, LATEST_ACS5_YEAR + 1):
                 pop_df[idx] = pop_df[idx].with_columns(
                     median_household_income=pl.col("median_household_income")
                     * (1 + self.cpi_inflation[yy])
@@ -222,15 +229,19 @@ class CensusQuery:
             ),
             public_schooled=pl.col("B14003_005E") + pl.col("B14003_033E"),
             private_schooled=pl.col("B14003_014E") + pl.col("B14003_042E"),
+            # master's, professional and doctorate degrees of men and women
             number_graduate_degree=(
-                pl.col("B15003_023E")
-                + pl.col("B15003_024E")
-                + pl.col("B15003_025E")
+                pl.col("B15002_016E")
+                + pl.col("B15002_017E")
+                + pl.col("B15002_018E")
+                + pl.col("B15002_033E")
+                + pl.col("B15002_034E")
+                + pl.col("B15002_035E")
             ),
             # this is the denominator for the education question
-            pop_25_up=pl.col("B15003_001E"),
+            pop_25_up=pl.col("B15002_001E"),
             pop_15_up=(
-                pl.col("B15003_001E")
+                pl.col("B15002_001E")
                 + pl.col("B01001_006E")
                 + pl.col("B01001_030E")  # 15-17 population
                 + pl.col("B01001_007E")
@@ -286,139 +297,199 @@ class CensusQuery:
                 temp = temp.with_columns(fips=pl.lit(fip))
                 land_df_list.append(temp)
         land_df = pl.concat(land_df_list, how="diagonal_relaxed")
-        # group by fips code and sum
-        land_df = land_df.group_by("fips").agg(pl.sum("land_size_sq_km"))
+        # group by fips code and sum; the rows are in the order of `fips` (a
+        # group_by does not keep the order of the rows unless it is asked to)
+        land_df = land_df.group_by("fips", maintain_order=True).agg(
+            pl.sum("land_size_sq_km")
+        )
         return land_df
 
-    def query_within_county_mobility(
-        self, year: list[int], fips: list[str]
-    ) -> pl.DataFrame:
-        """Get within-county mobility for given FIPS codes and year."""
-        assert len(fips) == len(year), (
-            "FIPS and year lists must be the same length."
-        )
-        if self.within_county_mobility is None:
-            mobility = pl.read_csv(
-                os.path.join("data", "bts_mobility_statistics.csv"),
-                schema_overrides={"County FIPS": pl.String},
-            )
-            self.within_county_mobility = mobility
-        mobility = self.within_county_mobility
-        year_fips = pl.DataFrame({"year": year, "fips": fips})
-        mobility = mobility.with_columns(
-            year=pl.col("Date"), fips=pl.col("County FIPS")
-        )
-        mobility = mobility.join(year_fips, on=["year", "fips"], how="inner")
 
-        mobility = mobility.with_columns(
-            within_county_estimate=pl.col("Number of Trips <1")
-            + pl.col("Number of Trips 1-3")
-            + pl.col("Number of Trips 3-5")
-            + pl.col("Number of Trips 5-10")
-        )
-        mobility = mobility.select(["year", "fips", "within_county_estimate"])
-        return mobility
+# the latest year of the ACS 5-year estimates that is released (the 2021-2025
+# estimates are due in December 2026; the census package must support the year
+# too, and the cpi_inflation of the CensusQuery must reach it)
+LATEST_ACS5_YEAR = 2024
 
 
-def query(census, fip, y):
-    if y > 2024:
-        # census data is not available beyond 2024 yet
-        y = 2024
+def _census_year(fip, y):
+    """The year of the ACS 5-year estimates that is asked for the place `fip`
+    when the year `y` is wanted: the latest year there are data for."""
+    if y > LATEST_ACS5_YEAR:
+        y = LATEST_ACS5_YEAR
     elif y <= 2009:
         # the vars we want aren't available pre 2009
         y = 2010
     if fip[:2] == "09":
         # for some reason Connecticut data is not available after 2021
         y = min(y, 2021)
+    return y
+
+
+@lru_cache(maxsize=1)
+def _query_version():
+    """Changes when `query`, `_census_year` or ACS_FIELDS change (the fields asked, the
+    year moved), so that answers saved by the code of before are not used."""
+    source = (
+        inspect.getsource(query)
+        + inspect.getsource(_census_year)
+        + repr(ACS_FIELDS)
+    )
+    return hashlib.sha1(source.encode()).hexdigest()[:12]
+
+
+def _cache_key(fip, y):
+    """The key of the answer for the place `fip` and the year `y` in the
+    cache: the year that is really asked (_census_year), so the years after
+    2024 share the answer of 2024."""
+    return f"{_query_version()}|{fip}|{_census_year(fip, y)}"
+
+
+def cached_query(cache: CensusCache, census, fip, y):
+    """`query(census, fip, y)`, asking the Census only if `cache` has no
+    answer yet."""
+    key = _cache_key(fip, y)
+    answer = cache.get(key)
+    if answer is None:
+        answer = query(census, fip, y)
+        cache.put(key, answer)
+    return answer
+
+
+def fetch_answers(
+    census,
+    cache: CensusCache | None,
+    fips,
+    year,
+    workers: int = CENSUS_WORKERS,
+    attempts: int = 3,
+    wait: float = 2.0,
+):
+    """
+    The answer of `query` for each (fip, year) asked, in the order asked, with
+    up to `workers` requests in flight at once.
+
+    Each distinct place and year (the year that is really asked) is requested
+    once, and not at all if `cache` has it. The cache is only used here, in the
+    thread that called, and each answer is saved when it arrives, so a run
+    that stops (a failed query, a lost connection) keeps the answers it got
+    and a new run goes on from them. A failed query is tried `attempts` times
+    (waiting `wait`, 2 * `wait`, ... seconds in between); if it still fails
+    the error is raised, as `query` raises it, and no more requests are sent.
+    """
+    keys = [(fip, _census_year(fip, y)) for fip, y in zip(fips, year)]
+    answers = {}
+    missing = []
+    for key in dict.fromkeys(keys):
+        answer = None if cache is None else cache.get(_cache_key(*key))
+        if answer is None:
+            missing.append(key)
+        else:
+            answers[key] = answer
+
+    def ask(key):
+        for attempt in range(attempts):
+            try:
+                return query(census, *key)
+            except AssertionError:
+                if attempt == attempts - 1:
+                    raise
+                time.sleep(wait * (attempt + 1))
+
+    with tqdm(total=len(missing)) as bar:
+
+        def keep(key, answer):
+            answers[key] = answer
+            if cache is not None:
+                cache.put(_cache_key(*key), answer)
+            bar.update()
+
+        # The census client looks up the type of each field the first time
+        # a year is asked: ask one place of each year alone first, so that
+        # the threads do not all do the lookups at once
+        first = {}
+        for key in missing:
+            first.setdefault(key[1], key)
+        for key in first.values():
+            keep(key, ask(key))
+        rest = [key for key in missing if key not in answers]
+
+        pool = ThreadPoolExecutor(max_workers=workers)
+        futures = {pool.submit(ask, key): key for key in rest}
+        try:
+            for future in as_completed(futures):
+                keep(futures[future], future.result())
+        except BaseException:
+            for future in futures:
+                future.cancel()
+            raise
+        finally:
+            # let the requests in flight finish, and keep their answers
+            pool.shutdown(wait=True)
+            for future, key in futures.items():
+                if (
+                    future.done()
+                    and not future.cancelled()
+                    and future.exception() is None
+                    and key not in answers
+                ):
+                    keep(key, future.result())
+    return [answers[key] for key in keys]
+
+
+# the fields asked of the ACS 5-year estimates (tables B01001: sex by age;
+# B14003: school enrollment by type; B19019: median household income; B15002:
+# sex by educational attainment, 25 and over, which exists in every year from
+# 2010 - its later counterpart B15003 gives the same counts from 2012;
+# B02001: race)
+ACS_FIELDS = [
+    "B01001_001E",
+    "B01001_003E",
+    "B01001_004E",
+    "B01001_005E",
+    "B01001_006E",
+    "B01001_007E",
+    "B01001_008E",
+    "B01001_009E",
+    "B01001_010E",
+    "B01001_027E",
+    "B01001_028E",
+    "B01001_029E",
+    "B01001_030E",
+    "B01001_031E",
+    "B01001_032E",
+    "B01001_033E",
+    "B01001_034E",
+    "B14003_005E",
+    "B14003_014E",
+    "B14003_033E",
+    "B14003_042E",
+    "B19019_001E",
+    "B15002_001E",
+    "B15002_016E",
+    "B15002_017E",
+    "B15002_018E",
+    "B15002_033E",
+    "B15002_034E",
+    "B15002_035E",
+    "B02001_001E",
+    "B02001_002E",
+]
+
+
+def query(census, fip, y):
+    y = _census_year(fip, y)
     if len(fip) < 5:
         fcn = census.acs5.state
         args = {"state_fips": fip[:2], "year": y}
     else:
         fcn = census.acs5.state_county
         args = {"state_fips": fip[:2], "county_fips": fip[2:], "year": y}
-    # education data were not gathered pre 2012
-    if y >= 2012:
-        try:
-            return fcn(
-                fields=[
-                    "B01001_001E",
-                    "B01001_003E",
-                    "B01001_004E",
-                    "B01001_005E",
-                    "B01001_006E",
-                    "B01001_007E",
-                    "B01001_008E",
-                    "B01001_009E",
-                    "B01001_010E",
-                    "B01001_027E",
-                    "B01001_028E",
-                    "B01001_029E",
-                    "B01001_030E",
-                    "B01001_031E",
-                    "B01001_032E",
-                    "B01001_033E",
-                    "B01001_034E",
-                    "B14003_005E",
-                    "B14003_014E",
-                    "B14003_033E",
-                    "B14003_042E",
-                    "B19019_001E",
-                    "B15003_023E",
-                    "B15003_024E",
-                    "B15003_025E",
-                    "B15003_001E",
-                    "B02001_001E",
-                    "B02001_002E",
-                ],
-                **args,
-            )[0]  # census queries return a list of one dict
-        except Exception:
-            print(
-                f"Error querying census for FIPS {fip} and year {y}. Returning empty dict."
-            )
-            assert False
-    else:
-        # gather variables normally except education for 2012
-        income_schooling = fcn(
-            fields=[
-                "B01001_001E",
-                "B01001_003E",
-                "B01001_004E",
-                "B01001_005E",
-                "B01001_006E",
-                "B01001_007E",
-                "B01001_008E",
-                "B01001_009E",
-                "B01001_010E",
-                "B01001_027E",
-                "B01001_028E",
-                "B01001_029E",
-                "B01001_030E",
-                "B01001_031E",
-                "B01001_032E",
-                "B01001_033E",
-                "B01001_034E",
-                "B14003_005E",
-                "B14003_014E",
-                "B14003_033E",
-                "B14003_042E",
-                "B19019_001E",
-                "B02001_001E",
-                "B02001_002E",
-            ],
-            **args,
+    try:
+        return fcn(fields=ACS_FIELDS, **args)[
+            0
+        ]  # census queries return a list of one dict
+    except Exception:
+        print(
+            f"Error querying census for FIPS {fip} and year {y}. Returning empty dict."
         )
-        # education was only gathered from 2012 onwards
-        args["year"] = 2012
-        education = fcn(
-            fields=[
-                "B15003_023E",
-                "B15003_024E",
-                "B15003_025E",
-                "B15003_001E",
-            ],
-            **args,
-        )
-        # merge the two queries
-        # need the 0th element because census returns a list of dicts
-        return {**income_schooling[0], **education[0]}
+        assert False

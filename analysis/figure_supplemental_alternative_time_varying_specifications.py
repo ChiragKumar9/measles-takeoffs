@@ -1,12 +1,24 @@
 import os
-import pickle
+
+from numpyro import enable_x64
+
+enable_x64()
 
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
+import yaml
 from matplotlib import rc
 from matplotlib.ticker import ScalarFormatter
+
+from outbreak_size.coverage_effect import (
+    effect_label,
+    log_effect_per_pp,
+    percent_change_per_pp,
+    variability_label,
+)
+from outbreak_size.samples_io import load_samples
 
 data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 output_dir = os.path.join(
@@ -16,6 +28,13 @@ fig_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "figures")
 
 font = {"family": "Nimbus Roman", "size": 28}
 rc("font", **font)
+
+# read analysis params yaml
+with open("params.yml", "r") as f:
+    params = yaml.safe_load(f)
+# the scale of the vaccination covariates of the fits (see params.yml)
+COVARIATE_SCALE = params["covariate_scale"]
+MMR_EFFECTIVENESS = params.get("mmr_effectiveness")
 
 
 def setup_plot(nrows, ncols):
@@ -49,9 +68,17 @@ def setup_plot(nrows, ncols):
 
 
 def plot_time_varying_vaccine_effect(
-    sample_dict_wh, df, years_in_order, rolling_average, fig, ax
+    sample_dict_wh,
+    reference_rows,
+    df,
+    years_in_order,
+    rolling_average,
+    fig,
+    ax,
 ):
-    std_wh = df["estimated_mmr_cov"].to_numpy().std()
+    """The effect of the coverage over time of the fits in `sample_dict_wh`
+    (fit on the rows `df`) as the % change in outbreak size per 1pp of
+    coverage, averaged over the `reference_rows`, the same for every fit."""
     # get the relevant part of the sample for each sample
     for idx, model in enumerate(sample_dict_wh.keys()):
         # Extract the nationwide population-level effect
@@ -62,11 +89,15 @@ def plot_time_varying_vaccine_effect(
         # Reverse to chronological order (oldest to newest)
         effects = effects[:, ::-1]
 
-        # Scale by standard deviation
-        samples_wh = effects / std_wh
-
-        # Exponentiate and convert to percent change
-        samples_wh = jnp.exp(samples_wh) * 100 - 100
+        # per SD of the covariate -> % change per 1pp (see coverage_effect)
+        samples_wh = percent_change_per_pp(
+            effects,
+            df,
+            "estimated_mmr_cov",
+            reference_rows,
+            COVARIATE_SCALE,
+            MMR_EFFECTIVENESS,
+        )
 
         # Compute median and credible intervals across samples for each year
         median_effect = jnp.median(samples_wh, axis=0)
@@ -112,9 +143,7 @@ def plot_time_varying_vaccine_effect(
     ax.legend(loc=(0.34, 0.7), edgecolor="black")
 
     ax.set_xlabel("Year")
-    ax.set_ylabel(
-        "% change in outbreak size per 1pp\nincrease in vaccine coverage"
-    )
+    ax.set_ylabel(effect_label())
 
     return fig, ax
 
@@ -139,7 +168,9 @@ def plot_time_variance_group_variance_distributions(
         label="Year-to-year",
     )
     ax.legend(loc="lower right", edgecolor="black")
-    ax.set_xlabel("Standard deviation in vaccine effect")
+    ax.set_xlabel(
+        "Standard deviation in vaccine effect\n" + variability_label()
+    )
     ax.set_ylabel("Density")
     ax.set_xlim(0)
 
@@ -147,8 +178,14 @@ def plot_time_variance_group_variance_distributions(
 def plot_time_variance_vs_group_variance(rw_sigma, state_sigma, fig, ax):
     ax.scatter(state_sigma, rw_sigma, c="k", marker="o", alpha=0.2)
     ax.set_xlim(0)
-    ax.set_xlabel("State-to-state standard deviation\nin vaccine effect")
-    ax.set_ylabel("Year-to-year standard deviation\nin vaccine effect")
+    ax.set_xlabel(
+        "State-to-state standard deviation\nin vaccine effect\n"
+        + variability_label()
+    )
+    ax.set_ylabel(
+        "Year-to-year standard deviation\nin vaccine effect\n"
+        + variability_label()
+    )
     # R2
     r2 = jnp.corrcoef(state_sigma, rw_sigma)[0, 1] ** 2
     ax.text(
@@ -232,32 +269,28 @@ if __name__ == "__main__":
     sample_dict_wh = {}
 
     # time and group varying
-    with open(
+    samples = load_samples(
         os.path.join(
             output_dir,
-            "predictive_random_walk_poisson_CAR_time_and_group_varying_2025_oddities=True.pkl",
-        ),
-        "rb",
-    ) as file:
-        samples = pickle.load(file)
+            "predictive_random_walk_poisson_CAR_time_and_group_varying_2025_oddities=True.npz",
+        )
+    )
     sample_dict_wh["Time and state varying"] = samples
 
     # controls are time varying only
-    with open(
+    samples = load_samples(
         os.path.join(
             output_dir,
-            "predictive_random_walk_poisson_CAR_time_varying_only_2025_oddities=True.pkl",
-        ),
-        "rb",
-    ) as file:
-        samples = pickle.load(file)
+            "predictive_random_walk_poisson_CAR_time_varying_only_2025_oddities=True.npz",
+        )
+    )
     sample_dict_wh["Time varying only"] = samples
 
     # # controls are group varying only
     # with open(
     #     os.path.join(
     #         output_dir,
-    #         "predictive_random_walk_poisson_CAR_group_varying_only_2025_oddities=True.pkl",
+    #         "predictive_random_walk_poisson_CAR_group_varying_only_2025_oddities=True.npz",
     #     ),
     #     "rb",
     # ) as file:
@@ -268,7 +301,7 @@ if __name__ == "__main__":
     # with open(
     #     os.path.join(
     #         output_dir,
-    #         "predictive_random_walk_poisson_CAR_constant_2025_oddities=True.pkl",
+    #         "predictive_random_walk_poisson_CAR_constant_2025_oddities=True.npz",
     #     ),
     #     "rb",
     # ) as file:
@@ -287,6 +320,7 @@ if __name__ == "__main__":
     )
     plot_time_varying_vaccine_effect(
         sample_dict_wh,
+        df,
         df,
         years_in_order,
         True,
@@ -307,20 +341,19 @@ if __name__ == "__main__":
     plot_time_varying_vaccine_effect(
         sample_dict_wh,
         df,
+        df,
         years_in_order,
         False,
         fig,
         ax[0, 1],  # type: ignore
     )
 
-    with open(
+    samples = load_samples(
         os.path.join(
             output_dir,
-            "samples_random_walk_poisson_CAR_time_and_group_varying_2025_oddities=True.pkl",
-        ),
-        "rb",
-    ) as file:
-        samples = pickle.load(file)
+            "samples_random_walk_poisson_CAR_time_and_group_varying_2025_oddities=True.npz",
+        )
+    )
 
     ax[1, 0].text(  # type: ignore
         -0.25,
@@ -333,9 +366,22 @@ if __name__ == "__main__":
         ha="right",
     )
     plot_time_variance_group_variance_distributions(
-        samples["rw_drift"][:, 0] / (df["estimated_mmr_cov"].to_numpy().std()),
-        samples["time_and_group_varying_group_variabilities"][:, 0]
-        / (df["estimated_mmr_cov"].to_numpy().std()),
+        log_effect_per_pp(
+            samples["rw_drift"][:, 0],
+            df,
+            "estimated_mmr_cov",
+            df,
+            COVARIATE_SCALE,
+            MMR_EFFECTIVENESS,
+        ),
+        log_effect_per_pp(
+            samples["time_and_group_varying_group_variabilities"][:, 0],
+            df,
+            "estimated_mmr_cov",
+            df,
+            COVARIATE_SCALE,
+            MMR_EFFECTIVENESS,
+        ),
         fig,
         ax[1, 0],  # type: ignore
     )
@@ -351,9 +397,22 @@ if __name__ == "__main__":
         ha="right",
     )
     plot_time_variance_vs_group_variance(
-        samples["rw_drift"][:, 0] / (df["estimated_mmr_cov"].to_numpy().std()),
-        samples["time_and_group_varying_group_variabilities"][:, 0]
-        / (df["estimated_mmr_cov"].to_numpy().std()),
+        log_effect_per_pp(
+            samples["rw_drift"][:, 0],
+            df,
+            "estimated_mmr_cov",
+            df,
+            COVARIATE_SCALE,
+            MMR_EFFECTIVENESS,
+        ),
+        log_effect_per_pp(
+            samples["time_and_group_varying_group_variabilities"][:, 0],
+            df,
+            "estimated_mmr_cov",
+            df,
+            COVARIATE_SCALE,
+            MMR_EFFECTIVENESS,
+        ),
         fig,
         ax[1, 1],  # type: ignore
     )
@@ -363,32 +422,28 @@ if __name__ == "__main__":
     sample_dict_wh = {}
 
     # time and group varying
-    with open(
+    samples = load_samples(
         os.path.join(
             output_dir,
-            "predictive_random_walk_poisson_CAR_time_and_group_varying_2025_oddities=True_exclude_16_17.pkl",
-        ),
-        "rb",
-    ) as file:
-        samples = pickle.load(file)
+            "predictive_random_walk_poisson_CAR_time_and_group_varying_2025_oddities=True_exclude_16_17.npz",
+        )
+    )
     sample_dict_wh["Time and state varying"] = samples
 
     # controls are time varying only
-    with open(
+    samples = load_samples(
         os.path.join(
             output_dir,
-            "predictive_random_walk_poisson_CAR_time_varying_only_2025_oddities=True_exclude_16_17.pkl",
-        ),
-        "rb",
-    ) as file:
-        samples = pickle.load(file)
+            "predictive_random_walk_poisson_CAR_time_varying_only_2025_oddities=True_exclude_16_17.npz",
+        )
+    )
     sample_dict_wh["Time varying only"] = samples
 
     # # controls are group varying only
     # with open(
     #     os.path.join(
     #         output_dir,
-    #         "predictive_random_walk_poisson_CAR_group_varying_only_2025_oddities=True_exclude_16_17.pkl",
+    #         "predictive_random_walk_poisson_CAR_group_varying_only_2025_oddities=True_exclude_16_17.npz",
     #     ),
     #     "rb",
     # ) as file:
@@ -399,7 +454,7 @@ if __name__ == "__main__":
     # with open(
     #     os.path.join(
     #         output_dir,
-    #         "predictive_random_walk_poisson_CAR_constant_2025_oddities=True_exclude_16_17.pkl",
+    #         "predictive_random_walk_poisson_CAR_constant_2025_oddities=True_exclude_16_17.npz",
     #     ),
     #     "rb",
     # ) as file:
@@ -452,6 +507,7 @@ if __name__ == "__main__":
     )
     plot_time_varying_vaccine_effect(
         sample_dict_wh,
+        df,
         df.filter(
             ~pl.col("year_county_state").is_in(
                 exclude_16_17["year_county_state"].to_list()
@@ -467,32 +523,28 @@ if __name__ == "__main__":
     sample_dict_wh = {}
 
     # time and group varying
-    with open(
+    samples = load_samples(
         os.path.join(
             output_dir,
-            "predictive_random_walk_poisson_CAR_time_and_group_varying_2025_oddities=False_no_2025_oddities.pkl",
-        ),
-        "rb",
-    ) as file:
-        samples = pickle.load(file)
+            "predictive_random_walk_poisson_CAR_time_and_group_varying_2025_oddities=False_no_2025_oddities.npz",
+        )
+    )
     sample_dict_wh["Time and state varying"] = samples
 
     # controls are time varying only
-    with open(
+    samples = load_samples(
         os.path.join(
             output_dir,
-            "predictive_random_walk_poisson_CAR_time_varying_only_2025_oddities=False_no_2025_oddities.pkl",
-        ),
-        "rb",
-    ) as file:
-        samples = pickle.load(file)
+            "predictive_random_walk_poisson_CAR_time_varying_only_2025_oddities=False_no_2025_oddities.npz",
+        )
+    )
     sample_dict_wh["Time varying only"] = samples
 
     # # controls are group varying only
     # with open(
     #     os.path.join(
     #         output_dir,
-    #         "predictive_random_walk_poisson_CAR_group_varying_only_2025_oddities=False_no_2025_oddities.pkl",
+    #         "predictive_random_walk_poisson_CAR_group_varying_only_2025_oddities=False_no_2025_oddities.npz",
     #     ),
     #     "rb",
     # ) as file:
@@ -503,7 +555,7 @@ if __name__ == "__main__":
     # with open(
     #     os.path.join(
     #         output_dir,
-    #         "predictive_random_walk_poisson_CAR_constant_2025_oddities=False_no_2025_oddities.pkl",
+    #         "predictive_random_walk_poisson_CAR_constant_2025_oddities=False_no_2025_oddities.npz",
     #     ),
     #     "rb",
     # ) as file:
@@ -539,6 +591,7 @@ if __name__ == "__main__":
     )
     plot_time_varying_vaccine_effect(
         sample_dict_wh,
+        df,
         df.filter(~pl.col("oddities_2025")),
         years_in_order,
         False,

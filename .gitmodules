@@ -1,3 +1,0 @@
-[submodule "data/measles_data"]
-	path = data/measles_data
-	url = https://github.com/CSSEGISandData/measles_data

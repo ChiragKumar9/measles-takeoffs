@@ -1,9 +1,8 @@
 import os
-import pickle
 
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
-import numpy as np
+import numpyro.distributions as dist
 import polars as pl
 import yaml
 from jax.random import PRNGKey
@@ -13,9 +12,22 @@ from sklearn.preprocessing import StandardScaler
 
 enable_x64()
 set_host_device_count(4)  # use all cores for MCMC
-from numpyro.infer import MCMC, NUTS, Predictive, init_to_median
+from functools import partial
+
+from numpyro.infer import Predictive, init_to_median
 
 from outbreak_size import adjacency, random_walk
+from outbreak_size.convergence import MAX_DIVERGENCES, NEFF_MIN
+from outbreak_size.convergence import fit_with_fallback as _fit_with_fallback
+
+# script 03 holds every fit to more than r_hat, as script 02 does (06 and 07
+# only need r_hat): a centred fit with a divergent transition or an effective
+# sample size below NEFF_MIN is refit with the non-centred CAR field
+fit_with_fallback = partial(
+    _fit_with_fallback, neff_min=NEFF_MIN, max_divergences=MAX_DIVERGENCES
+)
+from outbreak_size.model_inputs import apply_covariate_scale, log_attack_rate
+from outbreak_size.samples_io import save_samples
 
 plt.rcParams["figure.figsize"] = [9, 9]
 font = {"family": "Nimbus Roman", "size": 28}
@@ -30,6 +42,29 @@ output_dir = os.path.join(
 with open("params.yml", "r") as f:
     params = yaml.safe_load(f)
 
+# RESUME_03=1 skips the fits that already have a row of this version of the code (one with a min_bfmi) in the
+# convergence file, so that a run that was killed (it was, out of memory, on 2026-11-12) goes on with the fits it did
+# not reach instead of starting again; the files of the skipped fits are not touched. Unset, every fit is run.
+RESUME_03 = os.environ.get("RESUME_03") == "1"
+CONVERGENCE_FILE = os.path.join(
+    os.path.dirname(os.path.dirname(__file__)),
+    "outputs",
+    "convergence_03_random_walk_poisson.csv",
+)
+
+# SD of the Normal(0, sd) priors on the baseline and the coefficients of the
+# inferential fits (the rolling validation and everything built on it use
+# `validation_globals_prior_sd`)
+INFERENTIAL_PRIOR_SD = params["inferential_globals_prior_sd"]
+# the prior of both spatial scales (the CAR field and the independent county effects), the same in 02, 03, 06 and 07
+SPATIAL_SIGMA_PRIOR = dist.HalfNormal(params["spatial_sigma_prior_scale"])
+# the likelihood of the outcome and the scale of the vaccination covariates (see
+# params.yml)
+LIKELIHOOD = params["inferential_likelihood"]
+COVARIATE_SCALE = params["covariate_scale"]
+NON_CENTERED_CAR = params["inferential_non_centered_car"]
+MMR_EFFECTIVENESS = params.get("mmr_effectiveness")
+
 if __name__ == "__main__":
     # Load dataset
     df = pl.read_csv(
@@ -37,6 +72,9 @@ if __name__ == "__main__":
         # make sure we read fips codes as strings
         schema_overrides={"fips": pl.String},
     )
+    # the centre of the baseline prior of every model below: the attack rate
+    # of the outbreak records of the whole study period
+    baseline_mean = log_attack_rate(df)
     adjacency_matrix = pl.read_csv(
         os.path.join(data_dir, "county_adjacencies.txt"),
         separator="|",
@@ -64,6 +102,17 @@ if __name__ == "__main__":
         + pl.col("state")
     )
     exclude_16_17.write_csv(os.path.join(output_dir, "exclude_16_17.csv"))
+    done_fits = set()
+    if RESUME_03:
+        recorded = pl.read_csv(
+            CONVERGENCE_FILE,
+            schema_overrides={"label": pl.String},
+            infer_schema_length=None,
+        )
+        done_fits = set(
+            recorded.filter(pl.col("min_bfmi").is_not_null())["label"]
+        )
+        print(f"RESUME_03: {len(done_fits)} fits are already done")
     for exclusions_16_17 in [True, False]:
         for oddities_2025 in [True, False]:
             additional_info = ""
@@ -137,6 +186,10 @@ if __name__ == "__main__":
                     )
                     additional_info = "_no_2025_oddities"
 
+            df_model = apply_covariate_scale(
+                df_model, COVARIATE_SCALE, MMR_EFFECTIVENESS
+            )
+
             covariates = df_model.select(
                 [
                     "estimated_mmr_cov",
@@ -149,7 +202,7 @@ if __name__ == "__main__":
                     "fraction_public",
                     "fraction_white",
                     "fraction_graduate_degree",
-                    "pop_density",
+                    "log_population_density",
                     "log_income",
                 ]
             )
@@ -176,6 +229,12 @@ if __name__ == "__main__":
                 # "group_varying_only",
                 # "constant",
             ]:
+                fit_label = (
+                    f"{mode}, oddities_2025={oddities_2025}{additional_info}"
+                )
+                if fit_label in done_fits:
+                    print(f"RESUME_03: skipping {fit_label} (already fitted)")
+                    continue
                 controls = jnp.hstack([df_model.select(years).to_jax()])
                 if mode == "time_and_group_varying":
                     time_and_group_varying = pl.concat(
@@ -204,34 +263,44 @@ if __name__ == "__main__":
                 else:
                     raise ValueError(f"Unknown mode: {mode}")
 
-                model = random_walk.PartialPooledPoisson(
-                    time_and_group_varying=time_and_group_varying,
-                    state_vary_rw=False,
-                    group_varying_only=group_varying_only,
-                    time_varying_only=time_varying_only,
-                    controls=controls,
-                    population=df_model["pop"].to_jax(),
-                    groups=df_model["state"],
-                    years=df_model["year"],
-                    spatial_units=df_model["geoid"],
-                    adjacency_matrix=assembled_adjacency_matrix,
+                adjacency.require_same_unit_order(
+                    df_model["fips"], df_model["geoid"], "03"
+                )
+                build_model = (
+                    lambda non_centered_car: random_walk.PartialPooledPoisson(
+                        time_and_group_varying=time_and_group_varying,
+                        state_vary_rw=False,
+                        group_varying_only=group_varying_only,
+                        time_varying_only=time_varying_only,
+                        controls=controls,
+                        population=df_model["pop"].to_jax(),
+                        groups=df_model["state"],
+                        years=df_model["year"],
+                        spatial_units=df_model["geoid"],
+                        adjacency_matrix=assembled_adjacency_matrix,
+                        baseline=dist.Normal(
+                            baseline_mean, INFERENTIAL_PRIOR_SD
+                        ),
+                        priors=dist.Normal(0, INFERENTIAL_PRIOR_SD),
+                        likelihood=LIKELIHOOD,
+                        non_centered_car=non_centered_car,
+                        spatial_sigma=SPATIAL_SIGMA_PRIOR,
+                    )
                 )
 
-                # fit model
-                nuts_kernel = NUTS(
-                    model.fit,
+                # fit model (refit with the non-centred CAR field if the
+                # centred fit has an r_hat above the threshold)
+                model, mcmc = fit_with_fallback(
+                    build_model,
+                    dict(cases=df_model["cases_outbreak"].to_jax()),
+                    seed=params["seed"],
+                    non_centered_car=NON_CENTERED_CAR,
+                    label=fit_label,
                     init_strategy=init_to_median(),
                     target_accept_prob=0.98,
-                )
-                mcmc = MCMC(
-                    nuts_kernel,
-                    num_warmup=2000,
-                    num_samples=2000,
-                    num_chains=4,
-                )
-                mcmc.run(
-                    PRNGKey(params["seed"]),
-                    cases=df_model["cases_outbreak"].to_jax(),
+                    record_path=os.path.join(
+                        output_dir, "convergence_03_random_walk_poisson.csv"
+                    ),
                 )
 
                 mcmc.print_summary()
@@ -239,14 +308,13 @@ if __name__ == "__main__":
                 # save posterior samples
                 posterior_samples = mcmc.get_samples()
 
-                with open(
+                save_samples(
                     os.path.join(
                         output_dir,
-                        f"samples_random_walk_poisson_CAR_{mode}_2025_oddities={oddities_2025}{additional_info}.pkl",
+                        f"samples_random_walk_poisson_CAR_{mode}_2025_oddities={oddities_2025}{additional_info}.npz",
                     ),
-                    "wb",
-                ) as file:
-                    pickle.dump(posterior_samples, file)
+                    posterior_samples,
+                )
 
                 predictive = Predictive(model.fit, posterior_samples)
                 predictive_samples = predictive(
@@ -294,7 +362,7 @@ if __name__ == "__main__":
                         1.05
                         * max(
                             df_model["cases_outbreak"].max(),  # type: ignore
-                            median.max(),
+                            median.max(),  # type: ignore
                         ),
                     ],
                     [
@@ -302,7 +370,7 @@ if __name__ == "__main__":
                         1.05
                         * max(
                             df_model["cases_outbreak"].max(),  # type: ignore
-                            median.max(),
+                            median.max(),  # type: ignore
                         ),
                     ],
                     ls="--",
@@ -313,7 +381,7 @@ if __name__ == "__main__":
                     1.1
                     * max(
                         df_model["cases_outbreak"].max(),  # type: ignore
-                        median.max(),
+                        median.max(),  # type: ignore
                     ),
                 )
                 ax.set_ylim(
@@ -321,7 +389,7 @@ if __name__ == "__main__":
                     1.1
                     * max(
                         df_model["cases_outbreak"].max(),  # type: ignore
-                        median.max(),
+                        median.max(),  # type: ignore
                     ),
                 )
 
@@ -356,11 +424,10 @@ if __name__ == "__main__":
                 print(f"Log R2: {log_r2}")
 
                 # save the predictive samples
-                with open(
+                save_samples(
                     os.path.join(
                         output_dir,
-                        f"predictive_random_walk_poisson_CAR_{mode}_2025_oddities={oddities_2025}{additional_info}.pkl",
+                        f"predictive_random_walk_poisson_CAR_{mode}_2025_oddities={oddities_2025}{additional_info}.npz",
                     ),
-                    "wb",
-                ) as file:
-                    pickle.dump(predictive_samples, file)
+                    predictive_samples,
+                )

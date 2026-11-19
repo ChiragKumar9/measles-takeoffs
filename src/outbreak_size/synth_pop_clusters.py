@@ -135,7 +135,7 @@ def cluster_fips(
     # need a measure of cluster spread
     # that's the variance across cluster centroids
     cluster_centers = kmeans.cluster_centers_
-    spread = cluster_centers.var(axis=0).mean()
+    spread = cluster_centers.var(axis=0).mean()  # type: ignore
 
     # more spread out clusters mean that the data is more clumpy
     # but this clumpiness is moderated by how tight the clusters are

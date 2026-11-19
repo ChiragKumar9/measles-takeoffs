@@ -1,5 +1,8 @@
 import os
-import pickle
+
+from numpyro import enable_x64
+
+enable_x64()
 
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
@@ -7,6 +10,12 @@ import numpy as np
 import polars as pl
 import yaml
 from matplotlib import rc
+
+from outbreak_size.coverage_effect import (
+    effect_label,
+    percent_change_per_pp,
+)
+from outbreak_size.samples_io import load_samples
 
 data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 output_dir = os.path.join(
@@ -20,6 +29,9 @@ rc("font", **font)
 # read analysis params yaml
 with open("params.yml", "r") as f:
     params = yaml.safe_load(f)
+# the scale of the vaccination covariates of the fits (see params.yml)
+COVARIATE_SCALE = params["covariate_scale"]
+MMR_EFFECTIVENESS = params.get("mmr_effectiveness")
 
 
 def setup_plot(nrows, ncols):
@@ -53,17 +65,13 @@ def setup_plot(nrows, ncols):
 
 
 def plot_vaccine_effect_coverage(df, fig, ax1, ax2, ax3):
-    std = df["estimated_mmr_cov"].to_numpy().std()
-
     # extract state-level vaccination effects
-    with open(
+    posterior_samples = load_samples(
         os.path.join(
             output_dir,
-            "samples_partial_pooled_poisson_state_fixed_effect=True_pool=True_five_year=False_CAR=True_All covariates_[2021, 2022, 2023, 2024, 2025].pkl",
-        ),
-        "rb",
-    ) as file:
-        posterior_samples = pickle.load(file)
+            "samples_partial_pooled_poisson_state_fixed_effect=True_pool=True_five_year=False_CAR=True_All covariates_[2021, 2022, 2023, 2024, 2025].npz",
+        )
+    )
 
     cov_effects = (
         posterior_samples["iv_global"][:, 0][:, None]
@@ -71,7 +79,18 @@ def plot_vaccine_effect_coverage(df, fig, ax1, ax2, ax3):
         * posterior_samples["iv_group_offsets"][:, :, 0]
     )
 
-    cov_effects = (jnp.exp(cov_effects / std) * 100) - 100
+    # the model was standardized on 2021-2025 only, so convert with the SD of
+    # those rows; the % change per 1pp is averaged over the same county-years
+    # (all of df) for every state, so that the states differ by their
+    # coefficient and not by the coverage of their counties
+    cov_effects = percent_change_per_pp(
+        cov_effects,
+        df.filter(pl.col("year").is_in([2021, 2022, 2023, 2024, 2025])),
+        "estimated_mmr_cov",
+        df,
+        COVARIATE_SCALE,
+        MMR_EFFECTIVENESS,
+    )
 
     cov_effects_median = jnp.median(cov_effects, axis=0)
     cov_effects_lower = jnp.quantile(cov_effects, 0.025, axis=0)
@@ -111,9 +130,7 @@ def plot_vaccine_effect_coverage(df, fig, ax1, ax2, ax3):
     ax1.axhline(y=0, color="k", linestyle="--")
 
     ax1.set_xlabel("State-level average MMR coverage (%)")
-    ax1.set_ylabel(
-        "% change in outbreak size per 1pp\nincrease in MMR vaccine coverage"
-    )
+    ax1.set_ylabel(effect_label())
     ax1.set_xlim(75, 101)
 
     # ax2 gets the credible interval width and number of occurences
@@ -139,9 +156,7 @@ def plot_vaccine_effect_coverage(df, fig, ax1, ax2, ax3):
         verticalalignment="top",
     )
     ax2.set_xlabel("Number of county-years in the state")
-    ax2.set_ylabel(
-        "95% credible interval width of\n% change in outbreak size per 1pp\nincrease in MMR vaccine coverage"
-    )
+    ax2.set_ylabel("95% credible interval width of\n" + effect_label())
 
     ax3.scatter(
         (df["outbreak_weighted_mean_mmr_cov"].to_jax()),
@@ -180,9 +195,7 @@ def plot_vaccine_effect_coverage(df, fig, ax1, ax2, ax3):
         verticalalignment="top",
     )
     ax3.set_xlabel("State-level average MMR coverage (%)")
-    ax3.set_ylabel(
-        "95% credible interval width of\n% change in outbreak size per 1pp\nincrease in MMR vaccine coverage"
-    )
+    ax3.set_ylabel("95% credible interval width of\n" + effect_label())
     ax3.set_xlim(75, 101)
 
     return fig, ax1, ax2, ax3

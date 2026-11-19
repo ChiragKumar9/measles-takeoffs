@@ -44,8 +44,8 @@ def setup_plot(nrows, ncols):
 
 def plot_num_times_county_represented(df, fig, ax):
     counts = df.group_by("fips").agg(pl.len())["len"]
-    # histogram with bins for every integer
-    ax.hist(counts, bins=np.arange(1, 16, 1), color="grey", alpha=0.6)
+    # histogram with bins for every integer, up to 15 years (2011-2025)
+    ax.hist(counts, bins=np.arange(1, 17, 1), color="grey", alpha=0.6)
     ax.set_xlabel("Number of years with cases")
     ax.set_ylabel("Number of counties")
     # shift the ticks because these are integer data
@@ -78,9 +78,10 @@ def plot_std_cases(df, fig, ax):
 
 
 def plot_num_times_state_represented(df, fig, ax):
-    counts = df.group_by("state").agg(pl.len())["len"]
-    # histogram with bins for every integer
-    ax.hist(counts, bins=np.arange(1, 16, 1), color="grey", alpha=0.6)
+    # distinct years per state (pl.len() would count county-years)
+    counts = df.group_by("state").agg(pl.col("year").n_unique())["year"]
+    # histogram with bins for every integer, up to 15 years (2011-2025)
+    ax.hist(counts, bins=np.arange(1, 17, 1), color="grey", alpha=0.6)
     ax.set_xlabel("Number of years with cases")
     ax.set_ylabel("Number of states")
     # shift the ticks because these are integer data

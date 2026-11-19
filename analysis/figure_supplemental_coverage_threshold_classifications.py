@@ -6,6 +6,8 @@ import yaml
 from matplotlib import rc
 from sklearn.metrics import roc_curve
 
+from outbreak_size.model_colors import EARLIER_PERIOD_COLOR, LATER_PERIOD_COLOR
+
 data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 output_dir = os.path.join(
     os.path.dirname(os.path.dirname(__file__)), "outputs"
@@ -101,7 +103,7 @@ def plot_outbreak_identification_rate(
         ].to_numpy(),
         marker="s",
         label="≥5 cases, 2011-2020",
-        color="blue",
+        color=EARLIER_PERIOD_COLOR,
         linestyle="--",
     )
 
@@ -115,7 +117,7 @@ def plot_outbreak_identification_rate(
         ].to_numpy(),
         marker="s",
         label="≥5 cases, 2021-2025",
-        color="green",
+        color=LATER_PERIOD_COLOR,
         linestyle="--",
     )
 
@@ -134,7 +136,7 @@ def plot_outbreak_identification_rate(
         ].to_numpy(),
         marker="s",
         label="≥5 cases, 2011-2020",
-        color="blue",
+        color=EARLIER_PERIOD_COLOR,
         linestyle="--",
     )
 
@@ -148,7 +150,7 @@ def plot_outbreak_identification_rate(
         ].to_numpy(),
         marker="s",
         label="≥5 cases, 2021-2025",
-        color="green",
+        color=LATER_PERIOD_COLOR,
         linestyle="--",
     )
 
@@ -176,7 +178,7 @@ def plot_outbreak_identification_rate(
         100 * fpr_old,
         100 * tpr_old,
         label="≥5 cases, 2011-2020",
-        color="blue",
+        color=EARLIER_PERIOD_COLOR,
         linestyle="--",
         linewidth=2,
     )
@@ -185,7 +187,7 @@ def plot_outbreak_identification_rate(
         100 * fpr_recent,
         100 * tpr_recent,
         label="≥5 cases, 2021-2025",
-        color="green",
+        color=LATER_PERIOD_COLOR,
         linestyle="--",
         linewidth=2,
     )

@@ -5,6 +5,14 @@ import yaml
 from dotenv import load_dotenv
 
 from outbreak_size import synth_pop_clusters, utils
+from outbreak_size.data_year import county_data_year_of_outbreak
+from outbreak_size.population import add_census_ratios
+from outbreak_size.projection_dataset import (
+    assemble_projection_year,
+    clean_year_vaccination_data,
+    require_same_census_values,
+    scenario_projection_rows,
+)
 
 data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 output_dir = os.path.join(
@@ -19,9 +27,14 @@ with open("params.yml", "r") as f:
 def add_pop_variables(
     merged_df: pl.DataFrame, year, census_key: str
 ) -> pl.DataFrame:
-    census_query = utils.CensusQuery(census_key)
+    census_query = utils.CensusQuery(
+        census_key,
+        cache_path=utils.CENSUS_CACHE_PATH,
+        workers=utils.CENSUS_WORKERS,
+    )
     fips = merged_df["fips"].to_list()
-    years_census = [year] * len(fips)
+    # the census of the year before the outbreak year, as the vaccination data
+    years_census = [county_data_year_of_outbreak(year)] * len(fips)
     pop_df = census_query.query_5_9_pop(years_census, fips)
     merged_df = merged_df.with_columns(
         pop_df[
@@ -42,23 +55,11 @@ def add_pop_variables(
     )
     # add a land size variable
     land_df = census_query.query_land_size(fips)
-    merged_df = merged_df.join(land_df, on="fips", how="left")
+    merged_df = merged_df.join(
+        land_df, on="fips", how="left", maintain_order="left"
+    )
 
-    merged_df = merged_df.with_columns(
-        pop_density=(pl.col("pop") / pl.col("land_size_sq_km")),
-        # these quantities are calculated only for people aged 5-9
-        fraction_public=(pl.col("public_schooled") / pl.col("pop_5_9")),
-        fraction_private=(pl.col("private_schooled") / pl.col("pop_5_9")),
-        # I previously checked by hand that public+private+not_enrolled = total pop
-        fraction_graduate_degree=(
-            pl.col("number_graduate_degree") / pl.col("pop_25_up")
-        ),
-        fraction_school_aged=pl.col("school_aged_population") / pl.col("pop"),
-        fraction_under_5=pl.col("pop_under_5") / pl.col("pop"),
-        fraction_5_9=pl.col("pop_5_9") / pl.col("pop"),
-        log_income=pl.col("median_household_income").log10(),
-        log_population=pl.col("pop").log10(),
-    ).with_columns(log_population_density=pl.col("pop_density").log10())
+    merged_df = add_census_ratios(merged_df)
     # add household size and std variables
     avg_sizes = []
     std_sizes = []
@@ -77,22 +78,21 @@ def add_pop_variables(
 if __name__ == "__main__":
     load_dotenv()
 
-    validation_years = [2021, 2022, 2023, 2024, 2025, 2026]
+    # the years with observed outbreaks (2021-2026; 2026 is the headline
+    # model's validation year) and 2027, the base of the projections
+    validation_years = [2021, 2022, 2023, 2024, 2025, 2026, 2027]
+    # the cases of 2011-2026 (the _with_2026 files of 00 and 01)
+    analysis_df = pl.read_csv(
+        os.path.join(data_dir, "analysis_dataset_with_2026.csv"),
+        schema_overrides={"fips": pl.String},
+    )
     for year in validation_years:
         df = pl.read_csv(
             os.path.join(data_dir, f"{year}_vaccination_data.csv"),
             schema_overrides={"fips": pl.String},
         )
 
-        # remove any places that have missing data
-        df = df.filter(
-            (pl.col("estimated_mmr_cov").is_not_null())
-            & (pl.col("med_exempt_pct").is_not_null())
-            & (pl.col("nonmed_exempt_pct").is_not_null())
-        )
-
-        # remove any places with fips codes greater than five digits
-        df = df.filter(pl.col("fips").str.len_chars() == 5)
+        df = clean_year_vaccination_data(df)
 
         # now add the relevant census data
         census_key = os.getenv("CENSUS_API_KEY")
@@ -101,88 +101,34 @@ if __name__ == "__main__":
         )
         df = add_pop_variables(df, year, census_key)
 
-        # scale the data
-        train_df = pl.read_csv(
-            os.path.join(data_dir, "analysis_dataset.csv"),
-            schema_overrides={"fips": pl.String},
+        df, dropped, dropped_train, n_projection, n_train = (
+            assemble_projection_year(df, analysis_df, year)
         )
-
-        # only use train data that equals the validation year
-        train_df = train_df.filter(pl.col("year") == year)
-
-        train_df = train_df.select(
-            [
-                "estimated_mmr_cov",
-                "nonmed_exempt_pct",
-                "med_exempt_pct",
-                "fraction_under_5",
-                "fraction_school_aged",
-                "avg_house_size",
-                "std_house_size",
-                "fraction_public",
-                "fraction_white",
-                "fraction_graduate_degree",
-                "pop_density",
-                "log_income",
-                "fips",
-                "state",
-                "county",
-                "year",
-                "pop",
-                "cases_outbreak",
-                "geoid",
-                "cases",
-            ]
-        ).with_columns(
-            in_train=pl.lit(1),
-            type=pl.lit("train"),
-            estimated_mmr_cov_raw=pl.col("estimated_mmr_cov"),
+        print(
+            f"{year}: {len(dropped)} of {n_projection} counties "
+            f"dropped for missing census or household data: {dropped}"
         )
-
-        projection_df = (
-            df.select(
-                [
-                    "estimated_mmr_cov",
-                    "nonmed_exempt_pct",
-                    "med_exempt_pct",
-                    "fraction_under_5",
-                    "fraction_school_aged",
-                    "avg_house_size",
-                    "std_house_size",
-                    "fraction_public",
-                    "fraction_white",
-                    "fraction_graduate_degree",
-                    "pop_density",
-                    "log_income",
-                    "fips",
-                    "state",
-                    "county",
-                    "year",
-                    "pop",
-                ]
-            )
-            .with_columns(
-                in_train=pl.lit(0),
-                # we need to have some value but it is not used
-                cases_outbreak=pl.lit(0),
-                cases=pl.lit(0),
-                estimated_mmr_cov_raw=df["estimated_mmr_cov"],
-                type=pl.lit("projection"),
-            )
-            .with_columns(
-                geoid=pl.when(pl.col("fips").is_null())
-                .then(pl.col("county"))
-                .otherwise(pl.col("county") + pl.col("fips"))
-            )
+        print(
+            f"{year}: {dropped_train.height} of {n_train} "
+            f"observed (train) rows dropped: {dropped_train.rows()}"
         )
-
-        # join the two dataframes together
-        df = pl.concat([train_df, projection_df], how="diagonal_relaxed")
-
-        # drop places with nas -- means there were too few people there to get census data
-        df = df.drop_nans()
-        # these arise from places that don't have a real fips code in the synth pop
-        df = df.drop_nulls()
+        # every observed county-year of the year is a train row, once: a
+        # train row dropped for a missing census or household value would be
+        # missing from the validation and the fit without a word
+        if dropped_train.height:
+            raise ValueError(
+                f"{year}: observed rows dropped from the projection dataset: "
+                f"{dropped_train.rows()}"
+            )
+        # a place that is a train row (script 00) and a projection row has
+        # the census values of the same year in both
+        require_same_census_values(df)
+        train_fips = df.filter(pl.col("type") == "train")["fips"]
+        if train_fips.is_duplicated().any():
+            raise ValueError(
+                f"{year}: a place has two train rows: "
+                f"{train_fips.filter(train_fips.is_duplicated()).unique().to_list()}"
+            )
 
         df.write_csv(
             os.path.join(output_dir, f"projection_dataset_{year}.csv")
@@ -208,50 +154,26 @@ if __name__ == "__main__":
     )
 
     future_years = projections["year"].unique().sort().to_list()
+    # the scenarios are for the outbreak years after the base year: a file
+    # of an earlier run (2026-2030) would be projected from the wrong base
+    assert future_years == list(range(base_year, 2031)), (
+        f"vaccine_coverage_projections_all_scenarios.csv has the years "
+        f"{future_years}, not {base_year}-2030: rerun the burden overview"
+    )
     scenarios = projections["scenario"].unique().sort().to_list()
 
     for scenario in scenarios:
         for future_year in future_years:
-            # Pull the projected values for this scenario and year
-            proj_slice = projections.filter(
-                (pl.col("scenario") == scenario)
-                & (pl.col("year") == future_year)
-            ).select(
-                [
-                    "fips",
-                    "projected_coverage",
-                    "projected_nonmed_exempt",
-                    "projected_med_exempt",
-                ]
+            out_df, lost = scenario_projection_rows(
+                base_df, projections, scenario, future_year
             )
-
-            # Join projected values onto the base census/demographic data
-            out_df = (
-                base_df.join(proj_slice, on="fips", how="inner")
-                .with_columns(
-                    [
-                        pl.col("projected_coverage").alias(
-                            "estimated_mmr_cov"
-                        ),
-                        pl.col("projected_coverage").alias(
-                            "estimated_mmr_cov_raw"
-                        ),
-                        pl.col("projected_nonmed_exempt").alias(
-                            "nonmed_exempt_pct"
-                        ),
-                        pl.col("projected_med_exempt").alias("med_exempt_pct"),
-                        pl.lit(future_year).alias("year"),
-                        pl.lit(scenario).alias("scenario"),
-                    ]
+            # a county without a projection would be left out of the rows,
+            # and the rows are matched to the draws of 07 by position
+            if lost:
+                raise ValueError(
+                    f"{scenario} {future_year}: {len(lost)} counties have no "
+                    f"projected values: {sorted(lost)}"
                 )
-                .drop(
-                    [
-                        "projected_coverage",
-                        "projected_nonmed_exempt",
-                        "projected_med_exempt",
-                    ]
-                )
-            )
 
             out_df.write_csv(
                 os.path.join(

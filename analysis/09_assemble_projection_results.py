@@ -1,13 +1,20 @@
 import os
 import pickle
 
-import numpy as np
 import polars as pl
+import yaml
 from numpyro import enable_x64
-from scipy.stats import rankdata
 
 enable_x64()
-import jax.numpy as jnp
+
+from outbreak_size.results import (
+    COUNTY_COLUMNS,
+    STATE_COLUMNS,
+    county_results,
+    join_importation,
+    state_results,
+)
+from outbreak_size.samples_io import load_samples
 
 output_dir = os.path.join(
     os.path.dirname(os.path.dirname(__file__)), "outputs"
@@ -15,55 +22,23 @@ output_dir = os.path.join(
 
 percentile_method = "average"
 
-GLOBALS_PRIOR_SD = 1
+# read analysis params yaml
+with open("params.yml", "r") as f:
+    params = yaml.safe_load(f)
 
+GLOBALS_PRIOR_SD = params["validation_globals_prior_sd"]
 
-def mean_percentile_rank(samples_2d: np.ndarray) -> np.ndarray:
-    """
-    For each posterior draw, rank units, shift to 0-based, convert to percentiles,
-    then average percentiles across draws.
+# The first outbreak year projected: the fit has seen the cases of 2026. Its
+# projection rows are the baseline scenario's values for school year 2026 (the
+# last known school year, 2025-26, trended one year along each county's slope,
+# as every value before a scenario is: projection_dataset_baseline_2027, the
+# draws risk_projections_baseline_2027_*). The map of the validation figure,
+# the table of its projections and the targets of the NME policy analyses
+# (10) read these results (assembled_projection_results.csv).
+FIRST_PROJECTION_YEAR = 2027
 
-    Parameters
-    ----------
-    samples_2d : np.ndarray, shape (n_draws, n_units)
-
-    Returns
-    -------
-    np.ndarray, shape (n_units,), values in [0, 100]
-    """
-    # rank each draw across units; shape stays (n_draws, n_units)
-    ranked = np.apply_along_axis(
-        lambda row: rankdata(row, method=percentile_method),
-        axis=1,
-        arr=samples_2d,
-    )
-    # shift to 0-based so the lowest unit gets exactly 0
-    ranked = ranked - 1
-    # divide each draw by that draw's max rank → percentiles in [0, 1]
-    max_per_draw = ranked.max(axis=1, keepdims=True)  # shape (n_draws, 1)
-    percentiles = ranked / max_per_draw  # shape (n_draws, n_units)
-    # average across draws, scale to [0, 100]
-    return percentiles.mean(axis=0) * 100
-
-
-with open(
-    os.path.join(
-        output_dir, f"risk_projections_globals_prior_sd={GLOBALS_PRIOR_SD}.pkl"
-    ),
-    "rb",
-) as f:
-    projections = pickle.load(f)
-
-df = pl.read_csv(
-    os.path.join(output_dir, "projection_dataset_2026.csv"),
-    schema_overrides={"fips": pl.String, "estimated_mmr_cov_raw": pl.Float64},
-)
-df = df.filter(pl.col("in_train") == 0)
-
-# clip projections at population size
-projections = jnp.minimum(projections, jnp.array(df["pop"]).reshape(1, -1))
-
-# add importation probability
+# add importation probability (the posterior of the imports through 2025
+# serves every year after 2025: results.join_importation)
 with open(
     os.path.join(output_dir, "empirical_importation_probability_samples.pkl"),
     "rb",
@@ -79,163 +54,42 @@ import_df = pl.read_csv(
     os.path.join(output_dir, "empirical_importation_probability.csv"),
     schema_overrides={"fips": pl.String},
 )
-import_df = import_df.with_columns(
-    importation_probability_samples=pl.Series(
-        samples["importation_probability_samples"].__array__()
-    ),
-    expected_importations_samples=pl.Series(  # <-- add
-        count_samples["expected_importations_samples"].__array__()
-    ),
-)
-df = df.join(
-    import_df.select(
-        [
-            "fips",
-            "year",
-            "type",
-            "importation_probability_mean",
-            "importation_probability_lower",
-            "importation_probability_upper",
-            "importation_probability_median",
-            "importation_probability_samples",
-            "expected_importations_samples",
-        ]
-    ),
-    on=["fips", "year", "type"],
-    how="left",
-)
 
-assert df["importation_probability_samples"].null_count() == 0, (
-    "Missing importation probability samples after join — check fips/year/type alignment"
-)
-assert df["expected_importations_samples"].null_count() == 0, (  # <-- add
-    "Missing importation count samples after join — check fips/year/type alignment"
-)
 
-importation_probability_samples = np.vstack(
-    df["importation_probability_samples"].to_numpy()  # type: ignore
-).T
-importation_count_samples = np.vstack(
-    df["expected_importations_samples"].to_numpy()  # type: ignore
-).T
+def assemble(projection_file, samples_file):
+    """The county and state results of one form of the projection rows."""
+    projections = load_samples(os.path.join(output_dir, samples_file))
+    df = pl.read_csv(
+        os.path.join(output_dir, projection_file),
+        schema_overrides={
+            "fips": pl.String,
+            "estimated_mmr_cov_raw": pl.Float64,
+        },
+    )
+    df = df.filter(pl.col("in_train") == 0)
+    # the draws are matched to the rows by position
+    if projections.shape[1] != df.height:
+        raise ValueError(
+            f"{samples_file} has {projections.shape[1]} columns, but "
+            f"{projection_file} has {df.height} projection rows"
+        )
+    df = join_importation(df, import_df, samples, count_samples)
 
-unconditioned_count_samples = (
-    importation_probability_samples * np.array(projections)
-    + importation_count_samples
+    # the ranks and summaries of the counties (the projections are clipped at
+    # the population size) and of the states
+    df = county_results(df, projections, percentile_method)
+    state_df = state_results(df, percentile_method)
+    return df, state_df
+
+
+scenario, scenario_state = assemble(
+    f"projection_dataset_baseline_{FIRST_PROJECTION_YEAR}.csv",
+    f"risk_projections_baseline_{FIRST_PROJECTION_YEAR}_globals_prior_sd={GLOBALS_PRIOR_SD}.npz",
 )
 
-pop = df["pop"].to_numpy().reshape(1, -1)  # shape: (1, n_counties)
-
-# --- Count-based rank (cases only) ---
-# unconditioned_count_samples shape: (n_draws, n_counties)
-unconditioned_count_rank_percentiles = mean_percentile_rank(
-    np.array(unconditioned_count_samples)
+scenario.select(COUNTY_COLUMNS).write_csv(
+    os.path.join(output_dir, "assembled_projection_results.csv")
 )
-
-# --- Incidence-based rank (cases / population) ---
-unconditioned_incidence_samples = (
-    unconditioned_count_samples / pop
-)  # shape: (n_draws, n_counties)
-unconditioned_incidence_rank_percentiles = mean_percentile_rank(
-    np.array(unconditioned_incidence_samples)
-)
-
-df = df.with_columns(
-    unconditioned_count_rank=pl.Series(unconditioned_count_rank_percentiles),
-    unconditioned_incidence_rank=pl.Series(
-        unconditioned_incidence_rank_percentiles
-    ),
-    mean_unconditioned_projection=pl.Series(
-        np.array(jnp.mean(unconditioned_count_samples, axis=0))
-    ),
-    median_unconditioned_projection=pl.Series(
-        np.array(jnp.median(unconditioned_count_samples, axis=0))
-    ),
-    lower_unconditioned_projection=pl.Series(
-        np.array(jnp.percentile(unconditioned_count_samples, 2.5, axis=0))
-    ),
-    upper_unconditioned_projection=pl.Series(
-        np.array(jnp.percentile(unconditioned_count_samples, 97.5, axis=0))
-    ),
-    unconditioned_count_replicates=pl.Series(
-        unconditioned_count_samples.T.tolist()
-    ),
-)
-
-state_df = df.group_by(["state", "type"]).agg(
-    pl.col("unconditioned_count_replicates").map_batches(
-        lambda x: pl.Series([np.stack(x.to_list()).sum(axis=0).tolist()]),
-        return_dtype=pl.List(pl.Float64),
-    ),
-    total_population=pl.col("pop").sum(),
-    weighted_mmr_coverage=(
-        pl.col("estimated_mmr_cov_raw") * pl.col("pop")
-    ).sum()
-    / pl.col("pop").sum(),
-)
-
-# state_count_replicates shape: (n_states, n_draws) — transpose for mean_percentile_rank
-state_count_replicates = np.vstack(
-    [
-        np.array(row)
-        for row in state_df["unconditioned_count_replicates"].to_list()
-    ]
-)  # shape: (n_states, n_draws)
-
-# transpose to (n_draws, n_states) so draws are on axis=0
-uncond_state_count_rank_pcts = mean_percentile_rank(state_count_replicates.T)
-
-state_df = state_df.with_columns(
-    unconditioned_risk_rank=pl.Series(uncond_state_count_rank_pcts),
-    mean_unconditioned_projection=pl.Series(
-        np.mean(state_count_replicates, axis=1)
-    ),
-    median_unconditioned_projection=pl.Series(
-        np.median(state_count_replicates, axis=1)
-    ),
-    lower_unconditioned_projection=pl.Series(
-        np.percentile(state_count_replicates, 2.5, axis=1)
-    ),
-    upper_unconditioned_projection=pl.Series(
-        np.percentile(state_count_replicates, 97.5, axis=1)
-    ),
-)
-
-df = df.select(
-    [
-        "fips",
-        "state",
-        "county",
-        "year",
-        "type",
-        "unconditioned_count_rank",
-        "unconditioned_incidence_rank",
-        "mean_unconditioned_projection",
-        "median_unconditioned_projection",
-        "lower_unconditioned_projection",
-        "upper_unconditioned_projection",
-        "importation_probability_mean",
-        "importation_probability_lower",
-        "importation_probability_upper",
-        "importation_probability_median",
-        "estimated_mmr_cov_raw",
-    ]
-)
-
-state_df = state_df.select(
-    [
-        "state",
-        "type",
-        "unconditioned_risk_rank",
-        "mean_unconditioned_projection",
-        "median_unconditioned_projection",
-        "lower_unconditioned_projection",
-        "upper_unconditioned_projection",
-        "weighted_mmr_coverage",
-    ]
-)
-
-df.write_csv(os.path.join(output_dir, "assembled_projection_results.csv"))
-state_df.write_csv(
+scenario_state.select(STATE_COLUMNS).write_csv(
     os.path.join(output_dir, "state_assembled_projection_results.csv")
 )

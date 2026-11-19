@@ -1,10 +1,22 @@
 import os
 import pickle
 
+from numpyro import enable_x64
+
+enable_x64()
+
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import polars as pl
+import yaml
 from matplotlib import rc
+
+from outbreak_size.coverage_effect import (
+    effect_label,
+    percent_change_per_pp,
+)
+from outbreak_size.model_colors import COVARIATE_SET_COLORS
+from outbreak_size.samples_io import load_samples
 
 data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 output_dir = os.path.join(
@@ -14,6 +26,13 @@ fig_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "figures")
 
 font = {"family": "Nimbus Roman", "size": 28}
 rc("font", **font)
+
+# read analysis params yaml
+with open("params.yml", "r") as f:
+    params = yaml.safe_load(f)
+# the scale of the vaccination covariates of the fits (see params.yml)
+COVARIATE_SCALE = params["covariate_scale"]
+MMR_EFFECTIVENESS = params.get("mmr_effectiveness")
 
 
 def setup_plot(nrows, ncols):
@@ -71,28 +90,27 @@ def plot_coverage_various_models(df, fig, ax):
 
     for year in year_buckets:
         for model_name in models:
-            with open(
+            posterior_samples = load_samples(
                 os.path.join(
                     output_dir,
-                    f"samples_partial_pooled_poisson_state_fixed_effect=True_pool=True_five_year=True_CAR=True_{model_name}_{year}.pkl",
-                ),
-                "rb",
-            ) as file:
-                posterior_samples = pickle.load(file)
+                    f"samples_partial_pooled_poisson_state_fixed_effect=True_pool=True_five_year=True_CAR=True_{model_name}_{year}.npz",
+                )
+            )
 
             coverage_effects = posterior_samples["iv_global"][:, 0]
-            # scale by the standard deviation of the coverage to get an
-            # interpretable term
-            std = (
-                df.filter(pl.col("year").is_in(year))
-                .select("estimated_mmr_cov")
-                .to_numpy()
-                .std()
+            # scale by the standard deviation of the coverage the five-year
+            # models were standardized with (the 5-year coverage column) to
+            # get an interpretable term
+            # % change per 1pp of the 5-year coverage, averaged over the
+            # county-years of all the years
+            coverage_effects = percent_change_per_pp(
+                coverage_effects,
+                df.filter(pl.col("year").is_in(year)),
+                "estimated_mmr_cov_5yr",
+                df,
+                COVARIATE_SCALE,
+                MMR_EFFECTIVENESS,
             )
-            coverage_effects = coverage_effects / std
-            coverage_effects = jnp.exp(coverage_effects) * 100
-            # to express as percent change
-            coverage_effects = coverage_effects - 100
             median_effect = float(jnp.median(coverage_effects, axis=0))
             lower_effect = float(jnp.quantile(coverage_effects, 0.025, axis=0))
             upper_effect = float(jnp.quantile(coverage_effects, 0.975, axis=0))
@@ -121,11 +139,7 @@ def plot_coverage_various_models(df, fig, ax):
                 .otherwise(pl.col("mean_coverage_effect")),
             )
 
-    colors = {
-        "MMR coverage": "red",
-        "MMR coverage + exemptions": "purple",
-        "All covariates": "orange",
-    }
+    colors = COVARIATE_SET_COLORS
 
     for model_name, offset in zip(models, [-0.07, 0, 0.07]):
         model_effects = assembled_effects.filter(
@@ -177,32 +191,32 @@ def plot_coverage_various_models(df, fig, ax):
     ax.set_xlim([-0.18, 1.18])
 
     ax.set_xlabel("Year")
-    ax.set_ylabel(
-        "% change in incidence rate per 1pp increase\nin 5 year MMR vaccine coverage"
-    )
+    ax.set_ylabel(effect_label().replace("MMR vaccine", "5 year MMR vaccine"))
     ax.legend(loc=(0.2, 0.65), edgecolor="black")
 
     return fig, ax
 
 
-def plot_5yr_performance_comparison(df, fig, ax):
-    with open(
-        os.path.join(
-            output_dir,
-            f"predictive_partial_pooled_poisson_state_fixed_effect=True_pool=True_five_year=False_CAR=True_All covariates_[2021, 2022, 2023, 2024, 2025].pkl",
-        ),
-        "rb",
-    ) as file:
-        one_year = pickle.load(file)
+# the y axis of the residuals of the statistical models is cut at +-Y_CAP: a
+# few large outbreaks (hundreds of cases) have residuals far beyond it, and
+# they stretch the axis until the rest cannot be seen
+Y_CAP = 40
 
-    with open(
+
+def plot_5yr_performance_comparison(df, fig, ax):
+    one_year = load_samples(
         os.path.join(
             output_dir,
-            f"predictive_partial_pooled_poisson_state_fixed_effect=True_pool=True_five_year=True_CAR=True_All covariates_[2021, 2022, 2023, 2024, 2025].pkl",
-        ),
-        "rb",
-    ) as file:
-        five_year = pickle.load(file)
+            "predictive_partial_pooled_poisson_state_fixed_effect=True_pool=True_five_year=False_CAR=True_All covariates_[2021, 2022, 2023, 2024, 2025].npz",
+        )
+    )
+
+    five_year = load_samples(
+        os.path.join(
+            output_dir,
+            "predictive_partial_pooled_poisson_state_fixed_effect=True_pool=True_five_year=True_CAR=True_All covariates_[2021, 2022, 2023, 2024, 2025].npz",
+        )
+    )
 
     df = df.filter(pl.col("year").is_in([2021, 2022, 2023, 2024, 2025]))
     # concatenate on the case estimates
@@ -241,6 +255,21 @@ def plot_5yr_performance_comparison(df, fig, ax):
 
     # remove any cases where vaccination_roc is null
     df = df.filter(pl.col("year_over_year_change").is_not_null())
+
+    # say which residuals the cap of the y axis leaves out
+    for name in ["one_year_residuals", "five_year_residuals"]:
+        beyond = df.filter(pl.col(name).abs() > Y_CAP).sort(
+            pl.col(name).abs(), descending=True, maintain_order=True
+        )
+        if beyond.height > 0:
+            largest = beyond.row(0, named=True)
+            print(
+                f"y axis capped at +-{Y_CAP}: {beyond.height} of {df.height} "
+                f"{name.replace('_', ' ')} are beyond it and not shown; the "
+                f"largest is {largest['county']}, {largest['state']} "
+                f"{largest['year']}: {largest['cases_outbreak']} cases, "
+                f"residual {largest[name]:.0f}"
+            )
 
     # We're going to violin plot the residuals by buckets
     df = df.with_columns(
@@ -374,7 +403,8 @@ def plot_5yr_performance_comparison(df, fig, ax):
     ax.set_xlabel("Year-to-year change in MMR coverage (pp)")
     ax.set_ylabel("Residuals (reported - predicted cases)")
 
-    ax.set_yticks([-10, 0, 10, 20])
+    ax.set_ylim(-Y_CAP, Y_CAP)
+    ax.set_yticks(range(-Y_CAP, Y_CAP + 1, 20))
 
     return fig, ax
 
@@ -383,7 +413,7 @@ def plot_5yr_performance_comparison_mechanistic(df, fig, ax):
     with open(
         os.path.join(
             output_dir,
-            f"final_outbreak_size_predictions_[2021, 2022, 2023, 2024, 2025]_five_year=False.pkl",
+            "final_outbreak_size_predictions_[2021, 2022, 2023, 2024, 2025]_five_year=False.pkl",
         ),
         "rb",
     ) as file:
@@ -392,7 +422,7 @@ def plot_5yr_performance_comparison_mechanistic(df, fig, ax):
     with open(
         os.path.join(
             output_dir,
-            f"final_outbreak_size_predictions_[2021, 2022, 2023, 2024, 2025]_five_year=True.pkl",
+            "final_outbreak_size_predictions_[2021, 2022, 2023, 2024, 2025]_five_year=True.pkl",
         ),
         "rb",
     ) as file:

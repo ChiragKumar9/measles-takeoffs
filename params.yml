@@ -1,2 +1,138 @@
 inclusion_threshold: 3
 seed: 108
+# SD of the Normal(0, sd) priors on the global coefficients and the baseline.
+# validation: rolling validation, risk projections and policy analyses (06, 07, 09, 11, table, figures)
+# inferential: the inferential fits (02, 03); 10 is the model-class default
+validation_globals_prior_sd: 1
+inferential_globals_prior_sd: 10
+# Scale of the HalfNormal priors of the two spatial scales (the CAR field and the independent
+# county effects), the same for every fit (02, 03, 06, 07; 11 only predicts from the draws of 07)
+spatial_sigma_prior_scale: 1
+# The outbreak size model's likelihood: "poisson", or "negative_binomial" (adds one
+# concentration parameter, for counts more variable than a Poisson allows).
+# inferential: 02, 03; validation: 06, 07, 11 and what is built on them
+inferential_likelihood: negative_binomial
+validation_likelihood: negative_binomial
+# Sample the spatial (CAR) term through white noise ("non-centred"): exactly the
+# same model and priors, but the spatial correlation mixes much better (see
+# src/outbreak_size/car_noncentered.py). Each fit takes several times longer, so it
+# is a setting of its own for each group of scripts. This is the form a fit STARTS
+# with: a spatial fit that has an r_hat above 1.01 is refit with the other form
+# (outbreak_size.convergence.fit_with_fallback), so false means "centred, non-centred if it
+# does not converge"
+# inferential: 02, 03; validation: 06 (the rolling validation, many fits)
+inferential_non_centered_car: false
+validation_non_centered_car: false
+# The risk projections (07) are one fit, so they start non-centred. Script 11 only predicts
+# from the draws of 07 and builds the model in the form the draws were made in
+projection_non_centered_car: true
+# Scale of the vaccination covariates (coverage, exemptions): "raw" (percentages)
+# or "natural" (coverage as the log of the susceptible fraction, exemptions as
+# log(1 + percentage)); "natural" needs `mmr_effectiveness` (a fraction, with the
+# PMID of its source in a comment) in this file. Every coefficient of the
+# vaccination covariates is read on this scale
+covariate_scale: natural
+# Share of vaccinated who are immune. All-or-nothing immunity.
+mmr_effectiveness: 0.97
+mechanistic_r0: 12.0
+# County-years of the compiled vaccination spreadsheet that failed the data QC
+# (00_explore_data.py and figure_measles_burden_overview.py read this list).
+# Without `fields` the whole row (coverage and exemptions) is removed; with
+# `fields: [coverage]` only the coverage is blanked. The county then takes its
+# state's series for what is missing.
+qc_exclusions:
+  # Locations where vaccine data was flagged by QC and unresolvable by
+  # checking with the source
+  - {state: Georgia, county: Butts, year: 2024, fields: [coverage]}
+  - {state: Georgia, county: Jasper, year: 2024, fields: [coverage]}
+  - {state: Georgia, county: Lumpkin, year: 2024, fields: [coverage]}
+  - {state: Georgia, county: Richmond, year: 2024, fields: [coverage]}
+  - {state: Georgia, county: Schley, year: 2024, fields: [coverage]}
+  - {state: Maryland, county: Baltimore City, year: 2019}
+  - {state: North Dakota, county: Slope, year: 2021}
+  # Richmond's coverage is 8.06, 0.04, 0.0 and 0.04 in 2020-2023, implausible
+  # (to be checked with the data owner); its exemptions look ordinary
+  - {state: Georgia, county: Richmond, year: 2020, fields: [coverage]}
+  - {state: Georgia, county: Richmond, year: 2021, fields: [coverage]}
+  - {state: Georgia, county: Richmond, year: 2022, fields: [coverage]}
+  - {state: Georgia, county: Richmond, year: 2023, fields: [coverage]}
+  # a coverage of 0.0 in 2025 (Georgia reports all-vaccine coverage only); the
+  # exemptions are ordinary, so only the coverage is blanked and the county's
+  # latest earlier value carries forward
+  - {state: Georgia, county: Montgomery, year: 2025, fields: [coverage]}
+  - {state: Georgia, county: Twiggs, year: 2025, fields: [coverage]}
+  # 13 children enrolled in 2024-25 (about 377 in 2023-24): a partial
+  # submission, with 30.8% non-medical exemptions and 69.2% MMR coverage
+  - {state: Virginia, county: Warren, year: 2024}
+# School-level vaccination files (analysis/assemble_school_vaccination.py;
+# the rules are explained in src/outbreak_size/school_vaccination.py).
+# Sources: Chen & Bento (PMID 42613442; per-state school files, many years, no
+# school names or types) and the Washington Post file (one school year per
+# state, with names, types and exemption rates). Rates are percentages (0-100).
+school_vaccination:
+  # The source of each state and school year: the Washington Post, else Chen &
+  # Bento, else the state files. The Washington Post year of a state is used
+  # only if the file has at least this share of the rated schools Chen & Bento
+  # has there (a partial file does not replace a complete one: Illinois 55%,
+  # Minnesota 64%, Iowa 83%, Louisiana 88% of Chen & Bento's schools; the
+  # other states are at 91% or more).
+  wapo_min_share_of_chen_bento: 0.9
+  # Grade scope, reviewed by hand: the Washington Post names of the first group
+  # include high, middle and intermediate schools; the enrollment of the second
+  # group is that of all grades (a school's enrollment is not the kindergarten
+  # class).
+  secondary_included_states: [IA, HI, VT, NY]
+  all_grade_enrollment_states: [IL, IA]
+  # The Chen & Bento "school" file of these states holds school districts: Texas
+  # has about 1,730 rows a year (a school count would be about 9,000), and in 106
+  # of 108 comparable counties its rates equal the Washington Post district rows.
+  # The other Chen & Bento states are taken as schools (the release's level
+  # column says "school"; its school counts match the Washington Post's).
+  chen_bento_district_states: [TX]
+  # Is the enrollment the denominator of the rate (rate x enrollment is a whole
+  # number of students)? From enrollment_basis_diagnostic.csv; states not listed
+  # are unknown (rates in whole percents, or too few schools to tell).
+  enrollment_basis:
+    washington_post:
+      denominator: [DC, HI, IA, IL, ME, MI, MN, ND, OH, PA, UT, VA, WA]
+      not_denominator: [IN]
+    chen_bento:
+      denominator: [AZ, CO, HI, IA, IL, ME, MI, MN, NC, OH, PA, SC, TN, VA, WA]
+      ambiguous: [DC, MD]
+      not_denominator: [AR, CT, ID, IN, KY, LA, MA, ND, NM, NV, OK, OR, TX]
+  # Coordinates must lie in the United States (without Alaska's far north)
+  us_bounds: {lon: [-180, -60], lat: [15, 75]}
+  # A school further than this from its own state (in km) is dropped; a school
+  # inside another state's county is given the nearest county of its own state
+  max_km_from_state: 20
+  # A school further than this from the county its Washington Post label names
+  max_km_from_label_county: 20
+  # Same school in the two files: the nearest school within this distance (m),
+  # the only candidate in both directions
+  match_radius_m: 100
+  # County-years whose mean school rate is further than this (percentage
+  # points) from the county MMR of the same school year (estimated_mmr_cov of
+  # processed_vaccinations_data.csv) are flagged qc_gap_ok = false in the
+  # county files; an imputed county MMR leaves the flag empty (inconclusive).
+  # This is the rule of panel d of the county-level outbreak figure.
+  school_mean_qc_max_gap_pp: 10
+  # Chen & Bento rounds rates to one decimal; rates this close (points) are equal
+  rate_tolerance_points: 0.1
+  # A rate (percent) below this with known enrollment is flagged below_placeholder_rate
+  # (a Chen & Bento rate of exactly 0 with unknown enrollment is missing)
+  placeholder_rate_below: 10
+  # A coordinate with more than this many records, which are at least this
+  # share of the records of their county and school year, is a fallback point
+  # (a placeholder, not the schools' place): its records are dropped
+  fallback_point_min_schools: 15
+  fallback_point_min_share: 0.5
+  # A year is a copy of the year before if at least this share of the schools
+  # below 100% in both years has the same rate, among at least this many schools
+  copied_year_unchanged_share: 0.99
+  copied_year_min_schools: 30
+  # Flags for low rates (flags only, nothing is removed)
+  low_rate:
+    below: 50
+    below_min_enrollment: 50
+    far_below_median_points: 50
+    far_below_median_min_enrollment: 30

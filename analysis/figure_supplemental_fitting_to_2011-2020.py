@@ -1,6 +1,10 @@
 import os
 import pickle
 
+from numpyro import enable_x64
+
+enable_x64()
+
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import matplotlib.ticker as tck
@@ -9,6 +13,16 @@ import yaml
 from matplotlib import rc
 
 from outbreak_size import waic
+from outbreak_size.coverage_effect import (
+    percent_change_per_pp,
+)
+from outbreak_size.model_colors import (
+    EARLIER_PERIOD_COLOR,
+    LATER_PERIOD_COLOR,
+    MECHANISTIC_COLOR,
+    STATISTICAL_COLOR,
+)
+from outbreak_size.samples_io import load_samples
 
 data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 output_dir = os.path.join(
@@ -22,6 +36,9 @@ rc("font", **font)
 # read analysis params yaml
 with open("params.yml", "r") as f:
     params = yaml.safe_load(f)
+# the scale of the vaccination covariates of the fits (see params.yml)
+COVARIATE_SCALE = params["covariate_scale"]
+MMR_EFFECTIVENESS = params.get("mmr_effectiveness")
 
 
 def setup_plot(nrows, ncols):
@@ -69,8 +86,8 @@ def plot_predictions(df, samples, naive_model, fig, ax, waic_values):
             naive_model["upper"] - naive_model["median"],
         ],
         fmt="o",
-        ecolor="red",
-        c="red",
+        ecolor=MECHANISTIC_COLOR,
+        c=MECHANISTIC_COLOR,
         capsize=0,
         alpha=0.4,
         label="Mechanistic: MMR coverage",
@@ -81,8 +98,8 @@ def plot_predictions(df, samples, naive_model, fig, ax, waic_values):
         median,
         yerr=[median - lower, upper - median],
         fmt="o",
-        ecolor="green",
-        c="green",
+        ecolor=STATISTICAL_COLOR,
+        c=STATISTICAL_COLOR,
         capsize=0,
         alpha=0.8,
         label="Statistical: All covariates",
@@ -156,19 +173,19 @@ def plot_predictions(df, samples, naive_model, fig, ax, waic_values):
 
     # add a text annotation of the WAIC (lower is better)
     ax.text(
-        0.00025 * max(df["cases_outbreak"].max(), upper.max()),
-        0.35 * max(df["cases_outbreak"].max(), upper.max()),
+        0.00025 * max(df["cases_outbreak"].max(), upper.max()),  # type: ignore
+        0.35 * max(df["cases_outbreak"].max(), upper.max()),  # type: ignore
         f"WAIC = {waic_values[0]:.0f}",
         fontsize=30,
-        color="green",
+        color=STATISTICAL_COLOR,
     )
 
     ax.text(
-        0.00025 * max(df["cases_outbreak"].max(), upper.max()),
-        0.63 * max(df["cases_outbreak"].max(), upper.max()),
+        0.00025 * max(df["cases_outbreak"].max(), upper.max()),  # type: ignore
+        0.63 * max(df["cases_outbreak"].max(), upper.max()),  # type: ignore
         f"WAIC = {waic_values[1]:.0f}",
         fontsize=30,
-        color="red",
+        color=MECHANISTIC_COLOR,
     )
     ax.set_ylim(-0.05)
 
@@ -189,23 +206,19 @@ def plot_performance_comparison(df, fig, ax):
     df_new = df.filter(pl.col("year") >= 2021)
     df_old = df.filter(pl.col("year") <= 2020)
 
-    with open(
+    new = load_samples(
         os.path.join(
             output_dir,
-            f"predictive_partial_pooled_poisson_state_fixed_effect=True_pool=True_five_year=False_CAR=True_All covariates_[2021, 2022, 2023, 2024, 2025].pkl",
-        ),
-        "rb",
-    ) as file:
-        new = pickle.load(file)
+            "predictive_partial_pooled_poisson_state_fixed_effect=True_pool=True_five_year=False_CAR=True_All covariates_[2021, 2022, 2023, 2024, 2025].npz",
+        )
+    )
 
-    with open(
+    old = load_samples(
         os.path.join(
             output_dir,
-            f"predictive_partial_pooled_poisson_state_fixed_effect=True_pool=True_five_year=False_CAR=True_All covariates_[2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020].pkl",
-        ),
-        "rb",
-    ) as file:
-        old = pickle.load(file)
+            "predictive_partial_pooled_poisson_state_fixed_effect=True_pool=True_five_year=False_CAR=True_All covariates_[2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020].npz",
+        )
+    )
 
     df_new = df_new.with_columns(
         predicted=pl.col("cases_outbreak")
@@ -216,21 +229,38 @@ def plot_performance_comparison(df, fig, ax):
         - pl.Series(jnp.median(old["cases"], axis=0).__array__()),
     )
 
-    df_new = df_new.group_by("outbreak_size_bucket", maintain_order=True).agg(
-        values=pl.col("predicted"),
-        median=pl.col("predicted").median(),
-        lower=pl.col("predicted").quantile(0.25),
-        upper=pl.col("predicted").quantile(0.75),
-        mean=pl.col("predicted").mean(),
+    # sorted by bucket: the tick labels below are in bucket order
+    df_new = (
+        df_new.group_by("outbreak_size_bucket", maintain_order=True)
+        .agg(
+            values=pl.col("predicted"),
+            median=pl.col("predicted").median(),
+            lower=pl.col("predicted").quantile(0.25),
+            upper=pl.col("predicted").quantile(0.75),
+            mean=pl.col("predicted").mean(),
+        )
+        .sort("outbreak_size_bucket")
     )
 
-    df_old = df_old.group_by("outbreak_size_bucket", maintain_order=True).agg(
-        values=pl.col("predicted"),
-        median=pl.col("predicted").median(),
-        lower=pl.col("predicted").quantile(0.25),
-        upper=pl.col("predicted").quantile(0.75),
-        mean=pl.col("predicted").mean(),
+    df_old = (
+        df_old.group_by("outbreak_size_bucket", maintain_order=True)
+        .agg(
+            values=pl.col("predicted"),
+            median=pl.col("predicted").median(),
+            lower=pl.col("predicted").quantile(0.25),
+            upper=pl.col("predicted").quantile(0.75),
+            mean=pl.col("predicted").mean(),
+        )
+        .sort("outbreak_size_bucket")
     )
+    if df_new["outbreak_size_bucket"].to_list() != [0, 1, 2, 3] or df_old[
+        "outbreak_size_bucket"
+    ].to_list() != [0, 1, 2, 3]:
+        raise ValueError(
+            "every outbreak size bucket must be present in both periods: "
+            f"{df_old['outbreak_size_bucket'].to_list()}, "
+            f"{df_new['outbreak_size_bucket'].to_list()}"
+        )
 
     data_old = df_old.to_dict()["values"].to_list()
     data_new = df_new.to_dict()["values"].to_list()
@@ -255,7 +285,7 @@ def plot_performance_comparison(df, fig, ax):
     )
 
     for pc in violinparts1["bodies"]:
-        pc.set(facecolor="blue")
+        pc.set(facecolor=EARLIER_PERIOD_COLOR)
 
     ax.errorbar(
         x=[i - offset for i in range(len(medians_old))],
@@ -267,7 +297,7 @@ def plot_performance_comparison(df, fig, ax):
         fmt="o",
         capsize=10,
         capthick=2,
-        color="blue",
+        color=EARLIER_PERIOD_COLOR,
     )
 
     # add means as stars
@@ -276,7 +306,7 @@ def plot_performance_comparison(df, fig, ax):
         means_old,
         marker="*",
         s=90,
-        color="blue",
+        color=EARLIER_PERIOD_COLOR,
     )
 
     violinparts2 = ax.violinplot(
@@ -287,7 +317,7 @@ def plot_performance_comparison(df, fig, ax):
     )
 
     for pc in violinparts2["bodies"]:
-        pc.set(facecolor="green")
+        pc.set(facecolor=LATER_PERIOD_COLOR)
 
     ax.errorbar(
         x=[i + offset for i in range(len(medians_new))],
@@ -299,7 +329,7 @@ def plot_performance_comparison(df, fig, ax):
         fmt="o",
         capsize=10,
         capthick=2,
-        color="green",
+        color=LATER_PERIOD_COLOR,
     )
 
     # add means as stars
@@ -308,7 +338,7 @@ def plot_performance_comparison(df, fig, ax):
         means_new,
         marker="*",
         s=90,
-        color="green",
+        color=LATER_PERIOD_COLOR,
     )
 
     ax.set_xticks(range(len(data_old)))
@@ -362,23 +392,19 @@ def plot_performance_comparison(df, fig, ax):
 
 
 def plot_5yr_performance_comparison(df, fig, ax):
-    with open(
+    one_year = load_samples(
         os.path.join(
             output_dir,
-            f"predictive_partial_pooled_poisson_state_fixed_effect=True_pool=True_five_year=False_CAR=True_All covariates_[2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020].pkl",
-        ),
-        "rb",
-    ) as file:
-        one_year = pickle.load(file)
+            "predictive_partial_pooled_poisson_state_fixed_effect=True_pool=True_five_year=False_CAR=True_All covariates_[2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020].npz",
+        )
+    )
 
-    with open(
+    five_year = load_samples(
         os.path.join(
             output_dir,
-            f"predictive_partial_pooled_poisson_state_fixed_effect=True_pool=True_five_year=True_CAR=True_All covariates_[2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020].pkl",
-        ),
-        "rb",
-    ) as file:
-        five_year = pickle.load(file)
+            "predictive_partial_pooled_poisson_state_fixed_effect=True_pool=True_five_year=True_CAR=True_All covariates_[2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020].npz",
+        )
+    )
 
     # concatenate on the case estimates
     df = df.with_columns(
@@ -412,7 +438,7 @@ def plot_5yr_performance_comparison(df, fig, ax):
         year=pl.col("year") + 1
     )
 
-    df = df.join(vaccination_roc, on=["fips", "year"])
+    df = df.join(vaccination_roc, on=["fips", "year"], maintain_order="left")
 
     # remove any cases where vaccination_roc is null
     df = df.filter(pl.col("year_over_year_change").is_not_null())
@@ -569,7 +595,7 @@ def plot_ecological_determinants(samples_pre, samples_post, df, fig, ax):
         "% public schooled",
         "% white",
         "% graduate degree",
-        "Population density (per km²)",
+        "Population density (per 10-fold increase)",
         "Income (10,000 2024 USD)",
     ]
     covariate_name_map = {
@@ -583,7 +609,7 @@ def plot_ecological_determinants(samples_pre, samples_post, df, fig, ax):
         "% public schooled": "fraction_public",
         "% white": "fraction_white",
         "% graduate degree": "fraction_graduate_degree",
-        "Population density (per km²)": "pop_density",
+        "Population density (per 10-fold increase)": "log_population_density",
         "Income (10,000 2024 USD)": "log_income",
     }
 
@@ -606,19 +632,17 @@ def plot_ecological_determinants(samples_pre, samples_post, df, fig, ax):
 
         for idx, covariate in enumerate(pooled_covariates):
             samples_of_interest = samples["iv_global"][:, idx]
-            # scale by standard deviation
-            std = (
-                df.filter(pl.col("year").is_in(years))[
-                    covariate_name_map[covariate]
-                ]
-                .to_numpy()
-                .std()
+            # per SD of the covariate on the scale of the fit -> % change per
+            # 1pp, averaged over the county-years of all the years (see
+            # coverage_effect)
+            samples_of_interest = percent_change_per_pp(
+                samples_of_interest,
+                df.filter(pl.col("year").is_in(years)),
+                covariate_name_map[covariate],
+                df,
+                COVARIATE_SCALE,
+                MMR_EFFECTIVENESS,
             )
-            samples_of_interest = samples_of_interest / std
-            # exponentiate and multiply by 100
-            samples_of_interest = jnp.exp(samples_of_interest) * 100
-            # to express as percent change
-            samples_of_interest = samples_of_interest - 100
             median_effects.append(jnp.median(samples_of_interest, axis=0))
             lower_effects.append(
                 jnp.quantile(samples_of_interest, 0.05, axis=0)
@@ -654,12 +678,15 @@ def plot_ecological_determinants(samples_pre, samples_post, df, fig, ax):
                     .mean()
                 )
                 mean_income = jnp.pow(10, mean_log_income)
-                samples_of_interest = samples_of_interest / mean_income
+                # log_income is log10, so d(log10 income)/d(income) =
+                # 1 / (income * ln(10)); the coefficient is per log10 unit
+                samples_of_interest = samples_of_interest / (
+                    mean_income * jnp.log(10)
+                )
                 # now convert from dollars to 10,000 USD
                 samples_of_interest = samples_of_interest * 10000
-            if "Population density" in covariate:
-                # convert from per km² to 1,000 per km²
-                samples_of_interest = samples_of_interest * 1000
+            # log_population_density is log10, so the coefficient is already
+            # per 10-fold increase in density: no unit conversion
             # exponentiate and multiply by 100
             samples_of_interest = jnp.exp(samples_of_interest) * 100
             # to express as percent change
@@ -687,8 +714,10 @@ def plot_ecological_determinants(samples_pre, samples_post, df, fig, ax):
                 jnp.array(upper_effects) - jnp.array(median_effects),
             ],
             fmt="o",
-            ecolor="blue" if year_idx == 0 else "green",
-            c="blue" if year_idx == 0 else "green",
+            ecolor=EARLIER_PERIOD_COLOR
+            if year_idx == 0
+            else LATER_PERIOD_COLOR,
+            c=EARLIER_PERIOD_COLOR if year_idx == 0 else LATER_PERIOD_COLOR,
             capsize=0,
             alpha=0.7,
             label=f"{years[0]}-{years[-1]}",
@@ -734,14 +763,17 @@ if __name__ == "__main__":
     fig, ax = setup_plot(2, 2)  # type: ignore
 
     # read predictive samples
-    with open(
+    predictive_file = "predictive_partial_pooled_poisson_state_fixed_effect=True_pool=True_five_year=False_CAR=True_All covariates_[2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020].npz"
+    predictive_samples = load_samples(
+        os.path.join(output_dir, predictive_file)
+    )
+    # the concentration of the negative binomial (if the model has one) is in
+    # the posterior draws of the same fit
+    concentration = load_samples(
         os.path.join(
-            output_dir,
-            "predictive_partial_pooled_poisson_state_fixed_effect=True_pool=True_five_year=False_CAR=True_All covariates_[2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020].pkl",
-        ),
-        "rb",
-    ) as file:
-        predictive_samples = pickle.load(file)
+            output_dir, predictive_file.replace("predictive_", "samples_", 1)
+        )
+    ).get("nb_concentration")
 
     with open(
         os.path.join(
@@ -769,7 +801,7 @@ if __name__ == "__main__":
         )
     )
     waic_statistical, p_waic = waic.waic_posterior(
-        df_waic["cases_outbreak"], predictive_samples["mu"]
+        df_waic["cases_outbreak"], predictive_samples["mu"], concentration
     )
     waic_naive = waic.waic_point_estimate(
         df_waic["cases_outbreak"], naive_model["mu"], naive_model["k"]
@@ -836,23 +868,19 @@ if __name__ == "__main__":
         va="top",
         ha="right",
     )
-    with open(
+    posterior_samples = load_samples(
         os.path.join(
             output_dir,
-            "samples_partial_pooled_poisson_state_fixed_effect=True_pool=True_five_year=False_CAR=True_All covariates_[2021, 2022, 2023, 2024, 2025].pkl",
-        ),
-        "rb",
-    ) as file:
-        posterior_samples = pickle.load(file)
+            "samples_partial_pooled_poisson_state_fixed_effect=True_pool=True_five_year=False_CAR=True_All covariates_[2021, 2022, 2023, 2024, 2025].npz",
+        )
+    )
 
-    with open(
+    posterior_samples_pre = load_samples(
         os.path.join(
             output_dir,
-            "samples_partial_pooled_poisson_state_fixed_effect=True_pool=True_five_year=False_CAR=True_All covariates_[2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020].pkl",
-        ),
-        "rb",
-    ) as file:
-        posterior_samples_pre = pickle.load(file)
+            "samples_partial_pooled_poisson_state_fixed_effect=True_pool=True_five_year=False_CAR=True_All covariates_[2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020].npz",
+        )
+    )
 
     plot_ecological_determinants(
         posterior_samples_pre,

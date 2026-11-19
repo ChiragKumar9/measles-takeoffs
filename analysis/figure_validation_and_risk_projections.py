@@ -1,4 +1,3 @@
-import matplotlib.lines as mlines
 from numpyro import enable_x64
 
 enable_x64()
@@ -16,8 +15,54 @@ import pandas as pd
 import polars as pl
 import yaml
 from matplotlib import rc
-from scipy import stats
+from matplotlib.patches import Patch
 from shapely.geometry import MultiPolygon, Polygon
+
+from outbreak_size import scenario_tables
+from outbreak_size.concentration import (
+    COVERAGE,
+    GRID,
+    IMPORTS,
+    MECHANISTIC,
+    OBSERVED,
+    POPULATION,
+    RANKINGS,
+    STATISTICAL,
+    mean_curve,
+    rankings,
+    scenario_curve,
+    validation_curves,
+)
+from outbreak_size.flag_discordance import COVARIATES
+from outbreak_size.headline_models import (
+    HEADLINE_FILE_NAME,
+    read_headline_models,
+)
+from outbreak_size.headline_panels import (
+    BUCKET_LABELS,
+    PERFORMANCE_METRICS,
+    case_bucket,
+    conditioned_national_totals,
+    performance_values,
+)
+from outbreak_size.importation import (
+    future_importation_draws,
+    scale_importation_probability,
+)
+from outbreak_size.model_colors import (
+    COVERAGE_COLOR,
+    IMPORTS_COLOR,
+    MECHANISTIC_COLOR,
+    POPULATION_COLOR,
+    STATISTICAL_COLOR,
+)
+from outbreak_size.model_designs import training_years
+from outbreak_size.model_selection import BEST_MODEL_YEARS
+from outbreak_size.ranking import percentile_of_scores, risk_percentile
+from outbreak_size.samples_io import LazyDraws, load_samples
+from outbreak_size.scenarios import VACCINATION_SCENARIO_LABELS
+from outbreak_size.validation import keep_rows, validation_file_name
+from outbreak_size.year_rows import observed_county_years, validation_year_rows
 
 data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 output_dir = os.path.join(
@@ -28,244 +73,309 @@ fig_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "figures")
 font = {"family": "Nimbus Roman", "size": 28}
 rc("font", **font)
 
-GLOBALS_PRIOR_SD = 1
-
 # read analysis params yaml
 with open("params.yml", "r") as f:
     params = yaml.safe_load(f)
 
-VACCINATION_SCENARIO_LABELS = {
-    "no_change": "No changes in vaccination",
-    "baseline": "Vaccination trends continue",
-    "targeted_worsening": "Vaccinations decline 2x faster",
-    "universal_worsening": "Vaccinations decline 1.5x faster",
-    "targeted_improvement": "Universal 95% coverage by 2030",
-    "universal_improvement": "1pp improvement year-over-year",
-}
+GLOBALS_PRIOR_SD = params["validation_globals_prior_sd"]
+
+# SCENARIO BOUNDS (removed; they can be put back if they are needed again)
+# The figure and the tables used to post-process each county's draws of the
+# outbreak size, draw by draw, before multiplying by P(import). There were two
+# separate rules, applied at every place marked "no scenario bounds" below
+# (the violins and the cumulative print of plot_future_scenario_cases, the two
+# loops of plot_excess_cases_vs_no_change, the concentration curves, and
+# scenario_tables._scenario_samples):
+#   1. ordering: first = the first projected year; a worsening scenario
+#      (targeted_/universal_worsening) was raised to at least the baseline's
+#      draw of `first`, county by county (raw = jnp.maximum(raw,
+#      all_future_samples[("baseline", first)])); an improving scenario
+#      (targeted_/universal_improvement) was lowered to at most it (jnp.minimum)
+#   2. no_change: a cap, jnp.minimum(raw, all_future_samples[
+#      ("targeted_worsening", first)]), and a floor, jnp.maximum(raw, the draws
+#      of the 2026 fold of the headline model aligned to the counties of the
+#      projections by align_samples_to_counties, where a county without a row
+#      was not bounded)
+#   3. INTERVENTION BOUND (the intervention tables and figures): right after
+#      a county's cases with the intervention (i_county) and under the
+#      baseline (b_county) were computed per draw, i_county = jnp.minimum(
+#      i_county, b_county), so an intervention could never raise a county's
+#      cases. It sat at four places that are now marked "no intervention
+#      bound": scenario_tables.county_intervention_effects, state_
+#      intervention_effects and nationwide_summary (before the sums, the risk
+#      percentiles and the percent changes), and plot_intervention_effects of
+#      figure_nonmedical_exemption_policy_interventions.py (before the
+#      cumulative sums; the supplemental NME ban figure draws with it). At
+#      HEAD the supplemental figure also had its own copy of the clip in an
+#      unused first pass (it collected y-values that nothing read), which has
+#      been deleted. The HEAD tables also divided the cases by the `scale` of
+#      2025, which is no longer computed.
+# Why they were taken out: with one seed for every scenario the draws are
+# paired, so a scenario that lands on the wrong side of the baseline does so
+# because of what the model learned (for example the negative nonmedical
+# exemption slope of Ohio and the negative coverage slope of New York), not
+# because of sampling noise. The bounds hid that and made the improving
+# scenarios look more protective than the model says. Rule 3 hid it the
+# same way: in a draw where the learned slope has the wrong sign (Ohio's
+# nonmedical exemption slope) an intervention does raise cases, and the
+# clip turned that into 0%. To put them back, add the rules at the marked
+# places, and the first-year keys that rules 1 and 2 look up
+# ("baseline" and "targeted_worsening" of `first`) must be among
+# all_future_samples or a bound is silently not applied: assert that they are.
+
+# the headline models of the panels (chosen with 06b_choose_headline_models.py)
+# are read from outputs/headline_models.json where the main program starts
+# panel a: a place with 10+ cases is an outbreak; S1's window of years it
+# shows, and the later year, scored by table_headline_2026_validation.py
+PERFORMANCE_LEVEL = 10
+EARLIER_WINDOW = "2022-2025"
+LATER_YEAR = 2026
+HEADLINE_2026_TABLE = os.path.join(
+    fig_dir, "table_supplemental_headline_2026_validation.csv"
+)
+# the cases of 2026 observed so far (the data run to September)
+OBSERVED_2026_LABEL = "Observed\n(September, 2026)"
 
 
-def mean_percentile_rank(samples_2d: np.ndarray) -> np.ndarray:
-    """
-    For each posterior draw, rank units, shift to 0-based, convert to percentiles,
-    then average percentiles across draws.
-
-    Parameters
-    ----------
-    samples_2d : np.ndarray, shape (n_draws, n_units)
-
-    Returns
-    -------
-    np.ndarray, shape (n_units,), values in [0, 100]
-    """
-    from scipy.stats import rankdata
-
-    percentile_method = "average"
-
-    # rank each draw across units; shape stays (n_draws, n_units)
-    ranked = np.apply_along_axis(
-        lambda row: rankdata(row, method=percentile_method),
-        axis=1,
-        arr=samples_2d,
-    )
-    # shift to 0-based so the lowest unit gets exactly 0
-    ranked = ranked - 1
-    # divide each draw by that draw's max rank → percentiles in [0, 1]
-    max_per_draw = ranked.max(axis=1, keepdims=True)  # shape (n_draws, 1)
-    percentiles = ranked / max_per_draw  # shape (n_draws, n_units)
-    # average across draws, scale to [0, 100]
-    return percentiles.mean(axis=0) * 100
-
-
-def plot_total_cases_over_time(df_observed, all_counties, samples, fig, ax):
-    years = [2021, 2022, 2023, 2024, 2025]
-
-    offset = 0.0
-    widths = 0.6
-
-    for idx, year in enumerate(years):
-        mask = df_observed["validation_year"] == year
-        if year == 2025:
-            true_without_sc = (
-                df_observed.filter(pl.col("state") != "South Carolina")
-                .filter(pl.col("validation_year") == year)["cases"]
-                .sum()
-            )
-            # South Carolina had 333 cases in 2025 according to CDC
-            true = true_without_sc + 333
-        else:
-            true = df_observed.filter(pl.col("validation_year") == year)[
-                "cases"
-            ].sum()
-        mask = all_counties["validation_year"] == year
-        samples_year = samples[:, mask.to_numpy()]
-        samples_year = jnp.sum(samples_year, axis=1)
-        lower = jnp.percentile(samples_year, 2.5)
-        upper = jnp.percentile(samples_year, 97.5)
-        samples_year_vln = samples_year[
-            jnp.logical_and(samples_year >= lower, samples_year <= upper)
-        ]
-        vln1 = ax.violinplot(
-            samples_year_vln,
-            positions=[idx - offset],
-            widths=widths,
-            showextrema=False,
-        )
-        for pc in vln1["bodies"]:
-            pc.set_facecolor("green")
-            pc.set_edgecolor("green")
-            pc.set_alpha(0.3)
-
-        ax.errorbar(
-            idx - offset,
-            jnp.median(samples_year),
-            yerr=np.array(
-                [
-                    [
-                        jnp.median(samples_year)
-                        - jnp.percentile(samples_year, 25)
-                    ],
-                    [
-                        jnp.percentile(samples_year, 75)
-                        - jnp.median(samples_year)
-                    ],
-                ]
-            ),
-            fmt="o",
-            markersize=7,
-            ecolor="green",
-            color="green",
-            capsize=5,
-            capthick=2,
-        )
-
-        ax.scatter(
-            idx,
-            true,
-            color="k",
-            marker="*",
-            s=200,
-            zorder=10,
-            label="Observed" if idx == 0 else "",
-        )
-
-    ax.legend(
-        [
-            vln1["bodies"][0],  # type: ignore
-            mlines.Line2D(
-                [], [], color="k", marker="*", linestyle="", markersize=15
-            ),
-        ],
-        ["Validation-\npredicted", "Observed"],
-        loc=(0.02, 0.75),
-        edgecolor="black",
+def panel_letter(ax, letter, x=-0.05, y=1.08):
+    ax.text(
+        x,
+        y,
+        letter,
+        transform=ax.transAxes,
+        fontsize=24,
+        fontweight="bold",
+        va="top",
+        ha="right",
     )
 
-    ax.set_xticks(range(len(years)))
-    ax.set_xticklabels(years)
-    ax.set_ylabel("Nationwide cases (N)")
-    ax.set_yscale("log")
-    ax.set_xlabel("Year")
-    ax.set_yticks([10, 100, 1000, 10000])
-    ax.set_yticklabels(["10", "100", "1,000", "10,000"])
 
-
-def plot_risk_predictions_by_county(df, samples, background_samples, fig, ax):
-    df = df.with_columns(
-        statistical=pl.Series(samples.__array__()),
-        rank=pl.col("cases").rank(method="average").over("year")
-        / pl.col("cases").count().over("year")
-        * 100,
-        bucket=pl.when(pl.col("cases") <= 9).then(1).otherwise(2),
-    )
-
-    bin_width = 0.5
-    offset = 0.0
-
-    background_samples_vln = background_samples[
-        jnp.logical_and(
-            background_samples >= jnp.percentile(background_samples, 2.5),
-            background_samples <= jnp.percentile(background_samples, 97.5),
-        )
-    ]
-    vln = ax.violinplot(
-        background_samples_vln,
-        positions=[0 - offset],
-        widths=bin_width,
+def plot_violin(ax, values, x, color, width):
+    """A violin of the central 95% of `values` at x, with their median and
+    interquartile range. Fewer than three different values have no density to
+    draw: only the median is."""
+    values = np.asarray(values)
+    median = np.median(values)
+    if np.unique(values).size < 3:
+        ax.scatter([x], [median], color=color, s=60, zorder=5)
+        return
+    lower, upper = np.percentile(values, [2.5, 97.5])
+    body = ax.violinplot(
+        values[(values >= lower) & (values <= upper)],
+        positions=[x],
+        widths=width,
         showextrema=False,
     )
-    for pc in vln["bodies"]:
-        pc.set_facecolor("green")
-        pc.set_edgecolor("green")
+    for pc in body["bodies"]:
+        pc.set_facecolor(color)
+        pc.set_edgecolor(color)
         pc.set_alpha(0.3)
-
+    q1, q3 = np.percentile(values, [25, 75])
     ax.errorbar(
-        0 - offset,
-        jnp.median(background_samples),
-        yerr=np.array(
-            [
-                [
-                    jnp.median(background_samples)
-                    - jnp.percentile(background_samples, 25)
-                ],
-                [
-                    jnp.percentile(background_samples, 75)
-                    - jnp.median(background_samples)
-                ],
-            ]
-        ),
+        x,
+        median,
+        yerr=[[median - q1], [q3 - median]],
         fmt="o",
         markersize=7,
-        ecolor="green",
-        color="green",
+        ecolor=color,
+        color=color,
         capsize=5,
         capthick=2,
-        label="Statistical",
     )
 
-    for bin in sorted(df["bucket"].unique()):
-        bin_data = df.filter(pl.col("bucket") == bin)["statistical"].to_list()
 
-        bin_data_vln = np.array(bin_data)[
-            np.logical_and(
-                bin_data >= np.percentile(bin_data, 2.5),
-                bin_data <= np.percentile(bin_data, 97.5),
-            )
-        ]
-        vln = ax.violinplot(
-            bin_data_vln,
-            positions=[bin - offset],
-            widths=bin_width,
-            showextrema=False,
+# the transparency of the bars of the earlier years and of the later year
+EARLIER_ALPHA, LATER_ALPHA = 0.9, 0.4
+# the lines of the hatch of the outbreak cases: heavy, to be seen
+HATCH_LINEWIDTH = 2.4
+
+
+def plot_performance_bars(ax, values, earlier_period, later_period):
+    """
+    Panel a: the performance of the two models (performance_values) in each
+    metric. A metric has eight bars, the two models alternating: all cases in
+    the earlier years, all cases in the later year, then the outbreak cases in
+    the same two periods. The later period is lighter and outbreak cases are
+    hatched.
+    """
+    colors = {
+        "Statistical": STATISTICAL_COLOR,
+        "Mechanistic": MECHANISTIC_COLOR,
+    }
+    bars = [
+        (condition, period, model)
+        for condition in ("All cases", "Outbreak cases")
+        for period in (earlier_period, later_period)
+        for model in colors
+    ]
+    width = 0.1
+    with plt.rc_context({"hatch.linewidth": HATCH_LINEWIDTH}):
+        for i, metric in enumerate(PERFORMANCE_METRICS):
+            for j, (condition, period, model) in enumerate(bars):
+                row = values.filter(
+                    (pl.col("metric") == metric)
+                    & (pl.col("model") == model)
+                    & (pl.col("condition") == condition)
+                    & (pl.col("period") == period)
+                )
+                assert row.height == 1, (metric, model, condition, period)
+                value = row["value"][0]
+                lower, upper = row["lower"][0], row["upper"][0]
+                color = colors[model]
+                x = i + (j - (len(bars) - 1) / 2) * width
+                face = mcolors.to_rgba(
+                    color,
+                    EARLIER_ALPHA if period == earlier_period else LATER_ALPHA,
+                )
+                if condition == "Outbreak cases":
+                    # heavy hatch: white lines on the dark bars, lines of the
+                    # model's colour on the light ones, outline on top
+                    ax.bar(
+                        x,
+                        value,
+                        width=width,
+                        facecolor=face,
+                        edgecolor="white"
+                        if period == earlier_period
+                        else color,
+                        linewidth=0,
+                        hatch="///",
+                    )
+                    ax.bar(
+                        x,
+                        value,
+                        width=width,
+                        fill=False,
+                        edgecolor=color,
+                        linewidth=1.5,
+                    )
+                else:
+                    ax.bar(
+                        x,
+                        value,
+                        width=width,
+                        facecolor=face,
+                        edgecolor=color,
+                        linewidth=1.2,
+                    )
+                if not (np.isnan(lower) or np.isnan(upper)):
+                    ax.errorbar(
+                        x,
+                        value,
+                        yerr=[[value - lower], [upper - value]],
+                        fmt="none",
+                        ecolor="black",
+                        capsize=3,
+                        elinewidth=1.5,
+                        alpha=0.8,
+                    )
+    ax.set_xticks(range(len(PERFORMANCE_METRICS)))
+    ax.set_xticklabels(list(PERFORMANCE_METRICS))
+    ax.set_ylim(0, 100)
+    ax.set_ylabel("Performance (%)")
+    # one legend for the models, one for what the shade and the hatch mean (the
+    # hatch of its swatch is as heavy as that of the bars)
+    with plt.rc_context({"hatch.linewidth": HATCH_LINEWIDTH}):
+        models_legend = ax.legend(
+            handles=[Patch(facecolor=c, label=m) for m, c in colors.items()],
+            loc=(0.0, 1.05),
+            edgecolor="black",
+            fontsize=22,
         )
-        for pc in vln["bodies"]:
-            pc.set_facecolor("green")
-            pc.set_edgecolor("green")
-            pc.set_alpha(0.3)
-
-        ax.errorbar(
-            bin - offset,
-            np.median(bin_data),
-            yerr=np.array(
-                [
-                    [np.median(bin_data) - np.percentile(bin_data, 25)],
-                    [np.percentile(bin_data, 75) - np.median(bin_data)],
-                ]
-            ),
-            fmt="o",
-            markersize=7,
-            ecolor="green",
-            color="green",
-            capsize=5,
-            capthick=2,
+        ax.add_artist(models_legend)
+        grey = "gray"
+        ax.legend(
+            handles=[
+                Patch(
+                    facecolor=mcolors.to_rgba(grey, EARLIER_ALPHA),
+                    edgecolor=grey,
+                    label=earlier_period.replace("-", "–"),
+                ),
+                Patch(
+                    facecolor=mcolors.to_rgba(grey, LATER_ALPHA),
+                    edgecolor=grey,
+                    label=later_period,
+                ),
+                Patch(facecolor="white", edgecolor=grey, label="All cases"),
+                Patch(
+                    facecolor="white",
+                    edgecolor=grey,
+                    hatch="///",
+                    label="Outbreak cases",
+                ),
+            ],
+            loc="lower right",
+            bbox_to_anchor=(1.0, 1.05),
+            edgecolor="black",
+            fontsize=22,
+            ncol=2,
         )
 
-    ax.set_xticks([0, *df["bucket"].sort().unique().to_list()])
-    ax.set_xticklabels(["0", "1-9", "≥10"])
+
+def plot_2026_totals(ax, observed, statistical, mechanistic):
+    """Panel b: the cases of 2026 in all places together, observed so far (the
+    star) and as the two models predict them (draws conditioned on the imports
+    of 2025)."""
+    ax.scatter(0, observed, color="k", marker="*", s=200, zorder=10)
+    plot_violin(ax, statistical, 1, STATISTICAL_COLOR, 0.6)
+    plot_violin(ax, mechanistic, 2, MECHANISTIC_COLOR, 0.6)
+    ax.set_xticks([0, 1, 2])
+    ax.set_xticklabels([OBSERVED_2026_LABEL, "Statistical", "Mechanistic"])
+    ax.set_ylabel("2026 nationwide cases (N)")
+    ax.set_yscale("log")
+    # a tick at every power of ten that the plotted values reach
+    low = min(
+        observed,
+        np.percentile(statistical, 2.5),
+        np.percentile(mechanistic, 2.5),
+    )
+    high = max(
+        observed,
+        np.percentile(statistical, 97.5),
+        np.percentile(mechanistic, 97.5),
+    )
+    ticks = [
+        10**k
+        for k in range(
+            int(np.floor(np.log10(max(low, 1)))),
+            int(np.ceil(np.log10(high))) + 1,
+        )
+    ]
+    ax.set_yticks(ticks)
+    ax.set_yticklabels([f"{t:,}" for t in ticks])
+
+
+def plot_2026_risk_percentiles(ax, cases, percentiles):
+    """Panel c: the risk percentile of the places by their cases of 2026 so far
+    (none, 1 to 9, 10 or more), for each ranking in `percentiles` ({name: the
+    percentile of every place})."""
+    colors = {
+        "Statistical": STATISTICAL_COLOR,
+        "Mechanistic": MECHANISTIC_COLOR,
+        "Vaccine coverage only": COVERAGE_COLOR,
+    }
+    buckets = case_bucket(cases)
+    offsets = np.linspace(-0.28, 0.28, len(colors))
+    for bucket in range(len(BUCKET_LABELS)):
+        for (name, color), offset in zip(colors.items(), offsets):
+            values = np.asarray(percentiles[name])[buckets == bucket]
+            if values.size > 0:
+                plot_violin(ax, values, bucket + offset, color, 0.26)
+    ax.set_xticks(range(len(BUCKET_LABELS)))
+    ax.set_xticklabels(BUCKET_LABELS)
     ax.set_xlabel("Observed cases (N)")
-    ax.set_ylabel("Validation-predicted county\noutbreak size percentile")
+    ax.set_ylabel("Predicted county\noutbreak size percentile")
     ax.set_ylim([0, 100])
-
-    return df
+    ax.legend(
+        handles=[
+            Patch(facecolor=color, alpha=0.5, label=name)
+            for name, color in colors.items()
+        ],
+        loc=(0.0, 1.05),
+        edgecolor="black",
+        fontsize=18,
+        ncol=len(colors),
+    )
 
 
 def plot_future_scenario_cases(
@@ -275,23 +385,20 @@ def plot_future_scenario_cases(
     all_future_samples,
     importation_samples,
     importation_count_samples,
-    scale,
     fig,
     ax,
-    validation_2025_samples=None,
-    validation_2025_mask=None,
+    scenario_labels=None,
 ):
-    scenario_labels = {
-        "no_change": "No changes in vaccination",
-        "baseline": "Vaccination trends continue",
-        "targeted_worsening": "Vaccinations universally decline",
-        "universal_worsening": "Vaccinations universally decline by 50% more",
-        "targeted_improvement": "Universal 95% coverage by 2030",
-        "universal_improvement": "1% improvement year-over-year",
-    }
-
-    WORSENING_SCENARIOS = {"targeted_worsening", "universal_worsening"}
-    IMPROVING_SCENARIOS = {"targeted_improvement", "universal_improvement"}
+    # the main figure's labels, unless the caller passes its own
+    if scenario_labels is None:
+        scenario_labels = {
+            "no_change": "No changes in vaccination",
+            "baseline": "Vaccination trends continue",
+            "targeted_worsening": "Vaccinations universally decline",
+            "universal_worsening": "Vaccinations universally decline by 50% more",
+            "targeted_improvement": "Universal 95% coverage by 2030",
+            "universal_improvement": "1% improvement year-over-year",
+        }
 
     n_scenarios = len(plot_scenarios)
 
@@ -312,47 +419,11 @@ def plot_future_scenario_cases(
                 (scenario, year)
             ]  # (n_samples, n_counties)
 
-            # NEW: Apply no_change constraint - must be >= 2025 validation
-            if (
-                scenario == "no_change"
-                and validation_2025_samples is not None
-                and validation_2025_mask is not None
-            ):
-                # Lower bound: must be >= 2025
-                constrained = jnp.where(
-                    validation_2025_mask,
-                    jnp.maximum(raw, validation_2025_samples),
-                    raw,
-                )
-                raw = constrained
-
-                # Upper bound: must be <= baseline 2026
-                if ("targeted_worsening", 2026) in all_future_samples:
-                    baseline_raw_2026 = all_future_samples[
-                        ("targeted_worsening", 2026)
-                    ]
-                    raw = jnp.minimum(raw, baseline_raw_2026)  # type: ignore
-
-            # Apply monotonicity constraints at county level, sample-by-sample,
-            # relative to 2026 baseline, before multiplying by importation samples
-            if (
-                scenario in WORSENING_SCENARIOS
-                and ("baseline", 2026) in all_future_samples
-            ):
-                baseline_raw_2026 = all_future_samples[("baseline", 2026)]
-                raw = jnp.maximum(raw, baseline_raw_2026)  # type: ignore
-            elif (
-                scenario in IMPROVING_SCENARIOS
-                and ("baseline", 2026) in all_future_samples
-            ):
-                baseline_raw_2026 = all_future_samples[("baseline", 2026)]
-                raw = jnp.minimum(raw, baseline_raw_2026)  # type: ignore
-
+            # no scenario bounds here (see SCENARIO BOUNDS at the top of the file)
             combined_raw = (
                 raw * importation_samples + importation_count_samples
             )
-            combined = jnp.sum(combined_raw, axis=1) / scale
-            combined_raw = combined_raw / scale
+            combined = jnp.sum(combined_raw, axis=1)
 
             lower = jnp.percentile(combined, 2.5)
             upper = jnp.percentile(combined, 97.5)
@@ -453,52 +524,18 @@ def plot_future_scenario_cases(
 
     # Add this section here - after all scenarios and years have been processed
     print("\n" + "=" * 60)
-    print("CUMULATIVE CASES BY SCENARIO (2026-2030)")
+    print("CUMULATIVE CASES BY SCENARIO (2027-2030)")
     print("=" * 60)
     for scenario in plot_scenarios:
         cumulative_samples = None
         for year in future_years:
             raw = all_future_samples[(scenario, year)]
 
-            # Apply no_change constraint - must be >= 2025 validation
-            if (
-                scenario == "no_change"
-                and validation_2025_samples is not None
-                and validation_2025_mask is not None
-            ):
-                # Lower bound: must be >= 2025
-                constrained = jnp.where(
-                    validation_2025_mask,
-                    jnp.maximum(raw, validation_2025_samples),
-                    raw,
-                )
-                raw = constrained
-
-                # Upper bound: must be <= baseline 2026
-                if ("targeted_worsening", 2026) in all_future_samples:
-                    baseline_raw_2026 = all_future_samples[
-                        ("targeted_worsening", 2026)
-                    ]
-                    raw = jnp.minimum(raw, baseline_raw_2026)  # type: ignore
-
-            # Apply same monotonicity constraints
-            if (
-                scenario in WORSENING_SCENARIOS
-                and ("baseline", 2026) in all_future_samples
-            ):
-                baseline_raw_2026 = all_future_samples[("baseline", 2026)]
-                raw = jnp.maximum(raw, baseline_raw_2026)  # type: ignore
-            elif (
-                scenario in IMPROVING_SCENARIOS
-                and ("baseline", 2026) in all_future_samples
-            ):
-                baseline_raw_2026 = all_future_samples[("baseline", 2026)]
-                raw = jnp.minimum(raw, baseline_raw_2026)  # type: ignore
-
+            # no scenario bounds here (see SCENARIO BOUNDS at the top of the file)
             combined_raw = (
                 raw * importation_samples + importation_count_samples
             )
-            combined = jnp.sum(combined_raw, axis=1) / scale
+            combined = jnp.sum(combined_raw, axis=1)
 
             if cumulative_samples is None:
                 cumulative_samples = combined
@@ -606,9 +643,11 @@ def map_fips_code_data(
     has_data_mask = counties_with_data["value"].notna()
     no_data_mask = counties_with_data["value"].isna()
 
-    counties_with_data[no_data_mask].plot(
-        ax=ax, color="lightgrey", linewidth=0.3, edgecolor="grey"
-    )
+    # geopandas cannot plot an empty frame (every county may have a value)
+    if bool(no_data_mask.any()):
+        counties_with_data[no_data_mask].plot(
+            ax=ax, color="lightgrey", linewidth=0.3, edgecolor="grey"
+        )
 
     if cbar_type == "risk":
         norm = mcolors.Normalize(vmin=0, vmax=2300)
@@ -633,7 +672,7 @@ def map_fips_code_data(
         #     [cmap(i) for i in np.linspace(0.3, 1.0, 5)]
         # )
     elif cbar_type == "probability":
-        norm = mcolors.LogNorm(vmin=counties_with_data["value"].min(), vmax=1)
+        norm = mcolors.LogNorm(vmin=counties_with_data["value"].min(), vmax=1)  # type: ignore
         breakpoints = [-1, 0.2, 0.4, 0.6, 0.8, 1.01]
         cmap = plt.get_cmap("Blues")
     elif cbar_type == "exemptions":
@@ -721,7 +760,9 @@ def map_fips_code_data(
     if point_data is not None:
         counties_with_data["centroid"] = counties_with_data.geometry.centroid
 
-    point_df = pd.DataFrame(point_data, columns=["GEOID", "point_value"])
+    point_df = pd.DataFrame(
+        point_data, columns=pd.Index(["GEOID", "point_value"])
+    )
     counties_with_points = counties_with_data.merge(
         point_df, on="GEOID", how="inner"
     )
@@ -767,10 +808,7 @@ def create_supplemental_future_projections_figure(
     all_future_samples,
     importation_samples,
     importation_count_samples,
-    scale,
     output_path,
-    validation_2025_samples=None,
-    validation_2025_mask=None,
 ):
     """
     Create a standalone figure showing alternative future projection scenarios.
@@ -778,7 +816,7 @@ def create_supplemental_future_projections_figure(
     Parameters
     ----------
     future_years : list
-        Years to plot (e.g., [2026, 2027, 2028, 2029, 2030])
+        Years to plot (e.g., [2027, 2028, 2029, 2030])
     scenarios : list
         Scenario names to include in the plot
     scenario_colors : dict
@@ -789,8 +827,6 @@ def create_supplemental_future_projections_figure(
         Importation probability samples
     importation_count_samples : array
         Importation count samples
-    scale : float
-        Scaling factor for predictions
     output_path : str
         Path to save the figure (without extension)
     """
@@ -816,18 +852,17 @@ def create_supplemental_future_projections_figure(
         all_future_samples=all_future_samples,
         importation_samples=importation_samples,
         importation_count_samples=importation_count_samples,
-        scale=scale,
         fig=fig,
         ax=ax,
-        validation_2025_samples=validation_2025_samples,
-        validation_2025_mask=validation_2025_mask,
+        # supplemental figure: label the scenarios as the tables do
+        scenario_labels=VACCINATION_SCENARIO_LABELS,
     )
 
     fig.tight_layout()
 
     # Save in both formats
     fig.savefig(
-        f"{output_path}_constrained.png",
+        f"{output_path}.png",
         dpi=300,
         bbox_inches="tight",
     )
@@ -851,7 +886,6 @@ def plot_excess_cases_vs_no_change(
     all_future_samples,
     importation_samples,
     importation_count_samples,
-    scale,
     fig,
     ax,
 ):
@@ -862,15 +896,15 @@ def plot_excess_cases_vs_no_change(
     Negative values indicate fewer cases than no_change scenario.
     """
     scenario_labels = {
-        "baseline": "Vaccination trends continue",
-        "targeted_worsening": "Vaccinations universally decline",
-        "universal_worsening": "Vaccinations universally decline by 50% more",
-        "targeted_improvement": "Universal 95% coverage by 2030",
-        "universal_improvement": "1% improvement year-over-year",
+        scenario: VACCINATION_SCENARIO_LABELS[scenario]
+        for scenario in [
+            "baseline",
+            "targeted_worsening",
+            "universal_worsening",
+            "targeted_improvement",
+            "universal_improvement",
+        ]
     }
-
-    WORSENING_SCENARIOS = {"targeted_worsening", "universal_worsening"}
-    IMPROVING_SCENARIOS = {"targeted_improvement", "universal_improvement"}
 
     # Remove 'no_change' from plot_scenarios if it's there
     plot_scenarios = [s for s in plot_scenarios if s != "no_change"]
@@ -892,31 +926,18 @@ def plot_excess_cases_vs_no_change(
             # Get scenario samples
             raw_scenario = all_future_samples[(scenario, year)]
 
-            # Apply monotonicity constraints
-            if (
-                scenario in WORSENING_SCENARIOS
-                and ("baseline", 2026) in all_future_samples
-            ):
-                baseline_raw_2026 = all_future_samples[("baseline", 2026)]
-                raw_scenario = jnp.maximum(raw_scenario, baseline_raw_2026)
-            elif (
-                scenario in IMPROVING_SCENARIOS
-                and ("baseline", 2026) in all_future_samples
-            ):
-                baseline_raw_2026 = all_future_samples[("baseline", 2026)]
-                raw_scenario = jnp.minimum(raw_scenario, baseline_raw_2026)
-
+            # no scenario bounds here (see SCENARIO BOUNDS at the top of the file)
             combined_scenario = (
                 raw_scenario * importation_samples + importation_count_samples
             )
-            total_scenario = jnp.sum(combined_scenario, axis=1) / scale
+            total_scenario = jnp.sum(combined_scenario, axis=1)
 
-            # Get no_change samples (with same constraints for fair comparison)
+            # Get no_change samples
             raw_no_change = all_future_samples[("no_change", year)]
             combined_no_change = (
                 raw_no_change * importation_samples + importation_count_samples
             )
-            total_no_change = jnp.sum(combined_no_change, axis=1) / scale
+            total_no_change = jnp.sum(combined_no_change, axis=1)
 
             # Calculate paired difference (excess cases)
             excess = total_scenario - total_no_change
@@ -988,36 +1009,24 @@ def plot_excess_cases_vs_no_change(
 
     # Print cumulative statistics
     print("\n" + "=" * 60)
-    print("CUMULATIVE EXCESS CASES VS NO CHANGE (2026-2030)")
+    print("CUMULATIVE EXCESS CASES VS NO CHANGE (2027-2030)")
     print("=" * 60)
     for scenario in plot_scenarios:
         cumulative_excess = None
         for year in future_years:
             raw_scenario = all_future_samples[(scenario, year)]
 
-            if (
-                scenario in WORSENING_SCENARIOS
-                and ("baseline", 2026) in all_future_samples
-            ):
-                baseline_raw_2026 = all_future_samples[("baseline", 2026)]
-                raw_scenario = jnp.maximum(raw_scenario, baseline_raw_2026)
-            elif (
-                scenario in IMPROVING_SCENARIOS
-                and ("baseline", 2026) in all_future_samples
-            ):
-                baseline_raw_2026 = all_future_samples[("baseline", 2026)]
-                raw_scenario = jnp.minimum(raw_scenario, baseline_raw_2026)
-
+            # no scenario bounds here (see SCENARIO BOUNDS at the top of the file)
             combined_scenario = (
                 raw_scenario * importation_samples + importation_count_samples
             )
-            total_scenario = jnp.sum(combined_scenario, axis=1) / scale
+            total_scenario = jnp.sum(combined_scenario, axis=1)
 
             raw_no_change = all_future_samples[("no_change", year)]
             combined_no_change = (
                 raw_no_change * importation_samples + importation_count_samples
             )
-            total_no_change = jnp.sum(combined_no_change, axis=1) / scale
+            total_no_change = jnp.sum(combined_no_change, axis=1)
 
             excess = total_scenario - total_no_change
 
@@ -1042,7 +1051,6 @@ def create_supplemental_excess_cases_figure(
     all_future_samples,
     importation_samples,
     importation_count_samples,
-    scale,
     output_path,
 ):
     """
@@ -1051,7 +1059,7 @@ def create_supplemental_excess_cases_figure(
     Parameters
     ----------
     future_years : list
-        Years to plot (e.g., [2026, 2027, 2028, 2029, 2030])
+        Years to plot (e.g., [2027, 2028, 2029, 2030])
     scenarios : list
         Scenario names to compare against no_change (should not include 'no_change')
     scenario_colors : dict
@@ -1062,8 +1070,6 @@ def create_supplemental_excess_cases_figure(
         Importation probability samples
     importation_count_samples : array
         Importation count samples
-    scale : float
-        Scaling factor for predictions
     output_path : str
         Path to save the figure (without extension)
     """
@@ -1095,7 +1101,6 @@ def create_supplemental_excess_cases_figure(
         all_future_samples=all_future_samples,
         importation_samples=importation_samples,
         importation_count_samples=importation_count_samples,
-        scale=scale,
         fig=fig,
         ax=ax,
     )
@@ -1128,13 +1133,11 @@ def create_vaccination_scenario_effects_table(
     all_future_samples,
     importation_samples,
     importation_count_samples,
-    scale,
     output_path,
 ):
     """
-    Create a table with risk percentiles for each vaccination scenario by county and year.
-
-    Returns one row per (county, year, vaccination_scenario) combination.
+    Create a table with risk percentiles for each vaccination scenario by
+    county and year (one row per county, year and scenario) and save it.
 
     Parameters
     ----------
@@ -1150,126 +1153,18 @@ def create_vaccination_scenario_effects_table(
         Importation probability samples (n_samples, n_counties)
     importation_count_samples : jnp.ndarray
         Importation count samples (n_samples, n_counties)
-    scale : float
-        Scaling factor
     output_path : str
         Path to save CSV
     """
-
-    # Get county metadata
-    fips_to_location = {}
-    for row in future_base_df.select(
-        ["fips", "state", "county", "pop"]
-    ).iter_rows(named=True):
-        fips_to_location[row["fips"]] = {
-            "state": row["state"],
-            "county": row["county"],
-            "pop": row["pop"],
-        }
-
-    common_fips = future_base_df["fips"].to_list()
-    common_pop = jnp.array(future_base_df["pop"].to_list())
-
-    # Calculate importation probability statistics per county
-    # Shape: (n_counties,)
-    importation_prob_mean = jnp.mean(importation_samples, axis=0)
-    importation_prob_median = jnp.median(importation_samples, axis=0)
-    importation_prob_p025 = jnp.percentile(importation_samples, 2.5, axis=0)
-    importation_prob_p975 = jnp.percentile(importation_samples, 97.5, axis=0)
-
-    WORSENING_SCENARIOS = {"targeted_worsening", "universal_worsening"}
-    IMPROVING_SCENARIOS = {"targeted_improvement", "universal_improvement"}
-
-    all_rows = []
-
-    # Loop through all scenarios
-    for vac_scenario in vaccination_scenarios:
-        print(f"Processing vaccination scenario: {vac_scenario}")
-
-        # Get baseline 2026 for monotonicity constraints
-        baseline_raw_2026 = None
-        if (
-            vac_scenario in WORSENING_SCENARIOS
-            or vac_scenario in IMPROVING_SCENARIOS
-        ):
-            if ("baseline", 2026) in all_future_samples:
-                baseline_raw_2026 = all_future_samples[("baseline", 2026)]
-
-        for year in future_years:
-            # Load scenario samples for this year
-            raw = all_future_samples[(vac_scenario, year)]
-
-            # Verify shape matches
-            assert raw.shape[1] == len(common_fips), (
-                f"Shape mismatch for {vac_scenario} {year}: "
-                f"expected {len(common_fips)} counties, got {raw.shape[1]}"
-            )
-
-            # Apply monotonicity constraints at county level
-            if (
-                vac_scenario in WORSENING_SCENARIOS
-                and baseline_raw_2026 is not None
-            ):
-                raw = jnp.maximum(raw, baseline_raw_2026)
-            elif (
-                vac_scenario in IMPROVING_SCENARIOS
-                and baseline_raw_2026 is not None
-            ):
-                raw = jnp.minimum(raw, baseline_raw_2026)
-
-            # Calculate cases for this year
-            # Shape: (n_samples, n_counties)
-            cases_county = (
-                raw * importation_samples + importation_count_samples
-            ) / scale
-
-            # --- SINGLE-YEAR risk percentiles ---
-            # Count-based rank
-            count_rank = mean_percentile_rank(np.array(cases_county))
-
-            # Incidence-based rank: cases / population
-            cases_incidence = cases_county / common_pop.reshape(1, -1)
-            incidence_rank = mean_percentile_rank(np.array(cases_incidence))
-
-            for i, fips in enumerate(common_fips):
-                location = fips_to_location[fips]
-                all_rows.append(
-                    {
-                        "state": location["state"],
-                        "county": location["county"],
-                        "fips": fips,
-                        "year": year,
-                        "vaccination_scenario": VACCINATION_SCENARIO_LABELS[
-                            vac_scenario
-                        ],  # Changed
-                        "importation_probability_mean": float(
-                            importation_prob_mean[i]
-                        ),
-                        "importation_probability_median": float(
-                            importation_prob_median[i]
-                        ),
-                        "importation_probability_p025": float(
-                            importation_prob_p025[i]
-                        ),
-                        "importation_probability_p975": float(
-                            importation_prob_p975[i]
-                        ),
-                        "count_risk_percentile": float(count_rank[i]),
-                        "incidence_risk_percentile": float(incidence_rank[i]),
-                    }
-                )
-
-            # Free memory
-            del cases_county, cases_incidence, count_rank, incidence_rank
-
-    # Convert to DataFrame and save
-    results_df = pl.DataFrame(all_rows)
-
-    # Sort for easier reading
-    results_df = results_df.sort(
-        ["vaccination_scenario", "year", "state", "county"]
+    results_df = scenario_tables.vaccination_scenario_effects(
+        vaccination_scenarios,
+        future_years,
+        future_base_df,
+        all_future_samples,
+        importation_samples,
+        importation_count_samples,
+        VACCINATION_SCENARIO_LABELS,
     )
-
     results_df.write_csv(output_path)
     print(f"\nVaccination scenario effects table saved to {output_path}")
     print(f"Total rows: {len(results_df)}")
@@ -1284,194 +1179,22 @@ def create_state_vaccination_scenario_effects_table(
     all_future_samples,
     importation_samples,
     importation_count_samples,
-    scale,
     output_path,
 ):
     """
-    Create state-level vaccination scenario effects table.
-
-    Returns one row per (state, year, vaccination_scenario) combination.
-
-    Parameters
-    ----------
-    vaccination_scenarios : list
-        List of scenario names
-    future_years : list
-        List of years to process
-    future_base_df : pl.DataFrame
-        DataFrame with fips, state, county, pop columns
-    all_future_samples : dict
-        Dictionary with (scenario, year) keys containing sample arrays (n_samples, n_counties)
-    importation_samples : jnp.ndarray
-        Importation probability samples (n_samples, n_counties)
-    importation_count_samples : jnp.ndarray
-        Importation count samples (n_samples, n_counties)
-    scale : float
-        Scaling factor
-    output_path : str
-        Path to save CSV
+    Create state-level vaccination scenario effects table (one row per state,
+    year and scenario) and save it. The parameters are those of
+    create_vaccination_scenario_effects_table.
     """
-
-    # Get state mapping and populations
-    fips_to_state = dict(zip(future_base_df["fips"], future_base_df["state"]))
-
-    # Calculate state populations
-    state_pop_df = future_base_df.group_by("state").agg(
-        pl.col("pop").sum().alias("state_pop")
+    results_df = scenario_tables.state_vaccination_scenario_effects(
+        vaccination_scenarios,
+        future_years,
+        future_base_df,
+        all_future_samples,
+        importation_samples,
+        importation_count_samples,
+        VACCINATION_SCENARIO_LABELS,
     )
-    state_to_pop = dict(zip(state_pop_df["state"], state_pop_df["state_pop"]))
-
-    common_fips = future_base_df["fips"].to_list()
-    fips_states = [fips_to_state[f] for f in common_fips]
-    unique_states = sorted(list(set(fips_states)))
-
-    # Pre-compute which column indices belong to which state
-    state_to_col_indices = {}
-    for state in unique_states:
-        state_to_col_indices[state] = jnp.array(
-            [i for i, s in enumerate(fips_states) if s == state]
-        )
-
-    # Calculate state-level importation probabilities by summing county probabilities
-    # Shape: (n_samples, n_counties) -> aggregate to (n_samples, n_states)
-    state_importation_samples = {}
-    for state in unique_states:
-        col_indices = state_to_col_indices[state]
-        # Sum importation probabilities across counties in this state
-        state_importation_samples[state] = jnp.sum(
-            importation_samples[:, col_indices], axis=1
-        )
-
-    # Calculate summary statistics for each state
-    state_importation_stats = {}
-    for state in unique_states:
-        samples = state_importation_samples[state]
-        state_importation_stats[state] = {
-            "mean": float(jnp.mean(samples)),
-            "median": float(jnp.median(samples)),
-            "p025": float(jnp.percentile(samples, 2.5)),
-            "p975": float(jnp.percentile(samples, 97.5)),
-        }
-
-    WORSENING_SCENARIOS = {"targeted_worsening", "universal_worsening"}
-    IMPROVING_SCENARIOS = {"targeted_improvement", "universal_improvement"}
-
-    all_rows = []
-
-    # Loop through all scenarios
-    for vac_scenario in vaccination_scenarios:
-        print(f"Processing state-level vaccination scenario: {vac_scenario}")
-
-        # Get baseline 2026 for monotonicity constraints
-        baseline_raw_2026 = None
-        if (
-            vac_scenario in WORSENING_SCENARIOS
-            or vac_scenario in IMPROVING_SCENARIOS
-        ):
-            if ("baseline", 2026) in all_future_samples:
-                baseline_raw_2026 = all_future_samples[("baseline", 2026)]
-
-        for year in future_years:
-            # Load scenario samples for this year
-            raw = all_future_samples[(vac_scenario, year)]
-
-            # Verify shape matches
-            assert raw.shape[1] == len(common_fips), (
-                f"Shape mismatch for {vac_scenario} {year}: "
-                f"expected {len(common_fips)} counties, got {raw.shape[1]}"
-            )
-
-            # Apply monotonicity constraints at county level
-            if (
-                vac_scenario in WORSENING_SCENARIOS
-                and baseline_raw_2026 is not None
-            ):
-                raw = jnp.maximum(raw, baseline_raw_2026)
-            elif (
-                vac_scenario in IMPROVING_SCENARIOS
-                and baseline_raw_2026 is not None
-            ):
-                raw = jnp.minimum(raw, baseline_raw_2026)
-
-            # Calculate cases for this year at county level
-            # Shape: (n_samples, n_counties)
-            cases_county = (
-                raw * importation_samples + importation_count_samples
-            ) / scale
-
-            # Aggregate to state level for this year
-            cases_state_year = {}
-            for state in unique_states:
-                col_indices = state_to_col_indices[state]
-                # Sum across counties in this state for each sample
-                # Shape: (n_samples,)
-                cases_state_year[state] = jnp.sum(
-                    cases_county[:, col_indices], axis=1
-                )
-
-            del cases_county
-
-            # --- SINGLE-YEAR risk percentiles at state level ---
-            # Stack all states' samples for this year
-            # Shape: (n_samples, n_states)
-            cases_state_year_array = jnp.stack(
-                [cases_state_year[state] for state in unique_states], axis=1
-            )
-
-            # Count-based rank
-            count_rank_states = mean_percentile_rank(
-                np.array(cases_state_year_array)
-            )
-
-            # Incidence-based rank: cases / state population
-            state_pops = jnp.array(
-                [state_to_pop[state] for state in unique_states]
-            )
-            cases_state_incidence = (
-                cases_state_year_array / state_pops.reshape(1, -1)
-            )
-            incidence_rank_states = mean_percentile_rank(
-                np.array(cases_state_incidence)
-            )
-
-            # Create rows for each state
-            for idx, state in enumerate(unique_states):
-                all_rows.append(
-                    {
-                        "state": state,
-                        "year": year,
-                        "vaccination_scenario": VACCINATION_SCENARIO_LABELS[
-                            vac_scenario
-                        ],  # Changed
-                        "importation_probability_mean": state_importation_stats[
-                            state
-                        ]["mean"],
-                        "importation_probability_median": state_importation_stats[
-                            state
-                        ]["median"],
-                        "importation_probability_p025": state_importation_stats[
-                            state
-                        ]["p025"],
-                        "importation_probability_p975": state_importation_stats[
-                            state
-                        ]["p975"],
-                        "count_risk_percentile": float(count_rank_states[idx]),
-                        "incidence_risk_percentile": float(
-                            incidence_rank_states[idx]
-                        ),
-                    }
-                )
-
-            # Free memory
-            del cases_state_year, cases_state_year_array, cases_state_incidence
-            del count_rank_states, incidence_rank_states
-
-    # Convert to DataFrame and save
-    results_df = pl.DataFrame(all_rows)
-
-    # Sort for easier reading
-    results_df = results_df.sort(["vaccination_scenario", "year", "state"])
-
     results_df.write_csv(output_path)
     print(
         f"\nState-level vaccination scenario effects table saved to {output_path}"
@@ -1482,151 +1205,118 @@ def create_state_vaccination_scenario_effects_table(
 
 
 def plot_case_concentration_curves(
-    validation_percentiles,
-    validation_cases,
+    validation_panels,
     plot_scenarios,
     scenario_colors,
     all_future_samples,
     importation_samples,
     importation_count_samples,
-    scale,
     output_path,
 ):
     """
-    Three-panel case-concentration (Lorenz-style) curves.
+    Case-concentration (Lorenz-style) curves in two rows. In every panel the x
+    axis is the risk percentile (0 for the lowest place, 100 for the highest;
+    outbreak_size.ranking) and the y axis the cumulative % of the cases in the
+    places at or below it: a ranking that sends the cases to the highest
+    percentiles stays low until the right edge, the diagonal is a ranking that
+    tells nothing.
 
-    x-axis: county outbreak-risk percentile.
-    y-axis: cumulative % of cases in counties with percentile <= x.
-
-    Each panel plots two shared validation lines plus one line per projection
-    scenario:
-      - model validation: validation-predicted percentile (importations
-        included in the ranking) vs cumulative share of *observed* cases;
-      - empirical validation: observed-case percentile vs cumulative share of
-        *observed* cases (purely data-derived Lorenz curve);
-      - projection scenarios: projected percentile vs cumulative share of
-        projected cases.
-    Panels are, in order: 2026, 2030, and cumulative 2026-2030 projections.
-
-    Projection percentiles use the same ranking recipe as subplot b: rank
-    counties within each posterior draw, divide by the global max rank, scale
-    to [0, 100], then average across draws. Per-county projected case counts
-    are the median across draws.
+    Row 1, validation: one panel for each of `validation_panels`, a list of
+    (title, {ranking: curve over concentration.GRID}). Each curve is a ranking
+    of the places (the statistical and the mechanistic model, the vaccine
+    coverage, the population and the imports alone, and the observed cases, the
+    best ranking there is) against the observed cases.
+    Row 2, projections: the scenarios of `plot_scenarios` in 2027, in 2030 and
+    cumulatively over 2027-2030, the places ranked by their projected cases
+    (importations included) and the cases of a place its mean over the draws
+    (concentration.scenario_curve). The scenarios are drawn as they come, with
+    no bounds (see SCENARIO BOUNDS at the top of the file).
     """
     scenario_labels = {
-        "no_change": "No changes in vaccination",
-        "baseline": "Vaccination trends continue",
-        "targeted_worsening": "Vaccinations universally decline",
-        "targeted_improvement": "Universal 95% coverage by 2030",
+        scenario: VACCINATION_SCENARIO_LABELS[scenario]
+        for scenario in [
+            "no_change",
+            "baseline",
+            "targeted_worsening",
+            "targeted_improvement",
+        ]
     }
-
-    WORSENING_SCENARIOS = {"targeted_worsening", "universal_worsening"}
-    IMPROVING_SCENARIOS = {"targeted_improvement", "universal_improvement"}
-
-    def cumulative_curve(percentiles, cases):
-        percentiles = np.asarray(percentiles, dtype=float)
-        cases = np.asarray(cases, dtype=float)
-        order = np.argsort(percentiles)
-        p_sorted = percentiles[order]
-        cum = np.cumsum(cases[order])
-        total = cum[-1]
-        y = cum / total * 100 if total > 0 else np.zeros_like(cum)
-        return p_sorted, y
-
-    def projected_percentile_and_cases(sample_matrix):
-        # sample_matrix: (n_draws, n_counties), importation-included, /scale.
-        sample_matrix = np.asarray(sample_matrix)
-        ranked = stats.rankdata(sample_matrix, axis=1, method="average")
-        ranked = ranked / ranked.max(keepdims=True) * 100
-        percentiles = np.mean(ranked, axis=0)
-        cases = np.median(sample_matrix, axis=0)
-        return percentiles, cases
+    ranking_styles = {
+        STATISTICAL: (STATISTICAL_COLOR, "-"),
+        MECHANISTIC: (MECHANISTIC_COLOR, "-"),
+        COVERAGE: (COVERAGE_COLOR, "-"),
+        POPULATION: (POPULATION_COLOR, "-"),
+        IMPORTS: (IMPORTS_COLOR, "-"),
+        OBSERVED: ("black", "--"),
+    }
+    panel_defs = [
+        ("2027", [2027]),
+        ("2030", [2030]),
+        ("Cumulative 2027-2030", [2027, 2028, 2029, 2030]),
+    ]
 
     def scenario_combined_samples(scenario, year):
         raw = all_future_samples[(scenario, year)]
-        # Same monotonicity constraints applied to the main projection figure.
-        if (
-            scenario in WORSENING_SCENARIOS
-            and ("baseline", 2026) in all_future_samples
-        ):
-            raw = jnp.maximum(raw, all_future_samples[("baseline", 2026)])
-        elif (
-            scenario in IMPROVING_SCENARIOS
-            and ("baseline", 2026) in all_future_samples
-        ):
-            raw = jnp.minimum(raw, all_future_samples[("baseline", 2026)])
-        return (raw * importation_samples + importation_count_samples) / scale
+        # no scenario bounds here (see SCENARIO BOUNDS at the top of the file)
+        return raw * importation_samples + importation_count_samples
 
-    panel_defs = [
-        ("2026", [2026]),
-        ("2030", [2030]),
-        ("Cumulative 2026-2030", [2026, 2027, 2028, 2029, 2030]),
-    ]
+    fig = plt.figure(figsize=(24, 16))
+    grid = fig.add_gridspec(2, 6)
+    top = [fig.add_subplot(grid[0, 0:3]), fig.add_subplot(grid[0, 3:6])]
+    bottom = [fig.add_subplot(grid[1, i : i + 2]) for i in (0, 2, 4)]
+    for row in (top, bottom):
+        for ax in row[1:]:
+            ax.sharey(row[0])
+    for row in (top, bottom):
+        for ax in row:
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+            ax.get_xaxis().tick_bottom()
+            ax.get_yaxis().tick_left()
+            ax.tick_params(axis="x", direction="out")
+            ax.tick_params(axis="y", direction="out")
+            for spine in ax.spines.values():
+                spine.set_position(("outward", 5))
+            ax.set_axisbelow(True)
+            ax.plot(
+                GRID, GRID, color="lightgray", linewidth=1.5, linestyle=":"
+            )
+            ax.set_xlim(0, 100)
+            ax.set_ylim(0, 100)
+            ax.set_xlabel("County risk percentile")
+        row[0].set_ylabel("Cumulative % of cases")
+        for ax in row[1:]:
+            plt.setp(ax.get_yticklabels(), visible=False)
 
-    fig, axes = plt.subplots(1, 3, figsize=(24, 8), sharey=True)
+    for ax, (title, curves) in zip(top, validation_panels):
+        for name in RANKINGS:
+            color, linestyle = ranking_styles[name]
+            ax.plot(
+                GRID,
+                curves[name],
+                color=color,
+                linestyle=linestyle,
+                linewidth=2.5,
+                label=name,
+            )
+        ax.set_title(title)
+    top[0].legend(loc="upper left", edgecolor="black", fontsize=18)
 
-    # Model validation: predicted percentile vs observed cumulative share.
-    model_p, model_y = cumulative_curve(
-        validation_percentiles, validation_cases
-    )
-
-    # Empirical validation: observed-case percentile vs observed cumulative
-    # share (purely data-derived).
-    obs_percentiles = stats.rankdata(
-        np.asarray(validation_cases, dtype=float), method="average"
-    )
-    obs_percentiles = obs_percentiles / obs_percentiles.max() * 100
-    emp_p, emp_y = cumulative_curve(obs_percentiles, validation_cases)
-
-    for ax, (title, years) in zip(axes, panel_defs):
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
-        ax.get_xaxis().tick_bottom()
-        ax.get_yaxis().tick_left()
-        ax.tick_params(axis="x", direction="out")
-        ax.tick_params(axis="y", direction="out")
-        for spine in ax.spines.values():
-            spine.set_position(("outward", 5))
-        ax.set_axisbelow(True)
-
-        ax.plot(
-            model_p,
-            model_y,
-            color="black",
-            linewidth=2.5,
-            label="Validation (model percentile)",
-        )
-        ax.plot(
-            emp_p,
-            emp_y,
-            color="black",
-            linewidth=2.5,
-            linestyle="--",
-            label="Validation (observed percentile)",
-        )
-
+    for ax, (title, years) in zip(bottom, panel_defs):
         for scenario in plot_scenarios:
             combined = None
             for year in years:
                 cy = scenario_combined_samples(scenario, year)
                 combined = cy if combined is None else combined + cy
-            percentiles, cases = projected_percentile_and_cases(combined)
-            proj_p, proj_y = cumulative_curve(percentiles, cases)
             ax.plot(
-                proj_p,
-                proj_y,
+                GRID,
+                scenario_curve(combined),
                 color=scenario_colors[scenario],
                 linewidth=2.5,
                 label=scenario_labels[scenario],
             )
-
         ax.set_title(title)
-        ax.set_xlabel("County outbreak risk percentile")
-        ax.set_xlim(0, 100)
-        ax.set_ylim(0, 100)
-
-    axes[0].set_ylabel("Cumulative % of cases")
-    axes[0].legend(loc="upper left", edgecolor="black", fontsize=18)
+    bottom[0].legend(loc="upper left", edgecolor="black", fontsize=18)
 
     fig.tight_layout()
     fig.savefig(f"{output_path}.png", dpi=300, bbox_inches="tight")
@@ -1638,17 +1328,129 @@ def plot_case_concentration_curves(
     )
 
 
-if __name__ == "__main__":
-    # Build figure with subplots a-d in a 2x2 grid and e spanning the full bottom row
-    fig = plt.figure(figsize=(20, 22.5))
-    ax = {}
-    ax[0, 0] = fig.add_subplot(3, 2, 1)
-    ax[0, 1] = fig.add_subplot(3, 2, 2)
-    ax[1, 0] = fig.add_subplot(3, 2, 3)
-    ax[1, 1] = fig.add_subplot(3, 2, 4)
-    ax_e = fig.add_subplot(3, 1, 3)
+def validation_year_rankings(year, observed, import_df, headline):
+    """The risk percentile of the places of a validation year under each
+    ranking of the case-concentration figure (concentration.rankings), from the
+    draws of the headline models trained on the years before `year`, and their
+    observed cases."""
+    places, keep, _ = validation_year_rows(
+        year, output_dir, import_df, observed, params["seed"], list(COVARIATES)
+    )
+    in_rows = int(places["cases"].sum())
+    in_files = int(observed.filter(pl.col("year") == year)["cases"].sum())
+    print(
+        f"{year}: {places.height} places; cases of the places {in_rows}, "
+        f"cases of the files {in_files}"
+    )
+    if in_rows != in_files:
+        print(
+            "WARNING: cases of the files that are on no place of the "
+            f"validation rows: {in_files - in_rows}"
+        )
+    design = headline.statistical
+    size_statistical = np.asarray(
+        keep_rows(
+            load_samples(
+                os.path.join(
+                    output_dir,
+                    validation_file_name(
+                        training_years(design.start_year, year),
+                        design.pooled,
+                        design.spatial,
+                        design.covariates,
+                        GLOBALS_PRIOR_SD,
+                    ),
+                )
+            ),
+            keep,
+            f"{year} fold draws",
+        ),
+        dtype=np.float64,
+    )
+    mechanistic_file = load_samples(
+        os.path.join(
+            output_dir,
+            "predictive_final_outbreak_size_predictions_"
+            f"{training_years(headline.mechanistic_start_year, year)}.npz",
+        )
+    )
+    size_mechanistic = np.asarray(
+        keep_rows(mechanistic_file["cases"], keep, f"{year} mechanistic"),
+        dtype=np.float64,
+    )
+    coverage = np.asarray(
+        keep_rows(mechanistic_file["coverage"], keep, f"{year} coverage")[0],
+        dtype=float,
+    )
+    cases = places["cases"].to_numpy()
+    return (
+        rankings(
+            size_statistical,
+            size_mechanistic,
+            np.vstack(places["importation_probability_samples"].to_numpy()).T,
+            np.vstack(places["expected_importations_samples"].to_numpy()).T,
+            coverage,
+            places["pop"].to_numpy(),
+            cases,
+        ),
+        cases,
+    )
 
-    for temp in [ax[0, 0], ax[0, 1], ax[1, 0], ax[1, 1], ax_e]:
+
+if __name__ == "__main__":
+    # the inputs that only the 2026 panels read: stop here, before the large
+    # files are loaded, if one is missing, and say which script makes it
+    headline = read_headline_models(
+        os.path.join(output_dir, HEADLINE_FILE_NAME), fig_dir=fig_dir
+    )
+    design = headline.statistical
+    HEADLINE_MODEL = design.name
+    MECHANISTIC_MODEL = headline.mechanistic
+    fold_years = training_years(design.start_year, LATER_YEAR)
+    fold_file = os.path.join(
+        output_dir,
+        validation_file_name(
+            fold_years,
+            design.pooled,
+            design.spatial,
+            design.covariates,
+            GLOBALS_PRIOR_SD,
+        ),
+    )
+    mechanistic_fold_years = training_years(
+        headline.mechanistic_start_year, LATER_YEAR
+    )
+    mechanistic_fold_file = os.path.join(
+        output_dir,
+        "predictive_final_outbreak_size_predictions_"
+        f"{mechanistic_fold_years}.npz",
+    )
+    with_2026 = "00_explore_data.py and 01_assemble_analysis_dataset.py"
+    inputs_2026 = {
+        HEADLINE_2026_TABLE: "table_headline_2026_validation.py",
+        fold_file: "06_rolling_validation.py --headline-2026",
+        mechanistic_fold_file: "06_rolling_validation.py --headline-2026",
+        os.path.join(data_dir, "analysis_dataset_with_2026.csv"): with_2026,
+        os.path.join(data_dir, "missing_counties_with_2026.csv"): with_2026,
+    }
+    absent = {p: by for p, by in inputs_2026.items() if not os.path.exists(p)}
+    if absent:
+        raise FileNotFoundError(
+            "the panels of 2026 need files that are not there yet:\n"
+            + "\n".join(f"  {p} (made by {by})" for p, by in absent.items())
+        )
+
+    # panels: a (performance), b and c (2026), d and e (maps), f (scenarios)
+    fig = plt.figure(figsize=(20, 30))
+    grid = fig.add_gridspec(4, 2, height_ratios=[0.9, 1, 1, 0.9])
+    ax_a = fig.add_subplot(grid[0, :])
+    ax_b = fig.add_subplot(grid[1, 0])
+    ax_c = fig.add_subplot(grid[1, 1])
+    ax_d = fig.add_subplot(grid[2, 0])
+    ax_e = fig.add_subplot(grid[2, 1])
+    ax_f = fig.add_subplot(grid[3, :])
+
+    for temp in [ax_a, ax_b, ax_c, ax_d, ax_e, ax_f]:
         temp.spines["top"].set_visible(False)
         temp.spines["right"].set_visible(False)
         temp.get_xaxis().tick_bottom()
@@ -1659,38 +1461,23 @@ if __name__ == "__main__":
             spine.set_position(("outward", 5))
         temp.set_axisbelow(True)
 
-    ax[0, 0].text(
-        -0.05,
-        1.08,
-        "a",
-        transform=ax[0, 0].transAxes,
-        fontsize=24,
-        fontweight="bold",
-        va="top",
-        ha="right",
+    s1 = pl.read_csv(
+        os.path.join(
+            fig_dir, "supplemental_data_s1_county_level_prediction_scoring.csv"
+        )
     )
 
-    validation_years = [2021, 2022, 2023, 2024, 2025]
-    all_counties = []
-    for year in validation_years:
-        temp = pl.read_csv(
-            os.path.join(output_dir, f"projection_dataset_{year}.csv"),
-            schema_overrides={"fips": pl.String},
-        )
-        temp = temp.with_columns(validation_year=pl.lit(year))
-        all_counties.append(temp)
-    all_counties = pl.concat(all_counties)
-    all_counties = all_counties.select(
-        [
-            "county",
-            "state",
-            "year",
-            "validation_year",
-            "cases_outbreak",
-            "type",
-            "fips",
-        ]
+    # panel a: the performance of the two models in S1 (the earlier years) and
+    # in the later year (the headline table of that year)
+    performance = performance_values(
+        s1,
+        pl.read_csv(HEADLINE_2026_TABLE),
+        {"Statistical": HEADLINE_MODEL, "Mechanistic": MECHANISTIC_MODEL},
+        PERFORMANCE_LEVEL,
+        EARLIER_WINDOW,
+        LATER_YEAR,
     )
+    plot_performance_bars(ax_a, performance, EARLIER_WINDOW, str(LATER_YEAR))
 
     import_df = pl.read_csv(
         os.path.join(output_dir, "empirical_importation_probability.csv"),
@@ -1702,266 +1489,132 @@ if __name__ == "__main__":
         ),
         "rb",
     ) as f:
-        samples = pickle.load(f)
+        probability_samples = pickle.load(f)
     with open(
         os.path.join(output_dir, "empirical_importation_count_samples.pkl"),
         "rb",
     ) as f:
         count_samples = pickle.load(f)
     import_df = import_df.with_columns(
-        importation_probability_samples=pl.Series(samples),
+        importation_probability_samples=pl.Series(probability_samples),
         expected_importations_samples=pl.Series(count_samples),
     )
-    import_df = import_df.sort("type").unique(
-        subset=["state", "county", "year"], keep="last"
-    )
-
-    all_counties = all_counties.join(
-        import_df.select(
-            [
-                "county",
-                "state",
-                "year",
-                "importation_probability_samples",
-                "expected_importations_samples",
-                "type",
-            ]
+    # --- panels b and c: 2026 so far. The headline model and the mechanistic
+    # model, trained on 2019-2025, against the cases of 2026 (to September)
+    with open(os.path.join(output_dir, "import_scaler_2025.pkl"), "rb") as f:
+        import_scaler_2025 = pickle.load(f)
+    analysis_2026 = observed_county_years(
+        pl.read_csv(
+            os.path.join(data_dir, "analysis_dataset_with_2026.csv"),
+            schema_overrides={"fips": pl.String},
         ),
-        on=["county", "state", "year"],
-        how="left",
-        maintain_order="left",
+        pl.read_csv(
+            os.path.join(data_dir, "missing_counties_with_2026.csv"),
+            schema_overrides={"fips": pl.String},
+        ),
     )
-    importation_samples = jnp.array(
-        np.vstack(all_counties["importation_probability_samples"].to_numpy())
+    places_2026, keep_2026, _ = validation_year_rows(
+        LATER_YEAR,
+        output_dir,
+        import_df,
+        analysis_2026,
+        params["seed"],
+        list(COVARIATES),
+    )
+    observed_2026 = int(
+        analysis_2026.filter(pl.col("year") == LATER_YEAR)["cases"].sum()
+    )
+    print(
+        f"{LATER_YEAR}: {places_2026.height} places; cases of the places "
+        f"{int(places_2026['cases'].sum())}, cases of the files {observed_2026}"
+    )
+
+    # the outbreak size draws of the places (the rows of the 2026 projection
+    # dataset without the twins and the region members)
+    fold_samples = load_samples(fold_file)
+    size_statistical = np.asarray(
+        keep_rows(fold_samples, keep_2026, "2026 fold draws"), dtype=np.float64
+    )
+    mechanistic_file = load_samples(mechanistic_fold_file)
+    size_mechanistic = np.asarray(
+        keep_rows(
+            mechanistic_file["cases"], keep_2026, "2026 mechanistic draws"
+        ),
+        dtype=np.float64,
+    )
+    coverage_2026 = np.asarray(
+        keep_rows(mechanistic_file["coverage"], keep_2026, "2026 coverage")[0],
+        dtype=float,
+    )
+    expected_imports = np.vstack(
+        places_2026["expected_importations_samples"].to_numpy()
     ).T
-    importation_count_samples = jnp.array(
-        np.vstack(all_counties["expected_importations_samples"].to_numpy())
+    import_probability = np.vstack(
+        places_2026["importation_probability_samples"].to_numpy()
     ).T
+    assert (
+        size_statistical.shape
+        == size_mechanistic.shape
+        == expected_imports.shape
+    ), "the draws of the 2026 places do not line up"
 
-    samples = []
-    for idx, year in enumerate(
-        [
-            [2019, 2020],
-            [2019, 2020, 2021],
-            [2019, 2020, 2021, 2022],
-            [2019, 2020, 2021, 2022, 2023],
-            [2019, 2020, 2021, 2022, 2023, 2024],
-        ]
-    ):
-        with open(
-            os.path.join(
-                output_dir,
-                f"samples_partial_pooled_poisson_validation_testing_{year}_pool=True_CAR=True_All covariates_globals_prior_sd={GLOBALS_PRIOR_SD}.pkl",
-            ),
-            "rb",
-        ) as f:
-            m = pickle.load(f)
-        samples.append(m)
-
-    samples = jnp.concat(samples, axis=1)
-
-    # read in counties with missing vaccine data
-    missing = pl.read_csv(os.path.join(data_dir, "missing_counties.csv"))
-    # adjust all counties to have the type of these places be train
-    all_counties = all_counties.with_columns(
-        state_county_year=pl.concat_str(
-            [
-                pl.col("state"),
-                pl.lit("_"),
-                pl.col("county"),
-                pl.lit("_"),
-                pl.col("validation_year").cast(pl.String),
-            ]
+    # panel b: the imports of 2026 conditioned on those of 2025 (the scaler of
+    # the projections), the same imports drawn for both models
+    totals = {
+        name: conditioned_national_totals(
+            size,
+            expected_imports,
+            import_scaler_2025,
+            np.random.default_rng([params["seed"], LATER_YEAR, 3]),
         )
-    )
-    missing = missing.with_columns(
-        state_county_year=pl.concat_str(
-            [
-                pl.col("state"),
-                pl.lit("_"),
-                pl.col("county"),
-                pl.lit("_"),
-                pl.col("year").cast(pl.String),
-            ]
+        for name, size in (
+            ("Statistical", size_statistical),
+            ("Mechanistic", size_mechanistic),
         )
-    )
-    all_counties = all_counties.with_columns(
-        type=pl.when(
-            pl.col("state_county_year").is_in(missing["state_county_year"])
-        )
-        .then(pl.lit("train"))
-        .otherwise(pl.col("type")),
-        year=pl.when(
-            pl.col("state_county_year").is_in(missing["state_county_year"])
-        )
-        .then(pl.col("validation_year"))
-        .otherwise(pl.col("year")),
-    )
-
-    df_train_observed = all_counties.filter(pl.col("type") == "train")
-
-    analysis = pl.read_csv(
-        os.path.join(data_dir, "analysis_dataset.csv"),
-        schema_overrides={"fips": pl.String},
-    )[["year", "state", "county", "cases"]]
-    analysis = pl.concat(
-        [analysis, missing[["year", "state", "county", "cases"]]],
-        how="diagonal_relaxed",
-    )
-
-    df_train_observed = df_train_observed.join(
-        analysis,
-        on=["year", "state", "county"],
-        maintain_order="left",
-    )
-
-    observed = np.array([])
-    predicted = np.array([])
-    predicted_full = np.array([])
-
-    mask = (all_counties["type"] == "train").to_numpy()
-    samples_observed = samples[:, mask]
-    importation_samples_observed = importation_samples[:, mask]
-    importation_count_samples_observed = importation_count_samples[:, mask]
-
-    for year in validation_years:
-        mask = df_train_observed["validation_year"] == year
-        samples_year = samples_observed[:, mask.to_numpy()]
-        importation_samples_year = importation_samples_observed[
-            :, mask.to_numpy()
-        ]
-        importation_count_samples_year = importation_count_samples_observed[
-            :, mask.to_numpy()
-        ]
-        samples_year = (
-            samples_year * importation_samples_year
-            + importation_count_samples_year
-        )
-        if year != 2025:
-            true = df_train_observed.filter(pl.col("validation_year") == year)[
-                "cases"
-            ].sum()
-        else:
-            # 2025 df_train_observed for SC contains 25-26 cases
-            true = df_train_observed.filter(
-                (pl.col("validation_year") == year)
-                & (pl.col("state") != "South Carolina")
-            )["cases"].sum()
-            true += 333  # that is the 2025 case count for SC
-        samples_year = jnp.sum(samples_year, axis=1)
+    }
+    for name, draws in totals.items():
+        lower, median, upper = np.percentile(draws, [2.5, 50, 97.5])
         print(
-            f"Year {year}: true={true}, 2.5th={jnp.percentile(samples_year, 2.5)}, "
-            f"25th={jnp.percentile(samples_year, 25)}, 50th={jnp.percentile(samples_year, 50)}, "
-            f"75th={jnp.percentile(samples_year, 75)}, 97.5th={jnp.percentile(samples_year, 97.5)}"
+            f"{LATER_YEAR} cases, {name}: median {median:,.0f}, 95% interval "
+            f"[{lower:,.0f}, {upper:,.0f}]; observed so far {observed_2026:,} "
+            f"({100 * (draws <= observed_2026).mean():.1f}th percentile)"
         )
-        observed = np.append(observed, true)
-        predicted = np.append(predicted, jnp.median(samples_year))
-
-        mask = all_counties["validation_year"] == year
-        samples_year = samples[:, mask.to_numpy()]
-        importation_samples_year = importation_samples[:, mask.to_numpy()]
-        importation_count_samples_year = importation_count_samples[
-            :, mask.to_numpy()
-        ]
-        samples_year = (
-            samples_year * importation_samples_year
-            + importation_count_samples_year
-        )
-        samples_year = jnp.sum(samples_year, axis=1)
-        print(
-            f"Year {year} total predicted cases: 2.5th={jnp.percentile(samples_year, 2.5)}, "
-            f"25th={jnp.percentile(samples_year, 25)}, 50th={jnp.percentile(samples_year, 50)}, "
-            f"75th={jnp.percentile(samples_year, 75)}, 97.5th={jnp.percentile(samples_year, 97.5)}"
-        )
-        predicted_full = np.append(predicted_full, jnp.median(samples_year))
-
-    scale = predicted_full / observed
-    print(scale)
-    scale = np.mean(scale)
-
-    scale_2025 = predicted_full[-1] / observed[-1]
-
-    # this is an important value, so let's save it
-    with open(
-        os.path.join(output_dir, "scale_2025.pkl"),
-        "wb",
-    ) as f:
-        pickle.dump(scale_2025, f)
-
-    samples_unconditioned = (
-        samples * importation_samples + importation_count_samples
+    plot_2026_totals(
+        ax_b, observed_2026, totals["Statistical"], totals["Mechanistic"]
     )
-    samples_observed_unconditioned = (
-        samples_observed * importation_samples_observed
-        + importation_count_samples_observed
-    )
-    del samples_observed  # dead past this point
-    samples_scaled = samples_unconditioned / scale
-    del samples_unconditioned  # dead past this point
-    samples_observed_scaled = samples_observed_unconditioned / scale
-    del samples_observed_unconditioned  # dead past this point
-    # note: samples_observed_scaled itself is never read anywhere below --
-    # pre-existing dead code, left in place per instructions not to remove
-    # pre-existing dead code beyond what this change orphaned
 
-    # importation_samples/importation_count_samples (and their _observed
-    # variants) are dead past this point too -- panel e loads its own fresh
-    # importation_*_future arrays from pickles later, it doesn't reuse these
+    # panel c: the rank of every place against its cases of 2026 so far
+    percentiles_2026 = {
+        "Statistical": risk_percentile(
+            size_statistical * import_probability + expected_imports
+        ),
+        "Mechanistic": risk_percentile(
+            size_mechanistic * import_probability + expected_imports
+        ),
+        "Vaccine coverage only": percentile_of_scores(-coverage_2026),
+    }
+    plot_2026_risk_percentiles(
+        ax_c, places_2026["cases"].to_numpy(), percentiles_2026
+    )
+    # the rankings of all the places of 2026 against its cases, for the
+    # case-concentration curves of the later year
+    curves_2026 = validation_curves(
+        rankings(
+            size_statistical,
+            size_mechanistic,
+            import_probability,
+            expected_imports,
+            coverage_2026,
+            places_2026["pop"].to_numpy(),
+            places_2026["cases"].to_numpy(),
+        ),
+        places_2026["cases"].to_numpy(),
+    )
     del (
-        importation_samples,
-        importation_count_samples,
-        importation_samples_observed,
-        importation_count_samples_observed,
-    )
-
-    for year in validation_years:
-        mask = all_counties["validation_year"] == year
-        samples_year = samples_scaled[:, mask.to_numpy()]
-        samples_year = jnp.sum(samples_year, axis=1)
-        print(
-            f"Year {year}: 2.5th={jnp.percentile(samples_year, 2.5)}, "
-            f"25th={jnp.percentile(samples_year, 25)}, 50th={jnp.percentile(samples_year, 50)}, "
-            f"75th={jnp.percentile(samples_year, 75)}, 97.5th={jnp.percentile(samples_year, 97.5)}"
-        )
-
-    plot_total_cases_over_time(
-        df_train_observed,
-        all_counties,
-        samples_scaled,
-        fig,
-        ax[0, 0],
-    )
-
-    ax[0, 1].text(
-        -0.05,
-        1.12,
-        "b",
-        transform=ax[0, 1].transAxes,
-        fontsize=24,
-        fontweight="bold",
-        va="top",
-        ha="right",
-    )
-
-    ranking_method = "average"
-    samples_ranked = stats.rankdata(
-        samples_scaled,
-        axis=1,
-        method=ranking_method,
-    )
-    samples_ranked = samples_ranked / samples_ranked.max(keepdims=True) * 100
-
-    samples_ranked = np.mean(samples_ranked, axis=0)
-
-    observed_ranked = samples_ranked[all_counties["type"] == "train"]
-    unobserved_ranked = samples_ranked[all_counties["type"] == "projection"]
-
-    plot_risk_predictions_by_county(
-        df_train_observed,
-        observed_ranked,
-        unobserved_ranked,
-        fig,
-        ax[0, 1],
+        size_statistical,
+        size_mechanistic,
+        expected_imports,
+        import_probability,
     )
 
     df = pl.read_csv(
@@ -1969,50 +1622,24 @@ if __name__ == "__main__":
         schema_overrides={"fips": pl.String},
     )
 
-    ax[1, 0].text(
-        -0.05,
-        1.08,
-        "c",
-        transform=ax[1, 0].transAxes,
-        fontsize=24,
-        fontweight="bold",
-        va="top",
-        ha="right",
-    )
+    # panel d: the probability of an import (the median over the draws),
+    # conditioned on the imports of 2025 like the projections of panel f
     map_fips_code_data(
         df["fips"],
-        df["importation_probability_median"],
+        pl.Series(
+            scale_importation_probability(
+                df["importation_probability_median"].to_numpy(),
+                import_scaler_2025,
+            )
+        ),
         fig,
-        ax[1, 0],
+        ax_d,
         cbar_label="Probability of ≥1 international importation",
         cbar_type="probability",
         point_data=None,
     )
 
-    ax[1, 1].text(
-        -0.05,
-        1.08,
-        "d",
-        transform=ax[1, 1].transAxes,
-        fontsize=24,
-        fontweight="bold",
-        va="top",
-        ha="right",
-    )
-
-    # --- subplot e: future scenario projections ---
-    ax_e.text(
-        -0.025,
-        1.1,
-        "e",
-        transform=ax_e.transAxes,
-        fontsize=24,
-        fontweight="bold",
-        va="top",
-        ha="right",
-    )
-
-    future_years_plot = [2026, 2027, 2028, 2029, 2030]
+    future_years_plot = [2027, 2028, 2029, 2030]
     scenarios_ordered = [
         "no_change",
         "baseline",
@@ -2030,167 +1657,64 @@ if __name__ == "__main__":
         "universal_improvement": "#41ab5d",
     }
 
-    # Load future_base and restrict to counties present in the scenario pkl
-    # files. The scenario CSVs were built via an inner join against the
-    # vaccine projections, so one county present in projection_dataset_2026
-    # may have been dropped. We use projection_dataset_baseline_2026 as the
-    # reference county set since all scenarios share the same counties.
+    # the counties of the projections: the baseline scenario's 2027 rows (05
+    # refuses a scenario that loses a county, so all scenarios share them)
     future_base = pl.read_csv(
-        os.path.join(output_dir, "projection_dataset_2026.csv"),
-        schema_overrides={"fips": pl.String},
-    ).filter(pl.col("type") == "projection")
-
-    reference_scenario_df = pl.read_csv(
-        os.path.join(output_dir, "projection_dataset_baseline_2026.csv"),
-        schema_overrides={"fips": pl.String},
-    )
-    future_base = future_base.join(
-        reference_scenario_df.select("fips"),
-        on="fips",
-        how="inner",
-        maintain_order="left",
-    )
-
-    # Load importation probabilities fresh and attach samples before
-    # any filtering so row counts are guaranteed to match
-    import_df_latest = pl.read_csv(
-        os.path.join(output_dir, "empirical_importation_probability.csv"),
-        schema_overrides={"fips": pl.String},
-    )
-    with open(
-        os.path.join(
-            output_dir, "empirical_importation_probability_samples.pkl"
-        ),
-        "rb",
-    ) as f:
-        importation_samples_raw = pickle.load(f)
-    with open(
-        os.path.join(output_dir, "empirical_importation_count_samples.pkl"),
-        "rb",
-    ) as f:
-        importation_count_samples_raw = pickle.load(f)
-    import_df_latest = import_df_latest.with_columns(
-        importation_probability_samples=pl.Series(importation_samples_raw),
-        expected_importations_samples=pl.Series(importation_count_samples_raw),
-    )
-    # Defer to projection over train where both exist
-    import_df_latest = import_df_latest.sort("type").unique(
-        subset=["state", "county", "year", "fips"], keep="last"
-    )
-    # Keep only the latest year per fips
-    import_df_latest = import_df_latest.sort("year", descending=True).unique(
-        subset=["fips"], keep="first"
-    )
-
-    assert import_df_latest["fips"].is_duplicated().sum() == 0, (
-        "import_df_latest still has duplicate fips rows after dedup"
-    )
-
-    future_base = future_base.join(
-        import_df_latest.select(
-            [
-                "fips",
-                "importation_probability_samples",
-                "expected_importations_samples",
-            ]
-        ),
-        on="fips",
-        how="left",
-        maintain_order="left",
-    )
-
-    assert future_base["fips"].is_duplicated().sum() == 0, (
-        "Join expanded future_base — duplicate fips in import_df_latest"
-    )
-    assert future_base["importation_probability_samples"].null_count() == 0, (
-        "Some future counties are missing importation probability samples"
-    )
-    assert future_base["expected_importations_samples"].null_count() == 0, (
-        "Some future counties are missing importation count samples"
-    )
-
-    importation_samples_future = jnp.array(
-        np.vstack(future_base["importation_probability_samples"].to_numpy())  # type: ignore
-    ).T
-    importation_count_samples_future = jnp.array(
-        np.vstack(future_base["expected_importations_samples"].to_numpy())  # type: ignore
-    ).T
-
-    # Load 2025 validation samples for no_change constraint
-    validation_2025_df = pl.read_csv(
-        os.path.join(output_dir, "projection_dataset_2025.csv"),
+        os.path.join(output_dir, "projection_dataset_baseline_2027.csv"),
         schema_overrides={"fips": pl.String},
     )
 
-    # Load the validation samples (already done earlier, but we'll extract 2025 specifically)
-    # Get mask for 2025 validation year from all_counties
-    mask_2025 = all_counties["validation_year"] == 2025
-    samples_2025_raw = samples[
-        :, mask_2025.to_numpy()
-    ]  # (n_samples, n_counties_2025)
-
-    # Get the fips codes for 2025 in the same order as samples_2025_raw
-    fips_2025 = all_counties.filter(pl.col("validation_year") == 2025)[
-        "fips"
-    ].to_list()
-
-    # Create a mapping from fips to column index in samples_2025_raw
-    fips_2025_to_col = {fips: i for i, fips in enumerate(fips_2025)}
-
-    # Get fips from future_base (in its current order)
-    fips_future = future_base["fips"].to_list()
-
-    # Align 2025 samples to match future_base county order
-    # For counties not in 2025 validation, we'll use None as a sentinel
-    aligned_2025_samples = []
-    alignment_mask = []  # True where we have 2025 data, False otherwise
-
-    for fips in fips_future:
-        if fips in fips_2025_to_col:
-            col_idx = fips_2025_to_col[fips]
-            aligned_2025_samples.append(samples_2025_raw[:, col_idx])
-            alignment_mask.append(True)
-        else:
-            # No 2025 data for this county - create dummy column of zeros
-            aligned_2025_samples.append(jnp.zeros(samples_2025_raw.shape[0]))
-            alignment_mask.append(False)
-
-    # Stack into array: (n_samples, n_counties_future)
-    validation_2025_samples_aligned = jnp.stack(aligned_2025_samples, axis=1)
-    alignment_mask = jnp.array(alignment_mask)
-
-    print(
-        f"\n2025 validation alignment: {alignment_mask.sum()}/{len(alignment_mask)} counties have 2025 data"
+    # the importation draws of the counties of the projections (the projection
+    # rows of the validation year whose importation posterior serves every year
+    # after 2025), conditioned on the level of 2025 once, here: every
+    # table and figure below uses these two arrays
+    importation_probability, importation_counts = future_importation_draws(
+        import_df, future_base
     )
+    importation_samples_scaled = scale_importation_probability(
+        jnp.array(importation_probability), import_scaler_2025
+    )
+    importation_count_samples_scaled = (
+        jnp.array(importation_counts) * import_scaler_2025
+    )
+    del importation_probability, importation_counts
 
-    all_future_samples = {}
-    for scenario in scenarios_ordered:
-        for future_year in future_years_plot:
-            with open(
-                os.path.join(
-                    output_dir,
-                    f"risk_projections_{scenario}_{future_year}_globals_prior_sd={GLOBALS_PRIOR_SD}.pkl",
-                ),
-                "rb",
-            ) as f:
-                loaded = pickle.load(f)
-            assert loaded.shape[1] == future_base.height, (
-                f"Shape mismatch for {scenario} {future_year}: pkl has {loaded.shape[1]} counties but future_base has {future_base.height}"
+    # no scenario bounds in the figure (see SCENARIO BOUNDS at the top of the
+    # file): no 2026-fold floor for no_change is built here any more
+    # the draws of every scenario and year are loaded where they are used, one
+    # at a time (together they are 5 GB or more; the figures and tables below
+    # need one or two at once)
+    all_future_samples = LazyDraws(
+        {
+            (scenario, future_year): os.path.join(
+                output_dir,
+                f"risk_projections_{scenario}_{future_year}_globals_prior_sd={GLOBALS_PRIOR_SD}.npz",
             )
-            all_future_samples[(scenario, future_year)] = loaded
+            for scenario in scenarios_ordered
+            for future_year in future_years_plot
+        },
+        n_columns=future_base.height,
+    )
 
-    with open(
-        os.path.join(
-            output_dir,
-            "import_scaler_2025.pkl",
-        ),
-        "rb",
-    ) as f:
-        import_scaler_2025 = pickle.load(f)
-
+    # the validation years, each ranked within itself, averaged with the same
+    # weight for each (as the table of the scoring averages its years)
+    years_curves = [
+        validation_curves(
+            *validation_year_rankings(year, analysis_2026, import_df, headline)
+        )
+        for year in BEST_MODEL_YEARS
+    ]
     plot_case_concentration_curves(
-        validation_percentiles=observed_ranked,
-        validation_cases=df_train_observed["cases"].fill_null(0).to_numpy(),
+        validation_panels=[
+            (
+                f"Validation {EARLIER_WINDOW} (the years averaged)",
+                {
+                    name: mean_curve([curves[name] for curves in years_curves])
+                    for name in RANKINGS
+                },
+            ),
+            (f"Validation {LATER_YEAR} (to September)", curves_2026),
+        ],
         plot_scenarios=[
             "no_change",
             "baseline",
@@ -2199,11 +1723,8 @@ if __name__ == "__main__":
         ],
         scenario_colors=scenario_colors,
         all_future_samples=all_future_samples,
-        importation_samples=jnp.minimum(
-            importation_samples_future * import_scaler_2025, 1
-        ),
-        importation_count_samples=importation_count_samples_future,
-        scale=scale_2025,
+        importation_samples=importation_samples_scaled,
+        importation_count_samples=importation_count_samples_scaled,
         output_path=os.path.join(
             fig_dir, "figure_supplemental_case_concentration_curves"
         ),
@@ -2221,22 +1742,17 @@ if __name__ == "__main__":
         plot_scenarios=plot_scenarios,
         scenario_colors=scenario_colors,
         all_future_samples=all_future_samples,
-        importation_samples=jnp.minimum(
-            importation_samples_future * import_scaler_2025, 1
-        ),
-        importation_count_samples=importation_count_samples_future,
-        scale=scale_2025,
+        importation_samples=importation_samples_scaled,
+        importation_count_samples=importation_count_samples_scaled,
         fig=fig,
-        ax=ax_e,
-        validation_2025_samples=validation_2025_samples_aligned,
-        validation_2025_mask=alignment_mask,
+        ax=ax_f,
     )
 
     map_fips_code_data(
         df["fips"],
         df["unconditioned_count_rank"],
         fig,
-        ax[1, 1],
+        ax_e,
         cbar_label="Outbreak risk percentile",
         cbar_type="percentile_risk",
         point_data=None,
@@ -2249,12 +1765,17 @@ if __name__ == "__main__":
         os.path.join(fig_dir, "table_supplemental_model_projections.csv")
     )
 
+    panel_letter(ax_a, "a", y=1.3)
+    panel_letter(ax_b, "b", x=-0.12)
+    panel_letter(ax_c, "c", x=-0.12, y=1.2)
+    panel_letter(ax_d, "d")
+    panel_letter(ax_e, "e")
+    panel_letter(ax_f, "f", x=-0.025, y=1.1)
+
     fig.tight_layout()
 
     fig.savefig(
-        os.path.join(
-            fig_dir, "figure_validation_and_risk_projections_constrained.png"
-        ),
+        os.path.join(fig_dir, "figure_validation_and_risk_projections.png"),
         dpi=300,
         bbox_inches="tight",
     )
@@ -2277,11 +1798,8 @@ if __name__ == "__main__":
         scenarios=excess_scenarios,
         scenario_colors=scenario_colors,
         all_future_samples=all_future_samples,
-        importation_samples=jnp.minimum(
-            importation_samples_future * import_scaler_2025, 1
-        ),
-        importation_count_samples=importation_count_samples_future,
-        scale=scale_2025,
+        importation_samples=importation_samples_scaled,
+        importation_count_samples=importation_count_samples_scaled,
         output_path=os.path.join(
             fig_dir, "figure_supplemental_excess_cases_vs_no_change"
         ),
@@ -2300,16 +1818,11 @@ if __name__ == "__main__":
         scenarios=alternative_scenarios,
         scenario_colors=scenario_colors,
         all_future_samples=all_future_samples,
-        importation_samples=jnp.minimum(
-            importation_samples_future * import_scaler_2025, 1
-        ),
-        importation_count_samples=importation_count_samples_future,
-        scale=scale_2025,
+        importation_samples=importation_samples_scaled,
+        importation_count_samples=importation_count_samples_scaled,
         output_path=os.path.join(
             fig_dir, "figure_supplemental_future_projections"
         ),
-        validation_2025_samples=validation_2025_samples_aligned,
-        validation_2025_mask=alignment_mask,
     )
 
     vaccination_scenario_effects = create_vaccination_scenario_effects_table(
@@ -2317,15 +1830,11 @@ if __name__ == "__main__":
         future_years=future_years_plot,
         future_base_df=future_base,
         all_future_samples=all_future_samples,
-        importation_samples=jnp.minimum(
-            importation_samples_future * import_scaler_2025, 1
-        ),
-        importation_count_samples=importation_count_samples_future
-        * import_scaler_2025,
-        scale=scale_2025,
+        importation_samples=importation_samples_scaled,
+        importation_count_samples=importation_count_samples_scaled,
         output_path=os.path.join(
             fig_dir,
-            "supplemental_data_s4a_vaccination_scenario_effects_by_county_constrained.csv",
+            "supplemental_data_s3a_vaccination_scenario_effects_by_county.csv",
         ),
     )
 
@@ -2334,14 +1843,10 @@ if __name__ == "__main__":
         future_years=future_years_plot,
         future_base_df=future_base,
         all_future_samples=all_future_samples,
-        importation_samples=jnp.minimum(
-            importation_samples_future * import_scaler_2025, 1
-        ),
-        importation_count_samples=importation_count_samples_future
-        * import_scaler_2025,
-        scale=scale_2025,
+        importation_samples=importation_samples_scaled,
+        importation_count_samples=importation_count_samples_scaled,
         output_path=os.path.join(
             fig_dir,
-            "supplemental_data_s4b_vaccination_scenario_effects_by_state_constrained.csv",
+            "supplemental_data_s3b_vaccination_scenario_effects_by_state.csv",
         ),
     )
