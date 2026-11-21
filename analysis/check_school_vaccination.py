@@ -236,7 +236,7 @@ EXPECTED = [
         [],
         "plan",
     ),
-    # (the low-rate rule is for Chen & Bento only since 2026-11-12: the Washington Post has no enrollment)
+    # (the low-rate rule is for Chen & Bento only: the Washington Post has no enrollment)
     (
         "chen_bento",
         "dropped",
@@ -245,14 +245,14 @@ EXPECTED = [
         [],
         "plan said 13; re-baselined: the raw file also has the Garrard school without MMR",
     ),
-    # (ND and TN: Chen & Bento is no longer left out there since 2026-11-12, so their duplicates count)
+    # (ND and TN: Chen & Bento is not left out there, so their duplicates count)
     (
         "chen_bento",
         "dropped",
         "identical Chen & Bento record",
         471,
         [],
-        "re-baselined 2026-11-12: 291 without ND and TN (dry run Oct 31: same point and rate unless another school year shows two or more schools there; the old rule dropped 495 here)",
+        "re-baselined: 291 without ND and TN (an earlier dry run: same point and rate unless another school year shows two or more schools there; the old rule dropped 495 here)",
     ),
     (
         "chen_bento",
@@ -276,7 +276,7 @@ EXPECTED = [
         "Chen & Bento rate of exactly 0",
         138,
         [],
-        "plan said 8 (a rate below 10%); changed 2026-11-13 to exactly 0: the raw file holds the placeholders (144 in SD, all 0.0) that the old panel dropped; 162 of the 165 rows below 10% with no enrollment are exactly 0.0; 138 after the fallback step, which removes 24 of them first",
+        "plan said 8 (a rate below 10%); changed to exactly 0: the raw file holds the placeholders (144 in SD, all 0.0) that the old panel dropped; 162 of the 165 rows below 10% with no enrollment are exactly 0.0; 138 after the fallback step, which removes 24 of them first",
     ),
     (
         "chen_bento",
@@ -284,7 +284,7 @@ EXPECTED = [
         "rate outside 0-100",
         2,
         [],
-        "re-baselined: not in the plan (SD 103, HI -0.01), now missing, not clipped (2026-11-12); an earlier 195 included 193 NaN rates, see the next line",
+        "re-baselined: not in the plan (SD 103, HI -0.01), now missing, not clipped; an earlier 195 included 193 NaN rates, see the next line",
     ),
     (
         "chen_bento",
@@ -292,7 +292,7 @@ EXPECTED = [
         "district rate of exactly 0%",
         1,
         [],
-        "new rule 2026-11-12: Texas Tech University K-12 (Lubbock County, 2024-25)",
+        "new rule: Texas Tech University K-12 (Lubbock County, 2024-25)",
     ),
     (
         "chen_bento",
@@ -351,31 +351,31 @@ sizes = [
         "county-years",
         counties.height,
         15091,
-        "was 11,379 (plan said 11,378); re-baselined 2026-11-13: one source per state-year, Chen & Bento also for ND and TN, and the readers of the state files (OH, IA, ME, WI, CO, IN, NC, MA, MN, PA, TX, MD, NY, CA, SC)",
+        "was 11,379 (plan said 11,378); re-baselined: one source per state-year, Chen & Bento also for ND and TN, and the readers of the state files (OH, IA, ME, WI, CO, IN, NC, MA, MN, PA, TX, MD, NY, CA, SC)",
     ),
     (
         "county-years from the Washington Post file",
         counties.filter(pl.col("source") == "washington_post").height,
         1831,
-        "was 1,991; re-baselined 2026-11-12: the Post year of a partial file (IA, IL, LA, MN) goes to Chen & Bento, and the Post no longer fills single counties",
+        "was 1,991; re-baselined: the Post year of a partial file (IA, IL, LA, MN) goes to Chen & Bento, and the Post no longer fills single counties",
     ),
     (
         "county-years from Chen & Bento",
         counties.filter(pl.col("source") == "chen_bento").height,
         9741,
-        "was 9,388; re-baselined 2026-11-12 (see the line above)",
+        "was 9,388; re-baselined (see the line above)",
     ),
     (
         "states with a single school year",
         years.filter(pl.col("years") == 1).height,
         13,
-        "was 18; re-baselined 2026-11-12 (the state files and Chen & Bento years of ND and TN give states more years)",
+        "was 18; re-baselined (the state files and Chen & Bento years of ND and TN give states more years)",
     ),
     (
         "states with five or more school years",
         years.filter(pl.col("years") >= 5).height,
         20,
-        "was 16 (plan); re-baselined 2026-11-13: the state files give states more school years",
+        "was 16 (plan); re-baselined: the state files give states more school years",
     ),
 ]
 print("\n3. the county file")

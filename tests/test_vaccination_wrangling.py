@@ -1375,7 +1375,7 @@ def test_a_pooled_row_with_a_valid_fips_is_not_taken_for_an_own_row():
     assert out["nonmed_exempt_pct"].to_list() == [0.0, 0.0]
 
 
-NOV9_COLUMNS = [
+REVISED_FILE_COLUMNS = [
     "Year",
     "State",
     "County",
@@ -1388,9 +1388,9 @@ NOV9_COLUMNS = [
 ]
 
 
-def write_nov9(tmp_path, rows):
-    pl.DataFrame(rows, schema=NOV9_COLUMNS, orient="row").write_csv(
-        tmp_path / vw.VACCINATION_NOV9_FILE
+def write_revised_file(tmp_path, rows):
+    pl.DataFrame(rows, schema=REVISED_FILE_COLUMNS, orient="row").write_csv(
+        tmp_path / vw.VACCINATION_REVISED_FILE
     )
     return str(tmp_path)
 
@@ -1411,10 +1411,10 @@ def compiled(rows):
     )
 
 
-def test_wyoming_nonmedical_moves_one_year_earlier_and_nov9_fills_mmr(
+def test_wyoming_nonmedical_moves_one_year_earlier_and_revised_file_fills_mmr(
     tmp_path,
 ):
-    data = write_nov9(
+    data = write_revised_file(
         tmp_path,
         [
             # labelled by the year of recording: the school year is the year
@@ -1477,7 +1477,7 @@ def test_wyoming_nonmedical_moves_one_year_earlier_and_nov9_fills_mmr(
 
 
 def test_hawaii_2024_exemptions_fill_only_the_blanks(tmp_path):
-    data = write_nov9(
+    data = write_revised_file(
         tmp_path,
         [
             (
@@ -1572,7 +1572,7 @@ def test_montana_data_fill_only_what_the_compiled_data_lack(monkeypatch):
 
 
 def test_wyoming_rows_without_a_fips_take_their_countys(tmp_path):
-    data = write_nov9(
+    data = write_revised_file(
         tmp_path,
         [
             (

@@ -1,5 +1,5 @@
 """The cells of the compiled vaccination spreadsheet that are replaced by the
-data owner's file of 9 Nov 2026 or set by hand
+data owner's revised file or set by hand
 (vaccination_wrangling.fix_known_values), and the QC exclusion of Warren."""
 
 import os
@@ -10,7 +10,7 @@ import yaml
 
 from outbreak_size import vaccination_wrangling as vw
 
-NOV9_COLUMNS = [
+REVISED_FILE_COLUMNS = [
     "Year",
     "State",
     "County",
@@ -23,13 +23,13 @@ NOV9_COLUMNS = [
 ]
 
 
-def nov9(tmp_path, rows):
+def revised_file(tmp_path, rows):
     """rows: (year, state, county, nonmed, med, mmr, allv)"""
     pl.DataFrame(
         [(*r, "00000", "County") for r in rows],
-        schema=NOV9_COLUMNS,
+        schema=REVISED_FILE_COLUMNS,
         orient="row",
-    ).write_csv(tmp_path / vw.VACCINATION_NOV9_FILE)
+    ).write_csv(tmp_path / vw.VACCINATION_REVISED_FILE)
     return str(tmp_path)
 
 
@@ -52,7 +52,7 @@ def spreadsheet(rows):
 
 
 def test_every_county_of_a_state_takes_the_files_value_blank_or_not(tmp_path):
-    data = nov9(
+    data = revised_file(
         tmp_path,
         [
             (2024, "Virginia", "Bath", 1.0, 0.0, 95.83, 90.0),
@@ -100,7 +100,7 @@ def test_every_county_of_a_state_takes_the_files_value_blank_or_not(tmp_path):
 
 
 def test_only_the_named_counties_years_and_columns_change(tmp_path):
-    data = nov9(
+    data = revised_file(
         tmp_path,
         [
             (2021, "Florida", "Sarasota", 10.2, 2.2, 90.0, 80.0),
@@ -145,7 +145,7 @@ def test_only_the_named_counties_years_and_columns_change(tmp_path):
 def test_a_blank_is_filled_and_a_county_that_is_not_there_is_an_error(
     tmp_path,
 ):
-    data = nov9(
+    data = revised_file(
         tmp_path, [(2024, "Michigan", "Oakland", 1.0, 0.1, 90.097, 88.0)]
     )
     df = spreadsheet([("Michigan", "Oakland", 2024, "1", "0", None, "88")])
@@ -188,7 +188,7 @@ def test_known_values_are_set_and_a_missing_county_is_an_error(tmp_path):
 
 
 def test_a_county_that_is_excluded_stays_excluded_after_the_fix(tmp_path):
-    data = nov9(
+    data = revised_file(
         tmp_path, [(2024, "Virginia", "Warren", 30.769, 0.0, 69.23, 69.23)]
     )
     df = spreadsheet([("Virginia", "Warren", 2024, None, None, None, None)])
@@ -217,8 +217,8 @@ def test_the_known_values_and_replacements_are_well_formed():
         0.2010, abs=1e-4
     )
     assert values[("Lyman", "MMR_cov")] == 100.0
-    for _, _, _, columns in vw.NOV9_REPLACEMENTS:
-        assert set(columns) <= set(vw._NOV9_COLUMN)
+    for _, _, _, columns in vw.FILE_REPLACEMENTS:
+        assert set(columns) <= set(vw._REVISED_FILE_COLUMN)
 
 
 def test_warren_2024_is_a_whole_row_qc_exclusion():

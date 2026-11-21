@@ -13,20 +13,22 @@ counts for 5+). An outcome also needs a place without it (an AUROC needs both
 kinds). The scores of the whole distribution (WIS, CRPS, coverage) use every year.
 The same rule serves the point estimates and every replicate of the bootstrap.
 
-The bootstrap. In each year the places are resampled by state, which keeps the
-places of one outbreak together: the states are drawn with replacement (a draw
-repeats all the places of the state), separately within each group of places
-that reached the same highest level of cases (STRATA), so a resample has places
-at every level the year has. The same draws serve every model of a condition and
-year, so the models are resampled alike. The interval is the 2.5th and 97.5th
-percentile of the means of the replicates. Fixing the number of places at every
-level at once keeps every score defined in every replicate, but it also holds the
-few places of the highest levels in every replicate, so the intervals are narrower
-than those of a resample that splits the places at one level only. It counts the
-sampling of the places;
-it does not count that other years could have looked different, so for a year
-with one or two places of a level those places stay in every replicate and the
-interval is narrow.
+The bootstrap. In each year the places are resampled by cluster. The cluster of a
+place is its state, with the states joined where an outbreak crosses their border
+(outbreak_clusters.bootstrap_clusters), so the places of one state, and of one
+outbreak, stay together. Each score is resampled for its own level of cases: the
+places with that many cases or more are separated from the others, and within each
+of the two groups the clusters are drawn with replacement (a draw repeats all the
+places of the cluster). Splitting only on the outcome of the score keeps at least
+one place with the outcome and one without in every replicate, so the score is
+defined, and it lets which places carry the outbreaks vary. The scores without a
+level (and those at 0+, which every place has) are resampled without a split.
+Every kind of resample has draws of its own, made from the seed, the condition, the
+year and the level, so the models of a condition and year are resampled alike and
+the scores of a level are the same whichever levels are computed. The interval is
+the 2.5th and 97.5th percentile of the means of the replicates. It counts the
+sampling of the places; it does not count that other years could have looked
+different.
 """
 
 import re
@@ -40,15 +42,14 @@ from outbreak_size.county_scores import (
     CONDITIONS,
     DISTRIBUTION_COLUMNS,
     OUTCOME_LEVELS,
-    POINT_LEVELS,
     ScoreBook,
     score_places,
 )
 from outbreak_size.place_scores import score_column
 
-# the groups of places resampled separately: those whose highest level of cases is
-# the same
-STRATA = tuple(sorted({0, *OUTCOME_LEVELS, *POINT_LEVELS}))
+# the kind of resample of the scores that have no level (and of those at 0+): no
+# split of the places
+PLAIN = -1
 OUTCOME_METRICS = (
     "AUROC",
     "AUPRC",
@@ -59,6 +60,13 @@ OUTCOME_METRICS = (
 )
 LEVEL_PATTERN = re.compile(r", (\d+)\+")
 LOWER, UPPER = 2.5, 97.5
+
+
+def resample_kind(level):
+    """The kind of resample a score is computed on: its own level (the places with
+    that many cases or more against the others), or PLAIN for a score without a
+    level or at 0+, which every place has."""
+    return PLAIN if level is None or level == 0 else level
 
 
 def column_level(column):
@@ -85,11 +93,12 @@ def level_is_scored(truth, level, outcome):
 @dataclass
 class YearPlaces:
     """The places of one model in one year under one condition, with the values
-    that score_places needs. `state` is the cluster of each place (an integer)."""
+    that score_places needs. `cluster` is the cluster of each place (an integer): its
+    state, with the states joined where an outbreak crosses their border."""
 
     truth: np.ndarray
     score: np.ndarray
-    state: np.ndarray
+    cluster: np.ndarray
     windows: dict | None
     forecast: np.ndarray | None
     distribution: dict | None
@@ -100,7 +109,7 @@ class YearPlaces:
         return YearPlaces(
             rep(self.truth),
             rep(self.score),
-            rep(self.state),
+            rep(self.cluster),
             None
             if self.windows is None
             else {k: rep(v) for k, v in self.windows.items()},
@@ -123,18 +132,24 @@ class YearPlaces:
         )
 
 
-def stratified_multiplicity(truth, state, rng):
-    """How many times each place is drawn: in each group of places with the same
-    highest level of cases, the states are drawn with replacement and every place
-    of a state is repeated as many times as its state was drawn."""
-    truth, state = np.asarray(truth), np.asarray(state)
-    stratum = np.searchsorted(STRATA, truth, side="right") - 1
+def stratified_multiplicity(truth, cluster, rng, level=PLAIN):
+    """How many times each place is drawn: the places with `level` cases or more
+    are separated from the others (no split for PLAIN), in each of the groups the
+    clusters are drawn with replacement, and every place of a cluster is repeated
+    as many times as its cluster was drawn."""
+    truth, cluster = np.asarray(truth), np.asarray(cluster)
+    stratum = (
+        np.zeros(len(truth), dtype=int)
+        if level == PLAIN
+        else (truth >= level).astype(int)
+    )
     multiplicity = np.zeros(len(truth), dtype=int)
     for s in np.unique(stratum):
         members = np.flatnonzero(stratum == s)
-        states, inverse = np.unique(state[members], return_inverse=True)
+        clusters, inverse = np.unique(cluster[members], return_inverse=True)
         drawn = np.bincount(
-            rng.integers(0, len(states), len(states)), minlength=len(states)
+            rng.integers(0, len(clusters), len(clusters)),
+            minlength=len(clusters),
         )
         multiplicity[members] = drawn[inverse]
     return multiplicity
@@ -152,16 +167,25 @@ def score_columns(row):
 
 
 def summarize(
-    model, condition, years, windows, replicates, seed, condition_index
+    model,
+    condition,
+    years,
+    windows,
+    replicates,
+    seed,
+    condition_index,
+    levels=None,
 ):
     """
     The mean over each window of the yearly scores of one model and condition, with
     the interval of the bootstrap.
 
-    years: {year: YearPlaces}; windows: {label: [years]}; the draws of the
-    bootstrap are made from seed, the condition and the year only, so every model
-    of the condition gets the same ones. Returns {window label: {column: (mean,
-    lower, upper)}}.
+    years: {year: YearPlaces}; windows: {label: [years]}; the draws of each kind
+    of resample are made from seed, the condition, the year and the level only, so
+    every model of the condition gets the same ones. `levels`, if given, are the
+    kinds of resample to compute (levels of cases, and PLAIN): the scores of the
+    other kinds get no interval (NaN) and the rest are those of a full run.
+    Returns {window label: {column: (mean, lower, upper)}}.
     """
     year_list = sorted(years)
     unit_rows = {y: years[y].row(model, y, condition) for y in year_list}
@@ -183,15 +207,23 @@ def summarize(
             for y in year_list
         ]
     )
+    # the kind of resample of each column, and the kinds to compute
+    kind_of = [resample_kind(column_level(c)) for c in columns]
+    kinds = sorted(k for k in set(kind_of) if levels is None or k in levels)
     reps = np.full((replicates, len(year_list), len(columns)), np.nan)
     for j, y in enumerate(year_list):
-        rng = np.random.default_rng([seed, condition_index, y])
-        for b in range(replicates):
-            resample = years[y].take(
-                stratified_multiplicity(years[y].truth, years[y].state, rng)
-            )
-            row = resample.row(model, y, condition)
-            reps[b, j] = [row[c] for c in columns]
+        for kind in kinds:
+            of_kind = [i for i, k in enumerate(kind_of) if k == kind]
+            # PLAIN is -1: the entries of the seed are not negative
+            rng = np.random.default_rng([seed, condition_index, y, kind + 1])
+            for b in range(replicates):
+                resample = years[y].take(
+                    stratified_multiplicity(
+                        years[y].truth, years[y].cluster, rng, kind
+                    )
+                )
+                row = resample.row(model, y, condition)
+                reps[b, j, of_kind] = [row[columns[i]] for i in of_kind]
 
     def mean_over(values, in_window):
         """The mean over the years of the window that count, ignoring a missing
@@ -264,8 +296,9 @@ def year_places(places, groups, model, condition, year):
     The YearPlaces of a model in a year under a condition, from the place file
     (place_scores.place_score_table) and the groups of value_groups: the places
     the condition scores (all of them, or those with a case for the outbreak
-    cases), their cases, the score of the model, their state, and the forecast and
-    distribution scores if the model has draws in the condition.
+    cases), their cases, the score of the model, their cluster (the cluster column of the place file),
+    and the forecast and distribution scores if the model has draws in the
+    condition.
     """
     rows = places.filter(pl.col("year") == year)
     outbreak = condition == CONDITIONS[1]
@@ -297,9 +330,9 @@ def year_places(places, groups, model, condition, year):
     return YearPlaces(
         truth=truth,
         score=rows[score_column(condition, model)].to_numpy()[keep],
-        state=np.unique(rows["state"].to_numpy()[keep], return_inverse=True)[
-            1
-        ],
+        cluster=np.unique(
+            rows["cluster"].to_numpy()[keep], return_inverse=True
+        )[1],
         windows=windows,
         forecast=forecast,
         distribution=distribution,

@@ -526,7 +526,7 @@ def replace_state_rows(df, state, new_rows):
 
 
 # The 2025-26 school year ("year" 2025) of the counties the compiled
-# spreadsheet does not have, from the data owner's file of 2 Nov 2026
+# spreadsheet does not have, from the data owner's file of that school year
 VACCINATION_2025_FILE = "vaxexempt2026 - forprod [Nov 2].csv"
 
 
@@ -702,18 +702,18 @@ def add_2025_vaccination_rows(df, data_dir):
     )
 
 
-# The data owner's file of 9 Nov 2026 (the same layout as VACCINATION_2025_FILE)
-VACCINATION_NOV9_FILE = "vaxexempt2026 - forprod_Nov9_2026.csv"
+# The data owner's revised file (the same layout as VACCINATION_2025_FILE)
+VACCINATION_REVISED_FILE = "vaxexempt2026 - forprod_Nov9_2026.csv"
 
 
-def nov9_county_rows(data_dir, state):
+def revised_file_county_rows(data_dir, state):
     """
-    The county rows of `state` of VACCINATION_NOV9_FILE: year (as the file
+    The county rows of `state` of VACCINATION_REVISED_FILE: year (as the file
     labels it), state, county and the four values as numbers (nonmed, med,
     mmr, allv).
     """
     raw = pl.read_csv(
-        os.path.join(data_dir, VACCINATION_NOV9_FILE),
+        os.path.join(data_dir, VACCINATION_REVISED_FILE),
         schema_overrides={"FIPS": pl.String},
         infer_schema_length=None,
         glob=False,
@@ -748,7 +748,7 @@ def fix_wyoming_year_labels(
       - the compiled spreadsheet's nonmedical exemption of Wyoming moves one
         year earlier (its value labelled 2017 is that of school year 2016);
         a year with no value after the move is blank;
-      - the MMR coverage of the data owner's file of 9 Nov 2026 is labelled
+      - the MMR coverage of the data owner's revised file is labelled
         the same way: its value labelled Y + 1 is that of school year Y. It
         fills the Wyoming MMR the spreadsheet lacks (school years 2022 and
         2023); the spreadsheet's own values (labelled by the school year)
@@ -773,16 +773,16 @@ def fix_wyoming_year_labels(
         .then(pl.col("_nonmed_shifted"))
         .otherwise(pl.col("nonmed_exempt_pct").cast(pl.Float64, strict=False))
     )
-    nov9 = nov9_county_rows(data_dir, "Wyoming").select(
+    revised = revised_file_county_rows(data_dir, "Wyoming").select(
         "state",
         "county",
         (pl.col("year") - 1).alias("year"),
-        pl.col("mmr").alias("_mmr_nov9"),
+        pl.col("mmr").alias("_mmr_revised"),
     )
     out = (
         df.drop("_nonmed_shifted")
         .join(
-            nov9,
+            revised,
             on=["state", "county", "year"],
             how="left",
             maintain_order="left",
@@ -790,10 +790,10 @@ def fix_wyoming_year_labels(
         .with_columns(
             pl.coalesce(
                 pl.col(mmr_column).cast(pl.Float64, strict=False),
-                pl.col("_mmr_nov9"),
+                pl.col("_mmr_revised"),
             ).alias(mmr_column)
         )
-        .drop("_mmr_nov9")
+        .drop("_mmr_revised")
     )
     if fips_column in out.columns:
         # the spreadsheet's blank rows (2022-2024) have no fips: a row with a
@@ -815,23 +815,23 @@ def fix_wyoming_year_labels(
 def fill_hawaii_2024_exemptions(df, data_dir):
     """
     Hawaii's county nonmedical and medical exemptions of 2024, from the data
-    owner's file of 9 Nov 2026 (the compiled spreadsheet has the 2024
+    owner's revised file (the compiled spreadsheet has the 2024
     coverage but no 2024 exemptions). Only blanks are filled.
     """
-    nov9 = (
-        nov9_county_rows(data_dir, "Hawaii")
+    revised = (
+        revised_file_county_rows(data_dir, "Hawaii")
         .filter(pl.col("year") == 2024)
         .select(
             "state",
             "county",
             "year",
-            pl.col("nonmed").alias("_nonmed_nov9"),
-            pl.col("med").alias("_med_nov9"),
+            pl.col("nonmed").alias("_nonmed_revised"),
+            pl.col("med").alias("_med_revised"),
         )
     )
     return (
         df.join(
-            nov9,
+            revised,
             on=["state", "county", "year"],
             how="left",
             maintain_order="left",
@@ -839,27 +839,27 @@ def fill_hawaii_2024_exemptions(df, data_dir):
         .with_columns(
             pl.coalesce(
                 pl.col("nonmed_exempt_pct").cast(pl.Float64, strict=False),
-                pl.col("_nonmed_nov9"),
+                pl.col("_nonmed_revised"),
             ).alias("nonmed_exempt_pct"),
             pl.coalesce(
                 pl.col("med_exempt_pct").cast(pl.Float64, strict=False),
-                pl.col("_med_nov9"),
+                pl.col("_med_revised"),
             ).alias("med_exempt_pct"),
         )
-        .drop("_nonmed_nov9", "_med_nov9")
+        .drop("_nonmed_revised", "_med_revised")
     )
 
 
-# Cells of the compiled spreadsheet that the data owner's file of 9 Nov 2026
+# Cells of the compiled spreadsheet that the data owner's revised file
 # has right (checked against the raw state files): (state, counties or None
 # for every county of the state, year, spreadsheet columns).
 #  - Virginia 2024 MMR: the spreadsheet's values sit one county row too high in
-#    three stretches (59 counties; Nov 9 equals the raw data in 125 of 126);
+#    three stretches (59 counties; the revised file equals the raw data in 125 of 126);
 #  - Florida: the values of Santa Rosa, Sarasota, Seminole, St. Johns and
 #    St. Lucie are in the wrong county order in the spreadsheet (2021
 #    exemptions, 2020 all-vaccines coverage);
 #  - Washington 2024 exemptions: the spreadsheet has the exemptions for any
-#    vaccine, Nov 9 the measles-specific ones of the other years;
+#    vaccine, the revised file the measles-specific ones of the other years;
 #  - Michigan Oakland 2024 MMR: blank in the spreadsheet.
 _FLORIDA_SWAPPED = [
     "Santa Rosa",
@@ -868,7 +868,7 @@ _FLORIDA_SWAPPED = [
     "St. Johns",
     "St. Lucie",
 ]
-NOV9_REPLACEMENTS = [
+FILE_REPLACEMENTS = [
     ("Virginia", None, 2024, ["MMR_cov"]),
     (
         "Florida",
@@ -880,7 +880,7 @@ NOV9_REPLACEMENTS = [
     ("Washington", None, 2024, ["nonmed_exempt_pct", "med_exempt_pct"]),
     ("Michigan", ["Oakland"], 2024, ["MMR_cov"]),
 ]
-_NOV9_COLUMN = {
+_REVISED_FILE_COLUMN = {
     "MMR_cov": "mmr",
     "nonmed_exempt_pct": "nonmed",
     "med_exempt_pct": "med",
@@ -890,7 +890,7 @@ _NOV9_COLUMN = {
 # Values set by hand: (state, county, year, spreadsheet column, value).
 # Washington 2024, measles-specific exemptions of the raw county counts
 # (measles exempt - measles medical, and measles medical, over the
-# kindergarten enrolment): Nov 9 has them slightly off for these three.
+# kindergarten enrolment): the revised file has them slightly off for these three.
 # South Dakota Lyman 2017: the raw data say 102% MMR coverage, with no
 # exemptions: capped at 100.
 KNOWN_VALUES = [
@@ -925,13 +925,13 @@ KNOWN_VALUES = [
 def fix_known_values(
     df,
     data_dir,
-    replacements=NOV9_REPLACEMENTS,
+    replacements=FILE_REPLACEMENTS,
     known_values=KNOWN_VALUES,
 ):
     """
     `df`, the compiled spreadsheet (its own column names, after the 2025 rows
-    are added), with the cells of NOV9_REPLACEMENTS taken from the data owner's
-    file of 9 Nov 2026 (for the counties the file has, blank or not) and those
+    are added), with the cells of FILE_REPLACEMENTS taken from the data owner's
+    revised file (for the counties the file has, blank or not) and those
     of KNOWN_VALUES set. A county named in either list that is not in the spreadsheet is an
     error: a misspelled county would silently fix nothing. Run it before
     apply_qc_exclusions, so that an excluded county-year stays excluded.
@@ -945,8 +945,8 @@ def fix_known_values(
     height = df.height
     df = df.with_columns(_key=key("county"))
     for state, counties, year, columns in replacements:
-        nov9 = (
-            nov9_county_rows(data_dir, state)
+        revised = (
+            revised_file_county_rows(data_dir, state)
             .filter(pl.col("year") == year)
             .with_columns(_key=key("county"))
             .unique("_key", keep="first", maintain_order=True)
@@ -954,23 +954,23 @@ def fix_known_values(
         in_rows = (pl.col("state") == state) & (pl.col("year") == year)
         wanted = None if counties is None else {_name_key(c) for c in counties}
         if wanted is not None:
-            missing = wanted - set(nov9["_key"])
+            missing = wanted - set(revised["_key"])
             missing |= wanted - set(df.filter(in_rows)["_key"])
             if missing:
                 raise ValueError(
                     f"{state} {year}: counties not in the spreadsheet or in "
-                    f"the file of 9 Nov 2026: {sorted(missing)}"
+                    f"the revised file: {sorted(missing)}"
                 )
-            nov9 = nov9.filter(pl.col("_key").is_in(sorted(wanted)))
-        elif nov9.height == 0 or df.filter(in_rows).height == 0:
+            revised = revised.filter(pl.col("_key").is_in(sorted(wanted)))
+        elif revised.height == 0 or df.filter(in_rows).height == 0:
             raise ValueError(f"{state} {year}: no rows to fix")
-        renamed = {_NOV9_COLUMN[c]: f"_{c}_nov9" for c in columns}
+        renamed = {_REVISED_FILE_COLUMN[c]: f"_{c}_revised" for c in columns}
         df = df.join(
-            nov9.select(
+            revised.select(
                 pl.lit(state).alias("state"),
                 pl.lit(year, dtype=pl.Int64).alias("year"),
                 "_key",
-                pl.lit(True).alias("_in_nov9"),
+                pl.lit(True).alias("_in_revised"),
                 *[pl.col(old).alias(new) for old, new in renamed.items()],
             ),
             on=["state", "year", "_key"],
@@ -981,12 +981,12 @@ def fix_known_values(
         # Lunenburg has no 2024 MMR in the file, and the spreadsheet's value
         # there is its neighbour's (one row off)
         df = df.with_columns(
-            pl.when(in_rows & pl.col("_in_nov9").fill_null(False))
-            .then(pl.col(f"_{c}_nov9").cast(df.schema[c]))
+            pl.when(in_rows & pl.col("_in_revised").fill_null(False))
+            .then(pl.col(f"_{c}_revised").cast(df.schema[c]))
             .otherwise(pl.col(c))
             .alias(c)
             for c in columns
-        ).drop(["_in_nov9", *[f"_{c}_nov9" for c in columns]])
+        ).drop(["_in_revised", *[f"_{c}_revised" for c in columns]])
     for state, county, year, column, value in known_values:
         is_row = (
             (pl.col("state") == state)

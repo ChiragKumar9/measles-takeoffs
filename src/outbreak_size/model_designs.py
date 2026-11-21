@@ -29,8 +29,8 @@ from outbreak_size.model_inputs import (
 from outbreak_size.model_selection import (
     LARGEST_GAP_COLUMN,
     MEAN_AUROC_COLUMN,
-    MEAN_GAP_COLUMN,
     SUMMARY_LABEL,
+    WEIGHTED_GAP_COLUMN,
 )
 
 # the training windows: the years since this one, or (negative) that many
@@ -48,11 +48,11 @@ SET_COLUMNS = {
     "MMR coverage + exemptions": (IV_COLUMNS, []),
     "All covariates": (IV_COLUMNS, REGRESSION_COLUMNS),
 }
-# S2 ranks the models by their mean gap from the best of the pool; models tied
-# on it are ordered by these scores of the cases including imports, averaged
+# S2 ranks the models by their event-weighted mean gap from the best of the
+# pool; models tied on it are ordered by these scores of the cases including imports, averaged
 # over 2022-2025 (S1), the first one first, higher first
 TIE_BREAKS = ("AUPRC, 5+ (%)", "AUROC, 10+ (%)", "AUPRC, 10+ (%)")
-GAP_COLUMN = MEAN_GAP_COLUMN
+GAP_COLUMN = WEIGHTED_GAP_COLUMN
 CANDIDATES_SHOWN = 3
 
 
@@ -154,8 +154,8 @@ def design_model(design, rows, scaled, adjacency_matrix, **model_arguments):
 def select_best_statistical_model(s3, s1):
     """
     The design that the S2 table (model_consistency_across_years) ranks first
-    among the statistical models: the smallest mean gap from the best of the
-    pool in the AUROC for 5+ cases, ties (the same rounded gap) broken by
+    among the statistical models: the smallest event-weighted mean gap from
+    the best of the pool in the AUROC for 5+ cases, ties (the same rounded gap) broken by
     TIE_BREAKS on the S1 means. Returns the design and the first
     CANDIDATES_SHOWN models of the ranking with their gaps (the models near the top are
     often within a tenth of a point).

@@ -24,16 +24,19 @@ from shapely.geometry import MultiPolygon, Polygon
 from sklearn.linear_model import TheilSenRegressor
 
 from outbreak_size import scenario_tables
+from outbreak_size.doses import kindergarten_cohorts
 from outbreak_size.importation import (
     future_importation_draws,
     scale_importation_probability,
 )
 from outbreak_size.interventions import (
+    build_projection_rows,
     coverage_change_fit,
     state_coverage_changes,
 )
 from outbreak_size.samples_io import load_samples
 from outbreak_size.scenarios import VACCINATION_SCENARIO_LABELS
+from outbreak_size.utils import CENSUS_CACHE_PATH, CensusCache
 from outbreak_size.validation import require_same_fips, require_width
 
 data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
@@ -1197,17 +1200,70 @@ def _draw_loaders(output_dir, baseline_fips):
     return load_baseline, load_intervention
 
 
+LOCATIONS_YEAR = 2027
+
+
 def _locations(output_dir, columns):
     """The state, county and population of each county, from the 2027
     projection dataset."""
     return (
         pl.read_csv(
-            os.path.join(output_dir, "projection_dataset_baseline_2027.csv"),
+            os.path.join(
+                output_dir, f"projection_dataset_baseline_{LOCATIONS_YEAR}.csv"
+            ),
             schema_overrides={"fips": pl.String},
         )
         .select(columns)
         .unique()
     )
+
+
+def _county_locations(output_dir):
+    """The state, county, population and kindergarten cohort of each county:
+    the cohort is a fifth of the population aged 5-9 of the Census vintage of
+    the population (outbreak_size.doses), read from the saved Census answers
+    (outputs/census_cache.sqlite, a required input of this table)."""
+    locations = _locations(output_dir, ["fips", "state", "county", "pop"])
+    cohorts = kindergarten_cohorts(
+        locations["fips"].to_list(),
+        locations["pop"].to_list(),
+        LOCATIONS_YEAR,
+        CensusCache(CENSUS_CACHE_PATH),
+    )
+    return locations.with_columns(kindergarten_cohort=pl.Series(cohorts))
+
+
+def _coverage_change_loader(output_dir):
+    """`load(intervention, scenario, year)`: {fips: coverage of the
+    intervention minus the scenario's baseline coverage (percentage points)},
+    from the same projection rows that script 11 gave the model
+    (build_projection_rows of the scenario's projection dataset and the
+    intervention base). Each file is read once."""
+    projections, bases = {}, {}
+
+    def load(intervention, scenario, year):
+        if (scenario, year) not in projections:
+            projections[(scenario, year)] = pl.read_csv(
+                os.path.join(
+                    output_dir, f"projection_dataset_{scenario}_{year}.csv"
+                ),
+                schema_overrides={"fips": pl.String},
+            )
+        if intervention not in bases:
+            bases[intervention] = pl.read_csv(
+                os.path.join(
+                    output_dir, f"intervention_base_{intervention}.csv"
+                ),
+                schema_overrides={"fips": pl.String},
+            )
+        baseline = projections[(scenario, year)]
+        rows = build_projection_rows(
+            baseline, bases[intervention], intervention
+        )
+        change = rows["estimated_mmr_cov"] - baseline["estimated_mmr_cov"]
+        return dict(zip(baseline["fips"].to_list(), change.to_list()))
+
+    return load
 
 
 def create_intervention_effects_table(
@@ -1233,12 +1289,13 @@ def create_intervention_effects_table(
         future_years,
         load_baseline,
         load_intervention,
-        _locations(output_dir, ["fips", "state", "county", "pop"]),
+        _county_locations(output_dir),
         importation_samples,
         importation_count_samples,
         baseline_fips,
         VACCINATION_SCENARIO_LABELS,
         INTERVENTION_TABLE_LABELS,
+        _coverage_change_loader(output_dir),
     )
     results_df.write_csv(output_path)
     print(f"\nIntervention effects table saved to {output_path}")
@@ -1270,12 +1327,13 @@ def create_state_intervention_effects_table(
         future_years,
         load_baseline,
         load_intervention,
-        _locations(output_dir, ["fips", "state", "pop"]),
+        _county_locations(output_dir),
         importation_samples,
         importation_count_samples,
         baseline_fips,
         VACCINATION_SCENARIO_LABELS,
         INTERVENTION_TABLE_LABELS,
+        _coverage_change_loader(output_dir),
     )
     results_df.write_csv(output_path)
     print(f"\nState-level intervention effects table saved to {output_path}")

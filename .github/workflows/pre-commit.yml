@@ -1,9 +1,9 @@
 name: pre-commit
 
+# Runs on every push (any branch) and on every pull request, like the tests
 on:
   pull_request:
   push:
-    branches: [main]
 
 jobs:
   pre-commit:

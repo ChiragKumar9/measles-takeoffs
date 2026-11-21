@@ -29,8 +29,8 @@ from outbreak_size.model_designs import (
     trained_since,
 )
 from outbreak_size.model_selection import (
-    MEAN_GAP_COLUMN,
     SUMMARY_LABEL,
+    WEIGHTED_GAP_COLUMN,
     YEARS,
 )
 
@@ -229,8 +229,9 @@ def outcome_counts(counts):
 
 def candidate_table(s1, s2, pool, limit=None):
     """
-    The models of `pool` ("Statistical" or "Mechanistic") with their mean gap
-    from the best of the pool over the years of the choice and their AUROC for
+    The models of `pool` ("Statistical" or "Mechanistic") with their
+    event-weighted mean gap from the best of the pool over the years of the
+    choice and their AUROC for
     5+ cases in every year (S2), and the means of S1 over the same years, the
     smallest gap first (the first `limit` models if given).
     """
@@ -241,9 +242,9 @@ def candidate_table(s1, s2, pool, limit=None):
     yearly = [f"AUROC, 5+ (%), {year}" for year in YEARS]
     table = (
         s2.filter(pl.col("Pool") == pool)
-        .select("Model", MEAN_GAP_COLUMN, *yearly)
+        .select("Model", WEIGHTED_GAP_COLUMN, *yearly)
         .join(means, on="Model", how="left", maintain_order="left")
-        .sort(MEAN_GAP_COLUMN, maintain_order=True)
+        .sort(WEIGHTED_GAP_COLUMN, maintain_order=True)
     )
     return table if limit is None else table.head(limit)
 
@@ -299,7 +300,7 @@ def format_candidates(table, numbered=None):
     year_width = 5 * len(YEARS) + len(YEARS) - 1
     s1_width = 10 * len(s1_labels) - 1
     header = (
-        f"{'#':>2}  {'model':<{width}}  {'gap':>5}  "
+        f"{'#':>2}  {'model':<{width}}  {'wgap':>5}  "
         + " ".join(f"{y:>5}" for y in YEARS)
         + "  "
         + " ".join(f"{label:>9}" for label in s1_labels)
@@ -318,7 +319,7 @@ def format_candidates(table, numbered=None):
         )
         lines.append(
             f"{number:>2}  {name:<{width}}  "
-            f"{_number(row[MEAN_GAP_COLUMN], 2):>5}  "
+            f"{_number(row[WEIGHTED_GAP_COLUMN], 2):>5}  "
             + " ".join(f"{_number(row[c], 1):>5}" for c in yearly)
             + "  "
             + " ".join(

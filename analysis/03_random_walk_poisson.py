@@ -43,7 +43,7 @@ with open("params.yml", "r") as f:
     params = yaml.safe_load(f)
 
 # RESUME_03=1 skips the fits that already have a row of this version of the code (one with a min_bfmi) in the
-# convergence file, so that a run that was killed (it was, out of memory, on 2026-11-12) goes on with the fits it did
+# convergence file, so that a run that was killed (for example, out of memory) goes on with the fits it did
 # not reach instead of starting again; the files of the skipped fits are not touched. Unset, every fit is run.
 RESUME_03 = os.environ.get("RESUME_03") == "1"
 CONVERGENCE_FILE = os.path.join(

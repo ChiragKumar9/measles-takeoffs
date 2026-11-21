@@ -45,7 +45,7 @@ from outbreak_size.samples_io import save_samples
 NUM_SAMPLES = 15
 TARGET_ACCEPT_PROB = 0.85
 # fits of the baseline loop whose divergences and r_hat did not pass at 0.85
-# even with the non-centred CAR field (scratchpad/probe_out, 2026-11-11):
+# even with the non-centred CAR field (found in probe runs of the loop):
 # fit label -> its target acceptance. At 0.95 the non-centred fit of the
 # 2021-2025 rows with known imports has r_hat 1.009, n_eff 457 and no
 # divergences (r_hat 1.016 and 3 divergences at 0.85; r_hat 1.018 and n_eff 318

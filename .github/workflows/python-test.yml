@@ -12,6 +12,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # The Python version is that of `.python-version` (in git), which uv
+      # reads: without it uv would take the runner's system Python (3.14 on
+      # ubuntu-latest), for which some locked packages (pyogrio, pandas) have no
+      # wheel and would be built from source, which needs GDAL.
       - name: install uv
         uses: astral-sh/setup-uv@v6
         with:
@@ -19,5 +23,8 @@ jobs:
 
       # Only the `test` dependency group (pytest, numpy, polars, addfips), not
       # the whole project: the tests use no data files and no model code.
+      # `--no-build` makes uv install wheels only: a package that has none for
+      # this Python fails at once, naming it, instead of starting a build
+      # that needs system libraries.
       - name: run the tests
-        run: uv run --locked --only-group test pytest -q
+        run: uv run --locked --only-group test --no-build pytest -q

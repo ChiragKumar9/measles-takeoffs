@@ -145,6 +145,60 @@ def outbreak_place_clusters(
     return fips, cases, cluster, matrix
 
 
+def bootstrap_clusters(places, adjacency_data, regions, min_cases=3):
+    """
+    The cluster of each place of ONE year for the bootstrap of the scores
+    (outbreak_size.summary_scores): its state, with the states joined whenever
+    an outbreak cluster crosses their border. The places of a state share its
+    import rate, and the places of an outbreak that spans a border share the
+    outbreak, so both stay together when the places are resampled.
+
+    `places` has one row per place of the year, with fips (a county fips, or
+    the name of a region), state and cases_outbreak (numbers). The outbreak
+    clusters are those of outbreak_place_clusters (places with `min_cases` or
+    more outbreak cases, joined by borders). Returns an integer array, one
+    group per place in the order of `places`.
+    """
+    states = places["state"].to_list()
+    state_index = {s: i for i, s in enumerate(dict.fromkeys(states))}
+    state_of_place = dict(zip(places["fips"].to_list(), states))
+    fips, _, cluster, _ = outbreak_place_clusters(
+        places.with_columns(year=pl.lit(0)),
+        adjacency_data,
+        regions,
+        0,
+        min_cases,
+    )
+    joined = np.zeros((len(state_index), len(state_index)))
+    for k in np.unique(cluster):
+        members = sorted(
+            {
+                state_index[state_of_place[f]]
+                for f, c in zip(fips, cluster)
+                if c == k
+            }
+        )
+        for other in members[1:]:
+            joined[members[0], other] = joined[other, members[0]] = 1
+    _, group = connected_components(joined, directed=False)
+    return np.array([group[state_index[s]] for s in states])
+
+
+def place_file_clusters(places, adjacency_data):
+    """
+    bootstrap_clusters for the places of a year as the table scripts have them
+    (fips, state and cases_outbreak, which may be text), with the regions of
+    region_members.
+    """
+    return bootstrap_clusters(
+        places.select(
+            "fips", "state", pl.col("cases_outbreak").cast(pl.Int64)
+        ),
+        adjacency_data,
+        region_members(),
+    )
+
+
 def clusters_holding(fips, cluster, seeds):
     """The clusters (integers) that hold one of `seeds`; a seed that is not an
     outbreak place (not in `fips`) holds none."""

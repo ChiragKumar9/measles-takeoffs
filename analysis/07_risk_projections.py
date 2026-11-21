@@ -211,7 +211,7 @@ if __name__ == "__main__":
         ),
         seed=params["seed"],
         non_centered_car=NON_CENTERED_CAR,
-        label=design.name,
+        label=f"{design.name} (globals prior sd {GLOBALS_PRIOR_SD})",
         spatial=design.spatial,
         init_strategy=init_to_median(num_samples=50),
         target_accept_prob=0.7,

@@ -12,8 +12,10 @@ coverage, population and prior cases, and the import model alone.
 There is no gap from the best of a pool (a pool has one model here), and the
 scores of 2026 are not part of S1 or S2, which stay on 2021-2025. Every score
 has the lower and upper end of a 95% interval from the bootstrap of the places
-that S1 uses (by state, within groups of places that reached the same level of
-cases; outbreak_size.summary_scores): it counts the sampling of the places of
+that S1 uses (by cluster, a state joined to the states of an outbreak that
+crosses its border, each score on its own split of the places with its level of
+cases or more against the others; outbreak_size.summary_scores): it counts the
+sampling of the places of
 the year, as one year has no other year to vary (`--replicates` for fewer than
 1000, for a quick look).
 
@@ -59,6 +61,7 @@ from outbreak_size.model_selection import (
     POPULATION_RANK_MODEL_NAME,
     PRIOR_CASES_MODEL_NAME,
 )
+from outbreak_size.outbreak_clusters import place_file_clusters
 from outbreak_size.place_scores import place_score_table, place_value_table
 from outbreak_size.poisson import LIKELIHOODS
 from outbreak_size.prior_cases import place_key, prior_cases_score
@@ -365,11 +368,24 @@ if __name__ == "__main__":
                 for level, v in window_all.items()
             ]
         )
+        # the cluster of each place for the bootstrap: its state, joined to the
+        # states of an outbreak that crosses a border
+        adjacency_data = pl.read_csv(
+            os.path.join(data_dir, "county_adjacencies.txt"),
+            separator="|",
+            schema_overrides={
+                "County GEOID": pl.String,
+                "Neighbor GEOID": pl.String,
+            },
+        )
+        kept = kept.with_columns(
+            pl.Series("cluster", place_file_clusters(kept, adjacency_data))
+        )
         place_table = place_score_table(
             {YEAR: kept},
             place_scores,
             CONDITIONS,
-            [*COVARIATES, *window_columns],
+            [*COVARIATES, *window_columns, "cluster"],
         )
         value_table = place_value_table(
             scores.place_values, {YEAR: mask_introduced}, CONDITIONS

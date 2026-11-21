@@ -176,6 +176,31 @@ def test_scenario_table_importation_columns_summarize_the_draws():
     )
 
 
+def test_scenario_table_has_the_expected_cases_with_importations():
+    """Baseline cases are 0.5 * [10, 20, 30] + 1 = [6, 11, 16] in every
+    draw, so the mean, the median and the ends of the interval are those."""
+    out = scenario_table(
+        vaccination_scenarios=["baseline"], future_years=[2026]
+    )
+    for statistic in ("mean", "median", "p025", "p975"):
+        assert out[f"expected_cases_{statistic}"].to_list() == pytest.approx(
+            [6.0, 11.0, 16.0]
+        )
+    # draws that differ: the county's cases are 0.5 * draw + 1, with the
+    # outbreak draws 10, 20 and 30
+    varying = jnp.array([[10.0] * 3, [20.0] * 3, [30.0] * 3])
+    out = scenario_table(
+        vaccination_scenarios=["baseline"],
+        future_years=[2026],
+        all_future_samples={("baseline", 2026): varying},
+    )
+    assert out["expected_cases_mean"].to_list() == pytest.approx([11.0] * 3)
+    assert out["expected_cases_median"].to_list() == pytest.approx([11.0] * 3)
+    # the 2.5% and 97.5% percentiles of 6, 11 and 16
+    assert out["expected_cases_p025"].to_list() == pytest.approx([6.25] * 3)
+    assert out["expected_cases_p975"].to_list() == pytest.approx([15.75] * 3)
+
+
 def test_a_worsening_scenario_is_bounded_by_the_first_years_baseline():
     """Cases of county x under the worsening scenario (5) are below the
     baseline's of 2026 (10), so they are raised to 10 before the table is
@@ -271,11 +296,21 @@ LOCATIONS = pl.DataFrame(
         "state": ["A", "A", "B", "B"],
         "county": ["x", "y", "z", "w"],
         "pop": [100, 400, 1000, 500],
+        "kindergarten_cohort": [10.0, 40.0, 100.0, 50.0],
     }
 )
 
 
-def intervention_args(load_intervention=intervention_pkg, years=(2026, 2027)):
+def flat_coverage_change(intervention, scenario, year):
+    """+5 points in every county, every year."""
+    return {fips: 5.0 for fips in BASELINE_FIPS}
+
+
+def intervention_args(
+    load_intervention=intervention_pkg,
+    years=(2026, 2027),
+    load_coverage_change=flat_coverage_change,
+):
     return dict(
         interventions=["ban", "improve"],
         vaccination_scenarios=["baseline"],
@@ -287,7 +322,15 @@ def intervention_args(load_intervention=intervention_pkg, years=(2026, 2027)):
         baseline_fips=BASELINE_FIPS,
         scenario_labels={"baseline": "Baseline"},
         intervention_labels=INTERVENTION_LABELS,
+        load_coverage_change=load_coverage_change,
     )
+
+
+def nationwide_args():
+    """The arguments of the nationwide table (it has no doses)."""
+    args = intervention_args()
+    del args["load_coverage_change"]
+    return args
 
 
 def test_county_effects_cover_the_counties_both_project():
@@ -297,6 +340,76 @@ def test_county_effects_cover_the_counties_both_project():
     assert sorted(set(out["fips"])) == ["01", "02", "04"]  # not county 03
     assert out.height == 3 * 2 * 2  # counties, years and interventions
     assert out["intervention"].unique().sort().to_list() == ["Ban", "Improve"]
+
+
+def test_county_effects_carry_the_population_of_each_county():
+    """The population of each county (the one its incidence percentile uses)
+    is a column of every row, the same in every year, intervention and
+    scenario."""
+    out = st.county_intervention_effects(
+        locations=LOCATIONS, **intervention_args()
+    )
+    expected = dict(zip(LOCATIONS["fips"], LOCATIONS["pop"]))
+    assert out["population"].to_list() == [
+        expected[fips] for fips in out["fips"]
+    ]
+    assert out.columns.index("population") == out.columns.index("fips") + 1
+
+
+def test_county_doses_are_two_per_added_child_floored_and_cumulative():
+    """Cohorts 10 (county 01), 40 (02) and 50 (04). County 01 gains 5 points
+    in 2026 (5% of 10 = 0.5 children, 1 dose) and loses 3 in 2027 (floored:
+    no doses); county 02 gains 10 points each year (4 children, 8 doses a
+    year, 8 then 16 in all); county 04 gains none."""
+    changes = {
+        2026: {"01": 5.0, "02": 10.0, "03": 0.0, "04": 0.0},
+        2027: {"01": -3.0, "02": 10.0, "03": 0.0, "04": 0.0},
+    }
+
+    def load_coverage_change(intervention, scenario, year):
+        return changes[year]
+
+    out = st.county_intervention_effects(
+        locations=LOCATIONS,
+        **intervention_args(load_coverage_change=load_coverage_change),
+    )
+    ban = out.filter(pl.col("intervention") == "Ban").sort("fips", "year")
+    by_county = {
+        fips: ban.filter(pl.col("fips") == fips) for fips in ("01", "02", "04")
+    }
+    assert by_county["01"]["kindergarten_cohort"].to_list() == [10.0, 10.0]
+    assert by_county["01"]["coverage_increase_pp"].to_list() == [5.0, 0.0]
+    assert by_county["01"]["additional_doses"].to_list() == pytest.approx(
+        [1.0, 0.0]
+    )
+    assert by_county["01"][
+        "cumulative_additional_doses"
+    ].to_list() == pytest.approx([1.0, 1.0])
+    assert by_county["02"]["additional_doses"].to_list() == pytest.approx(
+        [8.0, 8.0]
+    )
+    assert by_county["02"][
+        "cumulative_additional_doses"
+    ].to_list() == pytest.approx([8.0, 16.0])
+    assert by_county["04"]["cumulative_additional_doses"].to_list() == [0, 0]
+    # the cumulative sum restarts for each intervention
+    improve = out.filter(
+        (pl.col("intervention") == "Improve") & (pl.col("fips") == "02")
+    ).sort("year")
+    assert improve["cumulative_additional_doses"].to_list() == pytest.approx(
+        [8.0, 16.0]
+    )
+
+
+def test_a_county_missing_from_the_coverage_changes_is_an_error():
+    def load_coverage_change(intervention, scenario, year):
+        return {"01": 5.0, "02": 5.0}  # no county 04
+
+    with pytest.raises(KeyError):
+        st.county_intervention_effects(
+            locations=LOCATIONS,
+            **intervention_args(load_coverage_change=load_coverage_change),
+        )
 
 
 def test_county_percent_change_is_against_the_baseline_and_cumulates():
@@ -360,6 +473,34 @@ def test_an_intervention_that_changes_its_counties_between_years_is_refused():
         )
 
 
+def test_state_doses_sum_the_counties_doses():
+    """State A (counties 01 and 02, cohorts 10 and 40): 1 + 8 = 9 doses in
+    2026, then 0 (county 01 below the baseline, floored) + 8 = 8 in 2027,
+    17 in all; state B (county 04, cohort 50) gets none."""
+    changes = {
+        2026: {"01": 5.0, "02": 10.0, "03": 0.0, "04": 0.0},
+        2027: {"01": -3.0, "02": 10.0, "03": 0.0, "04": 0.0},
+    }
+    out = st.state_intervention_effects(
+        locations=LOCATIONS,
+        **intervention_args(
+            load_coverage_change=lambda intervention, scenario, year: changes[
+                year
+            ]
+        ),
+    )
+    ban = out.filter(pl.col("intervention") == "Ban").sort("state", "year")
+    a = ban.filter(pl.col("state") == "A")
+    b = ban.filter(pl.col("state") == "B")
+    assert a["kindergarten_cohort"].to_list() == [50.0, 50.0]
+    assert a["additional_doses"].to_list() == pytest.approx([9.0, 8.0])
+    assert a["cumulative_additional_doses"].to_list() == pytest.approx(
+        [9.0, 17.0]
+    )
+    assert b["kindergarten_cohort"].to_list() == [50.0, 50.0]
+    assert b["cumulative_additional_doses"].to_list() == [0.0, 0.0]
+
+
 def test_state_effects_sum_the_counties_of_each_state():
     """Under 'ban' state A (counties 01 and 02) has 5 + 10 = 15 cases against
     30 (-50%); state B has only county 04 here, with 40 against 40 (the
@@ -377,9 +518,7 @@ def test_state_effects_sum_the_counties_of_each_state():
 
 
 def test_nationwide_summary_has_baseline_and_interventions():
-    out = st.nationwide_summary(
-        **{k: v for k, v in intervention_args().items()}
-    )
+    out = st.nationwide_summary(**nationwide_args())
     assert out["intervention"].unique().sort().to_list() == [
         "Ban",
         "Improve",

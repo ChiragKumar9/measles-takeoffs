@@ -8,8 +8,8 @@ S1 and S2, which every script that needs the models reads (no script chooses a
 model by itself).
 
 It prints the number of places with cases in each year (the scores of a year
-with few places are not stable), the statistical models with the smallest mean
-gap from the best of the pool over 2022-2025 (S2) and their scores (S1), and
+with few places are not stable), the statistical models with the smallest
+event-weighted mean gap from the best of the pool over 2022-2025 (S2) and their scores (S1), and
 the mechanistic models, then asks for the two models and one line on why. Only
 a single-chain mechanistic model can be the headline (the models with the
 outbreaks of several chains are sensitivity analyses).
@@ -101,9 +101,10 @@ if __name__ == "__main__":
     print("\n".join(format_outcome_counts(outcome_counts(counts))))
     statistical = candidate_table(s1, s2, "Statistical")
     print(
-        f"\nStatistical models, the smallest mean gap from the best of the "
-        f"pool over {SUMMARY_LABEL} first (the first {LISTED} of "
-        f"{statistical.height}; the gap is in AUROC points for 5+ cases):"
+        f"\nStatistical models, the smallest event-weighted mean gap from "
+        f"the best of the pool over {SUMMARY_LABEL} first (the first "
+        f"{LISTED} of {statistical.height}; the gap is in AUROC points for "
+        f"5+ cases, each year weighted by its places with 5+ cases):"
     )
     listed_statistical = statistical["Model"].to_list()[:LISTED]
     print(

@@ -15,8 +15,8 @@ not used to select them.
 
 consistency_table describes how close every model is to the best model of its pool in
 each year, and whether it was passed forward from each year. best_of_pool gives
-the best model of a pool: the smallest mean gap from the best of the pool, over
-the years given.
+the best model of a pool: the smallest event-weighted mean gap from the best of
+the pool (each year weighted by its places with 5+ cases), over the years given.
 """
 
 import numpy as np
@@ -46,6 +46,13 @@ BEST_MODEL_YEARS = YEARS[1:]
 SUMMARY_LABEL = f"{BEST_MODEL_YEARS[0]}-{BEST_MODEL_YEARS[-1]}"
 MEAN_AUROC_COLUMN = f"Mean AUROC, 5+ (%), {SUMMARY_LABEL}"
 MEAN_GAP_COLUMN = f"Mean gap from the best of the pool, {SUMMARY_LABEL}"
+# the mean gap with every year weighted by its events: the places with 5+ cases
+# of the cases including imports (the outcome of the AUROC that ranks the
+# models), the same for every model of a year
+EVENT_WEIGHT_COLUMN = "Places with 5+ cases"
+WEIGHTED_GAP_COLUMN = (
+    f"Event-weighted mean gap from the best of the pool, {SUMMARY_LABEL}"
+)
 LARGEST_GAP_COLUMN = f"Largest gap from the best of the pool, {SUMMARY_LABEL}"
 
 
@@ -59,6 +66,17 @@ def _value(table, model, year, condition, metric):
     assert rows.height == 1, (model, year, condition, rows.height)
     value = rows[metric].item()
     return np.nan if value is None else float(value)
+
+
+def _weighted_mean(values, weights):
+    """The mean of `values` with each weighted by `weights`; a missing value
+    (NaN) is left out, and the result is NaN when no weight is left."""
+    values = np.asarray(values, dtype=float)
+    weights = np.asarray(weights, dtype=float)
+    keep = ~np.isnan(values) & (weights > 0)
+    if not keep.any():
+        return np.nan
+    return float(np.sum(values[keep] * weights[keep]) / weights[keep].sum())
 
 
 def _keys(table, models, year):
@@ -91,12 +109,14 @@ def consistency_table(table, pools, pass_forward, comparators):
     One row for each model: its AUROC in each year, its rank in each year (the
     rank of one_year_ahead_table), whether it was passed forward from each year
     (its rank is within the number to pass forward from its pool), its gap from the best AUROC of its pool in
-    each year (in points), the mean and the largest gap over 2022-2025 (the
-    years the headline model is chosen on), and the
+    each year (in points), the mean gap over 2022-2025 (the years the headline
+    model is chosen on), the same mean with each year weighted by its places
+    with 5+ cases (the events of the AUROC that ranks the models, from the
+    place counts of `table`), the largest gap over those years, and the
     number of years it was passed forward (its rank within the number passed
     forward from its pool, of the 5 years; the models passed forward from 2025 are
     not scored in a later year); the models of a pool are sorted by their
-    mean gap. The comparators have their AUROC only.
+    event-weighted mean gap. The comparators have their AUROC only.
     """
     metric = SELECTION_METRICS[0]
     out = []
@@ -107,6 +127,11 @@ def consistency_table(table, pools, pass_forward, comparators):
         }
         ranks = {y: rank_models(_keys(table, models, y)) for y in YEARS}
         best = {y: np.nanmax(list(values[y].values())) for y in YEARS}
+        # the places with 5+ cases of each year (the same for every model)
+        events = {
+            y: _value(table, models[0], y, CASES, EVENT_WEIGHT_COLUMN)
+            for y in YEARS
+        }
         rows = []
         for model in models:
             aurocs = [values[y][model] for y in YEARS]
@@ -134,12 +159,18 @@ def consistency_table(table, pools, pass_forward, comparators):
                     for y in YEARS
                 }
             )
+            row.update(
+                {f"{EVENT_WEIGHT_COLUMN}, {y}": events[y] for y in YEARS}
+            )
             summary = [YEARS.index(y) for y in BEST_MODEL_YEARS]
             row[MEAN_AUROC_COLUMN] = float(
                 np.nanmean([aurocs[i] for i in summary])
             )
             row[MEAN_GAP_COLUMN] = float(
                 np.nanmean([gaps[i] for i in summary])
+            )
+            row[WEIGHTED_GAP_COLUMN] = _weighted_mean(
+                [gaps[i] for i in summary], [events[YEARS[i]] for i in summary]
             )
             row[LARGEST_GAP_COLUMN] = float(
                 np.nanmax([gaps[i] for i in summary])
@@ -148,7 +179,13 @@ def consistency_table(table, pools, pass_forward, comparators):
                 sum(ranks[y][model] <= pass_forward[pool] for y in YEARS)
             )
             rows.append(row)
-        rows.sort(key=lambda r: r[MEAN_GAP_COLUMN])
+        # the smallest event-weighted gap first (a gap that cannot be
+        # computed last)
+        rows.sort(
+            key=lambda r: np.inf
+            if np.isnan(r[WEIGHTED_GAP_COLUMN])
+            else r[WEIGHTED_GAP_COLUMN]
+        )
         out.extend(rows)
     for model in comparators.values():
         aurocs = [_value(table, model, y, CASES, metric) for y in YEARS]
@@ -162,23 +199,26 @@ def consistency_table(table, pools, pass_forward, comparators):
 
 
 def best_of_pool(consistency, pool, years):
-    """The model of `pool` with the smallest mean gap from the best of the pool
-    over `years` (the yearly gaps of consistency_table, in the AUROC for 5+
-    cases). Two models with the same mean gap are an error: nothing here
-    would decide between them."""
-    gaps = (
-        consistency.filter(pl.col("Pool") == pool)
-        .select(
-            "Model",
-            pl.mean_horizontal(
-                [f"Gap from the best of the pool, {y}" for y in years]
-            ).alias("gap"),
+    """The model of `pool` with the smallest event-weighted mean gap from the
+    best of the pool over `years` (the yearly gaps of consistency_table, in the
+    AUROC for 5+ cases, each year weighted by its places with 5+ cases). Two
+    models with the same gap are an error: nothing here would decide between
+    them."""
+    gaps = sorted(
+        (
+            _weighted_mean(
+                [row[f"Gap from the best of the pool, {y}"] for y in years],
+                [row[f"{EVENT_WEIGHT_COLUMN}, {y}"] for y in years],
+            ),
+            row["Model"],
         )
-        .sort("gap", maintain_order=True)
+        for row in consistency.filter(pl.col("Pool") == pool).iter_rows(
+            named=True
+        )
     )
-    if gaps.height > 1 and gaps["gap"][0] == gaps["gap"][1]:
+    if len(gaps) > 1 and gaps[0][0] == gaps[1][0]:
         raise ValueError(
-            f"{gaps['Model'][0]} and {gaps['Model'][1]} tie for the best of "
+            f"{gaps[0][1]} and {gaps[1][1]} tie for the best of "
             f"the {pool} pool over {years[0]}-{years[-1]}"
         )
-    return gaps["Model"][0]
+    return gaps[0][1]

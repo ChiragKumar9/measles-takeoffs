@@ -35,14 +35,18 @@ figures/:
   (they do not depend on the model);
 - supplemental_data_s1_county_level_prediction_scoring.csv: every model's scores
   averaged over 2021-2025 and over 2022-2025, each with the lower and upper end
-  of a 95% interval from a bootstrap of the places within each year, by state
-  (outbreak_size.summary_scores). A year with no place of the level of cases a
+  of a 95% interval from a bootstrap of the places within each year
+  (outbreak_size.summary_scores): the places are drawn by cluster (a state,
+  joined to the states of an outbreak that crosses its border) and each score
+  on its own split of the places with its level of cases or more against the
+  others. A year with no place of the level of cases a
   score is about is left out of that score's mean. The means are checked
   against the yearly scores, and 1000
-  bootstrap replicates take about 25 minutes (`--replicates` for fewer);
+  bootstrap replicates take about 2 to 3 hours (`--replicates` for fewer);
 - supplemental_data_s2_model_consistency_across_years.csv: how close each
   model is to the best model of its pool in every year, and its mean gap over
-  2022-2025 (the years the headline model is chosen on).
+  2022-2025 (the years the headline model is chosen on), also with each year
+  weighted by its places with 5+ cases.
 """
 
 import argparse
@@ -81,6 +85,7 @@ from outbreak_size.model_selection import (
     PRIOR_CASES_MODEL_NAME,
     consistency_table,
 )
+from outbreak_size.outbreak_clusters import place_file_clusters
 from outbreak_size.place_scores import place_score_table, place_value_table
 from outbreak_size.poisson import LIKELIHOODS
 from outbreak_size.prior_cases import place_key, prior_cases_score
@@ -649,11 +654,26 @@ if __name__ == "__main__":
     # the outcomes of the "any window" metrics go with the places: whether each had
     # that many cases in its year or a later one
     window_columns = [window_column(level) for level in window_levels]
+    # the cluster of each place for the bootstrap of S1: its state, joined to the
+    # states of an outbreak that crosses a border
+    adjacency_data = pl.read_csv(
+        os.path.join(data_dir, "county_adjacencies.txt"),
+        separator="|",
+        schema_overrides={
+            "County GEOID": pl.String,
+            "Neighbor GEOID": pl.String,
+        },
+    )
     places_by_year = {
         year: counties.with_columns(
             [
                 pl.Series(window_column(level), window_labels[idx][level])
                 for level in window_levels
+            ]
+            + [
+                pl.Series(
+                    "cluster", place_file_clusters(counties, adjacency_data)
+                )
             ]
         )
         for idx, (year, counties) in enumerate(
@@ -664,7 +684,7 @@ if __name__ == "__main__":
         places_by_year,
         place_scores,
         CONDITIONS,
-        [*COVARIATES, *window_columns],
+        [*COVARIATES, *window_columns, "cluster"],
     )
     print(
         "places with no value, by covariate: "

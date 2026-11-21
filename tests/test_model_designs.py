@@ -32,6 +32,7 @@ from outbreak_size.model_selection import (
     MEAN_AUROC_COLUMN,
     MEAN_GAP_COLUMN,
     SUMMARY_LABEL,
+    WEIGHTED_GAP_COLUMN,
 )
 
 N = 4
@@ -206,6 +207,7 @@ def s2(gaps):
             **{
                 MEAN_AUROC_COLUMN: 90.0 - g,
                 MEAN_GAP_COLUMN: g,
+                WEIGHTED_GAP_COLUMN: g,
                 LARGEST_GAP_COLUMN: 2 * g,
             },
         )
@@ -218,6 +220,7 @@ def s2(gaps):
             **{
                 MEAN_AUROC_COLUMN: 91.0,
                 MEAN_GAP_COLUMN: 0.0,
+                WEIGHTED_GAP_COLUMN: 0.0,
                 LARGEST_GAP_COLUMN: 0.0,
             },
         )
@@ -270,7 +273,7 @@ def test_the_smallest_mean_gap_of_the_statistical_pool_is_selected():
     )
     assert design.name == B
     assert candidates["Model"].to_list() == [B, A, C]
-    assert candidates[MEAN_GAP_COLUMN].to_list() == [
+    assert candidates[WEIGHTED_GAP_COLUMN].to_list() == [
         1.2,
         1.3,
         1.4,

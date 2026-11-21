@@ -3,8 +3,11 @@ Read the school-level files published by states (the "state files" of the
 school-data zip in data/, drive-download-*.zip) into one table in the layout of
 school_vaccination.standardize, for analysis/assemble_school_vaccination.py.
 
-Five states have a reader (outbreak_size.school_state_files): Maryland, New
-York, California, South Carolina and Ohio. The county of each school is the
+Fifteen states have a reader (outbreak_size.school_state_files): California,
+Colorado, Indiana, Iowa, Maine, Maryland, Massachusetts, Minnesota, New York,
+North Carolina, Ohio, Pennsylvania, South Carolina, Texas and Wisconsin. Iowa,
+Maine and South Carolina are read from PDFs with `pdftotext` (poppler), which
+must be installed. The county of each school is the
 county its file names; a school whose label names two counties has no county
 and is left out (printed). Row ids are unique across states.
 

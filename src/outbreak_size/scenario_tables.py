@@ -16,6 +16,7 @@ import jax.numpy as jnp
 import numpy as np
 import polars as pl
 
+from outbreak_size.doses import additional_doses
 from outbreak_size.ranking import risk_percentile
 from outbreak_size.validation import require_same_fips
 
@@ -100,8 +101,9 @@ def vaccination_scenario_effects(
     """
     The risk percentiles of each county in each vaccination scenario and
     year: one row per county, year and scenario, with the county's
-    importation probability (mean, median and 95% interval over the draws) and
-    its risk percentile by cases and by incidence.
+    importation probability and expected cases with importations (each the
+    mean, median and 95% interval over the draws) and its risk percentile by
+    cases and by incidence.
 
     `future_base_df` has the counties (fips, state, county and pop) in the
     order of the columns of the draws, `all_future_samples` the outbreak
@@ -164,6 +166,14 @@ def vaccination_scenario_effects(
             cases_county = cases_with_importations(
                 raw, importation_samples, importation_count_samples
             )
+            # the expected cases (with importations) and their 95% interval
+            # over the draws, the cases the risk percentiles are made from
+            (
+                cases_mean,
+                cases_median,
+                cases_p025,
+                cases_p975,
+            ) = draw_summary(cases_county, axis=0)
 
             # --- SINGLE-YEAR risk percentiles ---
             count_rank, incidence_rank = risk_ranks(cases_county, common_pop)
@@ -176,6 +186,10 @@ def vaccination_scenario_effects(
                         "vaccination_scenario": [scenario_labels[vac_scenario]]
                         * len(common_fips),
                         **probability_columns,
+                        "expected_cases_mean": _float_column(cases_mean),
+                        "expected_cases_median": _float_column(cases_median),
+                        "expected_cases_p025": _float_column(cases_p025),
+                        "expected_cases_p975": _float_column(cases_p975),
                         "count_risk_percentile": _float_column(count_rank),
                         "incidence_risk_percentile": _float_column(
                             incidence_rank
@@ -380,20 +394,29 @@ def county_intervention_effects(
     baseline_fips,
     scenario_labels,
     intervention_labels,
+    load_coverage_change,
 ):
     """
     The percent change in outbreak size of each county under each
     intervention, in each vaccination scenario and year: one row per county,
     year, scenario and intervention, with the change in that year and the
     cumulative change since the first year (mean, median and 95% interval over
-    the draws), and the county's risk percentiles under the intervention.
+    the draws), the county's risk percentiles under the intervention, its
+    population, and the doses the intervention needs (outbreak_size.doses): the
+    kindergarten cohort of the county, the increase in coverage that the
+    intervention gives that year (percentage points, 0 where the intervention
+    leaves the coverage below the scenario's baseline), the doses for the
+    cohort of that year and their sum since the first year.
 
     The draws are loaded one year at a time: `load_baseline(scenario, year)`
     returns the baseline draws (one column per county of `baseline_fips`) and
     `load_intervention(intervention, scenario, year)` the intervention's
     {"fips": ..., "predictions": ...}, whose counties must be the same in
-    every year. `locations` has the state, county and population of each
-    county (fips, state, county and pop).
+    every year. `locations` has the state, county, population and kindergarten
+    cohort of each county (fips, state, county, pop and kindergarten_cohort).
+    `load_coverage_change(intervention, scenario, year)` returns {fips: the
+    coverage of the intervention minus the scenario's baseline coverage, in
+    percentage points} for every county that the intervention projects.
     """
     fips_to_idx = {f: i for i, f in enumerate(baseline_fips)}
     imp = importation_samples
@@ -405,6 +428,7 @@ def county_intervention_effects(
             "state": row["state"],
             "county": row["county"],
             "pop": row["pop"],
+            "kindergarten_cohort": row["kindergarten_cohort"],
         }
 
     # one block of rows (a frame, not a list of dicts) for each scenario,
@@ -439,7 +463,13 @@ def county_intervention_effects(
             # the county columns of the rows of every year
             county_locations = [
                 fips_to_location.get(
-                    fips, {"state": "Unknown", "county": "Unknown", "pop": 0}
+                    fips,
+                    {
+                        "state": "Unknown",
+                        "county": "Unknown",
+                        "pop": 0,
+                        "kindergarten_cohort": 0,
+                    },
                 )
                 for fips in common_fips
             ]
@@ -449,7 +479,26 @@ def county_intervention_effects(
                     location["county"] for location in county_locations
                 ],
                 "fips": common_fips,
+                # the population of the county (the one that its risk
+                # percentile per person uses; the same in every year)
+                "population": [
+                    int(round(location["pop"]))
+                    for location in county_locations
+                ],
+                # the children of a kindergarten cohort (a fifth of those
+                # aged 5-9)
+                "kindergarten_cohort": _float_column(
+                    [
+                        location["kindergarten_cohort"]
+                        for location in county_locations
+                    ]
+                ),
             }
+            cohort = np.asarray(
+                county_columns["kindergarten_cohort"], dtype=float
+            )
+            # the doses since the first year, for each county
+            cumulative_doses = np.zeros(len(common_fips))
 
             del first_pkg  # Free memory
 
@@ -530,6 +579,26 @@ def county_intervention_effects(
                     cumulative_pct_change_p975,
                 ) = draw_summary(cumulative_pct_change_samples, axis=0)
 
+                # --- the doses of this year's cohort ---
+                # the coverage change of every county the intervention
+                # projects must be there: a missing county is an error, not 0
+                coverage_change = load_coverage_change(
+                    intervention, vac_scenario, year
+                )
+                change = np.array(
+                    [coverage_change[f] for f in common_fips], dtype=float
+                )
+                n_floored = int((change < 0).sum())
+                print(
+                    f"    {year}: the intervention leaves the coverage below "
+                    f"the baseline's in {n_floored} of {len(change)} counties "
+                    "(no doses there)"
+                )
+                # doses = 2 [doses per child] * cohort [children] *
+                # max(change, 0) [points] / 100 [points per fraction]
+                doses = additional_doses(cohort, change)
+                cumulative_doses = cumulative_doses + doses
+
                 # The rows of the counties of this year, as a frame
                 blocks.append(
                     pl.DataFrame(
@@ -566,6 +635,13 @@ def county_intervention_effects(
                             "cumulative_pct_change_p975": _float_column(
                                 cumulative_pct_change_p975
                             ),
+                            "coverage_increase_pp": _float_column(
+                                np.maximum(change, 0.0)
+                            ),
+                            "additional_doses": _float_column(doses),
+                            "cumulative_additional_doses": _float_column(
+                                cumulative_doses
+                            ),
                         }
                     )
                 )
@@ -599,19 +675,27 @@ def state_intervention_effects(
     baseline_fips,
     scenario_labels,
     intervention_labels,
+    load_coverage_change,
 ):
     """
     The percent change in outbreak size of each state under each
     intervention, in each vaccination scenario and year: one row per state,
     year, scenario and intervention, as `county_intervention_effects` but
-    for the sum of the state's counties (`locations` has fips, state and pop of
-    each county). The inputs are those of `county_intervention_effects`.
+    for the sum of the state's counties (`locations` has fips, state, pop and
+    kindergarten_cohort of each county). The inputs are those of
+    `county_intervention_effects`. The doses of a state are the sum of the
+    doses of its counties (each county's increase in coverage floored at 0
+    before its doses are computed), in the counties the intervention projects;
+    its kindergarten cohort is the sum of those counties' cohorts.
     """
     fips_to_idx = {f: i for i, f in enumerate(baseline_fips)}
     imp = importation_samples
     imp_count = importation_count_samples
 
     fips_to_state = dict(zip(locations["fips"], locations["state"]))
+    fips_to_cohort = dict(
+        zip(locations["fips"], locations["kindergarten_cohort"])
+    )
 
     # Calculate state populations
     state_pop = locations.group_by("state").agg(
@@ -657,6 +741,19 @@ def state_intervention_effects(
 
             del first_pkg
 
+            # the kindergarten cohort of each projected county, and the
+            # doses since the first year of each state
+            cohort = np.array(
+                [fips_to_cohort[f] for f in common_fips], dtype=float
+            )
+            state_cohort = {
+                state: float(
+                    cohort[np.asarray(state_to_col_indices[state])].sum()
+                )
+                for state in unique_states
+            }
+            cumulative_doses_by_state = {state: 0.0 for state in unique_states}
+
             for year in future_years:
                 baseline_samples = load_baseline(vac_scenario, year)
                 intervention_pkg = load_intervention(
@@ -668,6 +765,27 @@ def state_intervention_effects(
                     f"{intervention} {vac_scenario} {year}",
                 )
                 pred = intervention_pkg["predictions"]
+
+                # the doses of the cohort of this year in each county (as in
+                # county_intervention_effects: a county missing from the
+                # coverage changes is an error), summed to the states
+                coverage_change = load_coverage_change(
+                    intervention, vac_scenario, year
+                )
+                change = np.array(
+                    [coverage_change[f] for f in common_fips], dtype=float
+                )
+                county_doses = additional_doses(cohort, change)
+                doses_by_state = {
+                    state: float(
+                        county_doses[
+                            np.asarray(state_to_col_indices[state])
+                        ].sum()
+                    )
+                    for state in unique_states
+                }
+                for state in unique_states:
+                    cumulative_doses_by_state[state] += doses_by_state[state]
 
                 # Calculate cases for this year (county level)
                 # Shape: (n_samples, n_common_counties)
@@ -784,6 +902,11 @@ def state_intervention_effects(
                             ],
                             "cumulative_pct_change_p975": cumulative_pct_change[
                                 "p975"
+                            ],
+                            "kindergarten_cohort": state_cohort[state],
+                            "additional_doses": doses_by_state[state],
+                            "cumulative_additional_doses": cumulative_doses_by_state[
+                                state
                             ],
                         }
                     )

@@ -852,7 +852,7 @@ if __name__ == "__main__":
         vaccination_data, data_dir
     )
 
-    # cells of the spreadsheet the data owner's file of 9 Nov 2026 (or the raw
+    # cells of the spreadsheet the data owner's revised file (or the raw
     # state files) have right, before the places that failed the QC are removed
     vaccination_data = vaccination_wrangling.fix_known_values(
         vaccination_data, data_dir
@@ -863,7 +863,7 @@ if __name__ == "__main__":
         vaccination_data, params["qc_exclusions"]
     )
     # Wyoming's year labels (recording year, not school year) and the 2024
-    # Hawaii exemptions of the data owner's file of 9 Nov 2026, as in 00
+    # Hawaii exemptions of the data owner's revised file, as in 00
     vaccination_data = vaccination_wrangling.fix_wyoming_year_labels(
         vaccination_data, data_dir, mmr_column="MMR_cov", fips_column="FIPS"
     )

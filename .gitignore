@@ -408,7 +408,5 @@ poetry.lock
 *.lock
 !uv.lock
 
-.python-version
-
 # Emacs
 *~

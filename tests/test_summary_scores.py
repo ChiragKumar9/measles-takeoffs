@@ -26,7 +26,7 @@ def places(truth, offset=0.0):
     return YearPlaces(
         truth=truth,
         score=truth + np.linspace(0, 1, len(truth)) + offset,
-        state=np.array([0, 0, 1, 1, 2, 2, 3, 3, 4, 4]),
+        cluster=np.array([0, 0, 1, 1, 2, 2, 3, 3, 4, 4]),
         windows={level: truth >= level for level in (1, 5, 10, 20)},
         forecast=None,
         distribution=None,
@@ -60,22 +60,82 @@ def test_a_year_is_scored_at_a_level_when_places_reach_it():
     assert level_is_scored([4, 5, 6], 3, outcome=False)
 
 
-def test_the_places_of_a_state_are_drawn_together_within_their_level():
+def test_the_places_of_a_cluster_are_drawn_together_within_their_level():
     truth = np.array([0, 0, 12, 0, 0, 0])
-    state = np.array([0, 0, 1, 2, 2, 3])
+    cluster = np.array([0, 0, 1, 2, 2, 3])
     rng = np.random.default_rng(0)
     for _ in range(50):
-        m = stratified_multiplicity(truth, state, rng)
+        m = stratified_multiplicity(truth, cluster, rng, level=10)
         # the only place of 10+ cases is the only member of its group: always once
         assert m[2] == 1
-        # the two places of state 0 are drawn together, and so are those of state 2
+        # the two places of cluster 0 are drawn together, and so are those of cluster 2
         assert m[0] == m[1] and m[3] == m[4]
-    # states are resampled with replacement: not every draw is the same
+    # clusters are resampled with replacement: not every draw is the same
     draws = {
-        tuple(stratified_multiplicity(truth, state, np.random.default_rng(s)))
+        tuple(
+            stratified_multiplicity(
+                truth, cluster, np.random.default_rng(s), level=10
+            )
+        )
         for s in range(30)
     }
     assert len(draws) > 1
+
+
+def test_a_level_splits_the_places_in_two_not_by_their_highest_level():
+    # places with 12 and 25 cases are in different clusters
+    truth = np.array([0, 0, 12, 25, 0, 0])
+    cluster = np.array([0, 0, 1, 2, 3, 3])
+    seen = set()
+    for seed in range(60):
+        rng = np.random.default_rng(seed)
+        m10 = stratified_multiplicity(truth, cluster, rng, level=10)
+        seen.add((int(m10[2]), int(m10[3])))
+        # at 10+ the two places form one group of two clusters: at least one is
+        # drawn, and the group has as many draws as it has clusters
+        assert m10[2] + m10[3] == 2
+        # at 20+ the place with 25 cases is alone in its group: always once
+        m20 = stratified_multiplicity(truth, cluster, rng, level=20)
+        assert m20[3] == 1
+    # at 10+ either of the two places can be dropped (and the other doubled)
+    assert {(0, 2), (2, 0), (1, 1)} <= seen
+    # no split: every place can be dropped
+    plain = {
+        int(
+            stratified_multiplicity(truth, cluster, np.random.default_rng(s))[
+                3
+            ]
+        )
+        for s in range(60)
+    }
+    assert 0 in plain and 2 in plain
+
+
+def test_the_scores_of_a_level_are_the_same_whichever_levels_are_computed():
+    full = summarize(
+        "m",
+        CASES,
+        YEARS,
+        {"both": [2021, 2022]},
+        replicates=12,
+        seed=3,
+        condition_index=0,
+    )["both"]
+    only_10 = summarize(
+        "m",
+        CASES,
+        YEARS,
+        {"both": [2021, 2022]},
+        replicates=12,
+        seed=3,
+        condition_index=0,
+        levels=(10,),
+    )["both"]
+    for column in ("AUROC, 10+ (%)", "Sensitivity, 10+, top 20% (%)"):
+        assert only_10[column] == full[column]
+    # the points are always there; the other levels have no interval
+    assert only_10["AUROC, 5+ (%)"][0] == full["AUROC, 5+ (%)"][0]
+    assert np.isnan(only_10["AUROC, 5+ (%)"][1])
 
 
 def test_a_year_without_a_level_is_left_out_for_that_level_only():
@@ -198,6 +258,7 @@ def test_the_places_of_a_model_come_from_the_place_file_and_the_value_table():
         {
             "year": [2021] * 4,
             "state": ["A", "A", "B", "C"],
+            "cluster": [0, 0, 1, 2],
             "cases": cases,
             "cases_outbreak": [
                 str(c) for c in [0, 1, 0, 12]
@@ -244,7 +305,7 @@ def test_the_places_of_a_model_come_from_the_place_file_and_the_value_table():
     ]  # the outbreak cases, read as numbers
     assert outbreak.score.tolist() == [0.4, 0.8] and outbreak.windows is None
     assert outbreak.forecast.tolist() == [7.0, 8.0]
-    assert outbreak.state.tolist() == [0, 1]
+    assert outbreak.cluster.tolist() == [0, 1]
 
 
 def test_the_means_of_the_summary_are_checked_against_the_yearly_table():
@@ -334,6 +395,7 @@ def test_a_single_year_summary_has_the_yearly_scores_and_an_interval():
             "year": np.full(n, 2026),
             "fips": [f"{i:05d}" for i in range(n)],
             "state": [f"S{i // 4}" for i in range(n)],
+            "cluster": [i // 4 for i in range(n)],
             "county": [f"C{i}" for i in range(n)],
             "pop": np.full(n, 1000),
             "cases": truth,
@@ -345,7 +407,7 @@ def test_a_single_year_summary_has_the_yearly_scores_and_an_interval():
         {2026: frame},
         place_scores,
         CONDITIONS,
-        [window_column(k) for k in windows],
+        ["cluster", *[window_column(k) for k in windows]],
     )
     value_table = place_value_table(
         book.place_values, {2026: introduced}, CONDITIONS

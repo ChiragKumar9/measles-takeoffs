@@ -11,6 +11,7 @@ import pytest
 from outbreak_size.outbreak_clusters import (
     CLUSTER_NAMES,
     CLUSTER_TAGS,
+    bootstrap_clusters,
     cluster_seeds_2025,
     clusters_holding,
     drop_places_of_year,
@@ -325,3 +326,39 @@ def test_only_the_plain_baseline_of_the_years_with_2025_is_fit_without_a_cluster
             False,
         )
     ]
+
+
+def test_states_are_one_cluster_for_the_bootstrap_unless_an_outbreak_crosses_a_border():
+    # state X holds A and B, state Y holds C and D, state Z holds E and F;
+    # A - B - C border, D - E border. Outbreak places (3+ cases): B (5) and C (4)
+    # border, so X and Y are joined; D has 2 cases (no outbreak place), so Z
+    # stays apart even though D borders E
+    adjacency_data = borders((A, B), (B, C), (D, E))
+    places = pl.DataFrame(
+        {
+            "fips": [A, B, C, D, E, F],
+            "state": ["X", "X", "Y", "Y", "Z", "Z"],
+            "cases_outbreak": [0, 5, 4, 2, 6, 0],
+        }
+    )
+    group = bootstrap_clusters(places, adjacency_data, {})
+    assert group[0] == group[1] == group[2] == group[3]  # X and Y joined
+    assert group[4] == group[5] and group[4] != group[0]  # Z alone
+    # E is an outbreak place that borders D (2 cases, not an outbreak place):
+    # no join; with D at 3 cases the outbreak spans Y and Z, and all three join
+    places = places.with_columns(cases_outbreak=pl.Series([0, 5, 4, 3, 6, 0]))
+    group = bootstrap_clusters(places, adjacency_data, {})
+    assert len(set(group)) == 1
+    # no outbreak place: every state is its own cluster
+    quiet = places.with_columns(cases_outbreak=pl.lit(0))
+    assert len(set(bootstrap_clusters(quiet, adjacency_data, {}))) == 3
+    # a region (named in `regions`) is joined through its counties
+    places = pl.DataFrame(
+        {
+            "fips": ["East", C],
+            "state": ["Z", "Y"],
+            "cases_outbreak": [4, 5],
+        }
+    )
+    group = bootstrap_clusters(places, borders((B, C)), {"East": [B]})
+    assert group[0] == group[1]

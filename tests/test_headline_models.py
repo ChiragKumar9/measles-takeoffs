@@ -21,8 +21,8 @@ from outbreak_size.headline_models import (
 )
 from outbreak_size.model_designs import DESIGNS_BY_NAME
 from outbreak_size.model_selection import (
-    MEAN_GAP_COLUMN,
     SUMMARY_LABEL,
+    WEIGHTED_GAP_COLUMN,
     YEARS,
 )
 
@@ -197,7 +197,7 @@ def toy_s2():
         (OTHER, "Statistical", 0.5),
         (MECHANISTIC, "Mechanistic", 0.2),
     ):
-        row = {"Pool": pool, "Model": model, MEAN_GAP_COLUMN: gap}
+        row = {"Pool": pool, "Model": model, WEIGHTED_GAP_COLUMN: gap}
         row.update({f"AUROC, 5+ (%), {y}": 80.0 + y - 2021 for y in YEARS})
         rows.append(row)
     return pl.from_dicts(rows)
@@ -235,7 +235,7 @@ def toy_s1():
 def test_the_candidates_are_listed_with_the_smallest_gap_first():
     table = candidate_table(toy_s1(), toy_s2(), "Statistical")
     assert table["Model"].to_list() == [OTHER, STATISTICAL]
-    assert table[MEAN_GAP_COLUMN].to_list() == [0.5, 1.0]
+    assert table[WEIGHTED_GAP_COLUMN].to_list() == [0.5, 1.0]
     # the S1 means are those of the window of the choice, the cases with imports
     assert table["AUROC, 5+ (%)"].to_list() == [71.0, 71.0]
     assert candidate_table(toy_s1(), toy_s2(), "Statistical", limit=1)[
@@ -339,7 +339,7 @@ def test_a_model_that_cannot_be_chosen_has_no_number():
             .filter(pl.col("Pool") == "Mechanistic")
             .with_columns(
                 pl.lit(MULTI_CHAIN).alias("Model"),
-                pl.lit(0.1).alias(MEAN_GAP_COLUMN),
+                pl.lit(0.1).alias(WEIGHTED_GAP_COLUMN),
             ),
         ]
     )

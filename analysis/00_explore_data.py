@@ -212,7 +212,7 @@ def read_vaccinations(data_dir=data_dir) -> pl.DataFrame:
     # Tennessee's 2025-26 rows, from its own file
     df = vaccination_wrangling.add_tennessee_2025_rows(df, data_dir)
 
-    # cells of the spreadsheet the data owner's file of 9 Nov 2026 (or the raw
+    # cells of the spreadsheet the data owner's revised file (or the raw
     # state files) have right, before the places that failed the QC are removed
     df = vaccination_wrangling.fix_known_values(df, data_dir)
 
@@ -264,7 +264,7 @@ def read_vaccinations(data_dir=data_dir) -> pl.DataFrame:
         .otherwise(pl.col("fips")),
     )
     # Wyoming's year labels (recording year, not school year) and the 2024
-    # Hawaii exemptions of the data owner's file of 9 Nov 2026
+    # Hawaii exemptions of the data owner's revised file
     df = vaccination_wrangling.fix_wyoming_year_labels(df, data_dir)
     df = vaccination_wrangling.fill_hawaii_2024_exemptions(df, data_dir)
     # settle the fips of every row: keep the spreadsheet's fips when it is a

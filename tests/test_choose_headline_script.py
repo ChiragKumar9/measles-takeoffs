@@ -15,9 +15,11 @@ from outbreak_size.model_selection import (
     MEAN_AUROC_COLUMN,
     MEAN_GAP_COLUMN,
     SUMMARY_LABEL,
+    WEIGHTED_GAP_COLUMN,
     YEARS,
 )
 
+SRC = os.path.join(os.path.dirname(os.path.dirname(__file__)), "src")
 SCRIPT = os.path.join(
     os.path.dirname(os.path.dirname(__file__)),
     "analysis",
@@ -46,6 +48,7 @@ def write_tables(directory):
             "Model": model,
             MEAN_AUROC_COLUMN: 80.0 - gap,
             MEAN_GAP_COLUMN: gap,
+            WEIGHTED_GAP_COLUMN: gap,
             LARGEST_GAP_COLUMN: 2 * gap,
         }
         row.update({f"AUROC, 5+ (%), {y}": 80.0 for y in YEARS})
@@ -93,12 +96,19 @@ def write_tables(directory):
 
 
 def run(directory, stdin="", *args):
+    # the package is found through src/ even in an environment that has only
+    # the test dependencies (as in CI), where it is not installed
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join([SRC, os.environ.get("PYTHONPATH", "")]),
+    }
     return subprocess.run(
         [sys.executable, SCRIPT, *args],
         cwd=directory,
         input=stdin,
         capture_output=True,
         text=True,
+        env=env,
     )
 
 
@@ -245,10 +255,8 @@ def test_a_number_outside_the_table_or_a_multi_chain_name_is_asked_again(
 
 
 def test_the_help_text_runs():
-    done = subprocess.run(
-        [sys.executable, SCRIPT, "--help"], capture_output=True, text=True
-    )
-    assert done.returncode == 0
+    done = run(os.getcwd(), "", "--help")
+    assert done.returncode == 0, done.stderr
     assert "--statistical" in done.stdout and "--rationale" in done.stdout
 
 
